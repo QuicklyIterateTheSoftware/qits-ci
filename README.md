@@ -1,0 +1,83 @@
+# qits-ci
+
+The **in-repo CI pipeline**: a repository opts in by committing
+`.config/qits/ci-post-receive.yml`; when a push lands, ci reads that config back out of the pushed
+commit, runs each step's script in a fresh container of the step's declared image, and records a
+per-step pass/fail for the push — advisory, queryable over REST.
+
+    mvn verify        # a clone of this repo alone builds and tests green — no monorepo, no docker
+
+## Layout
+
+| Module | What |
+|---|---|
+| `ci/` | `eu.wohlben.qits.ci.*` — entity, persistence, dto, mapper, control, error. The pipeline itself. No web, no JAX-RS. |
+| `service/` | `eu.wohlben.qits.ci.api` — the JAX-RS event intake, the run read surface, the token filter and the exception mapper. |
+
+Both are library jars, in the shape of the monorepo's `artifacts`/`epics` modules: a consuming
+Quarkus application pulls them in and gets the routes under its own `quarkus.rest.path`. `ci` owns
+its **own datasource, persistence unit and Flyway lineage** (`db/ci/migration`, a separate H2 under
+`~/.qits/data/ci`), which is what makes this a standalone deployable rather than a checkout of the
+monorepo. The directory names are `ci/` and `service/` because the extracted git history is
+anchored to them; the maven coordinates are `eu.wohlben.qits:qits-ci-domain` and `…-service`.
+
+## The boundary
+
+Runs reference repositories **by string id and branches by name, never a foreign key** — a deleted
+repository simply leaves runs behind as dangling history. Everything this context needs from the
+rest of qits it reaches over a URL it is configured with:
+
+| Direction | Surface | Config |
+|---|---|---|
+| in | `POST /api/ci/events/post-receive` — `{repoId, branch, oldSha, newSha}`, one per updated branch ref | guarded by `qits.ci.token` (`X-CI-Token`) |
+| in | `GET /api/ci/repositories/{repoId}/runs`, `GET /api/ci/runs/{runId}` | not token-guarded; they carry build logs, so a deployment must keep them behind its auth policy |
+| out | the git host's smart-HTTP base, for ci's **own** `git fetch` of the pushed ref | `qits.ci.git-host-url` |
+| out | the same git host as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
+
+The event sender is the git host's post-receive hook, which lives in
+[qits-artifacts](https://github.com/QuicklyIterateTheSoftware/qits-artifacts) (`CiPostReceiveNotifier`).
+It was already an HTTP call while ci ran in-process, so the split moved files, not the contract —
+only `qits.ci.intake-url` on the sending side changes.
+
+ci never touches the bare origins on disk: it keeps its **own** bare cache per repository under
+`<qits.ci.data-dir>/repos/<repoId>.git` and fetches into it over the git host's URL. That is what
+lets it run on a machine with no shared filesystem with qits.
+
+The fetch asks for the **branch ref**, not the bare sha — an unadvertised-object fetch would mean
+relaxing the git host's want policy for every unauthenticated client. ci then verifies the pushed
+sha is still an ancestor of the fetched tip: a racing push still runs, a force-pushed-away commit
+records nothing rather than a spurious red run.
+
+## Host-side by design
+
+This context runs entirely **outside** any workspace container:
+
+- `CiDockerRunner` spawns one ephemeral `docker run --rm` per step on `qits.ci.network`, with the
+  git clone of the pushed sha done by the container's own prelude.
+- `GitConfigFetcher` shells ci's own host `git` against its bare cache.
+
+That is the boundary, not residue of the monorepo. A step's script is **repo-controlled code**, so
+the step container is treated as a hostile-code sandbox: `--cap-drop=ALL`, `no-new-privileges`, no
+docker socket, and memory/pids/cpu caps (`qits.ci.memory-limit`, `…pids-limit`, `…cpus`). The
+residual gap — a push is itself unauthenticated, and running repo-committed scripts is the feature —
+is a known, documented issue.
+
+## Deploying it
+
+- Set `qits.ci.git-host-url` / `qits.ci.container-git-url` to the git host as reachable from the ci
+  host and from a step container respectively. The container-side alias only resolves on the network
+  ci itself is on, so `qits.ci.network` must be set together with it.
+- Set `qits.ci.token` and configure the git host's notifier with the same value. Blank is the
+  dev/test default and means *no guard*.
+- Allow-list `/api/ci/events/` for unauthenticated access — the caller is the git host's hook, a
+  different process with no user session. In the monorepo this lives in `auth/core`'s `PublicPaths`.
+- Keep the run **read** surface behind the deployment's auth policy. It is not token-guarded, and it
+  returns build logs.
+
+## What is deliberately *not* here
+
+The git host and its post-receive hook (qits-artifacts), the repository and workspace contexts, and
+anything to do with running a pipeline inside a workspace container. Pipelines run in their own
+throwaway containers; a workspace is never involved.
+
+Per-step timeouts, retries, and a non-advisory gate are follow-ups, not omissions of the extraction.
