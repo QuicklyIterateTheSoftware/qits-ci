@@ -6,10 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
-import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.http.ContentType;
 import io.restassured.path.json.JsonPath;
-import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -19,15 +18,27 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 /**
- * The whole MVP loop at its real seams (docs/epics/qits-ci/): a real {@code git push} through the
- * in-process git host fires the post-receive hook, whose HTTP event reaches the intake; ci fetches
- * the pushed commit back from the git host, reads {@code .config/qits/ci-post-receive.yml}, and the
- * (host-process) fake runner executes the steps against a real clone at the pushed sha — asserted
- * through the public read surface. Docker-free: only {@code CiDockerRunner} is faked (by {@code
+ * The whole MVP loop at the seams this repo owns (docs/epics/qits-ci/): a post-receive event
+ * reaches the intake, ci fetches the pushed commit back from the git host, reads {@code
+ * .config/qits/ci-post-receive.yml} out of it, and the (host-process) fake runner executes the
+ * steps against a real clone at the pushed sha — asserted through the public read surface.
+ * Docker-free: only {@code CiDockerRunner} is faked (by {@code
  * eu.wohlben.qits.ci.control.FakeCiStepRunner} in this module's test sources).
+ *
+ * <p><b>Where the loop starts.</b> The git host is not in this repo — it belongs to qits-artifacts,
+ * and it reaches ci over HTTP (its {@code CiPostReceiveNotifier} POSTs to {@code
+ * qits.ci.intake-url}). So the test pushes into a real bare origin laid out as {@code
+ * <git-host>/git/<repoId>} and addressed over {@code file://}, then POSTs the event itself — byte
+ * for byte the payload the notifier sends. That is exactly the surface an extracted ci service
+ * sees. The monorepo's version of this test drove a real {@code git push} through the in-process
+ * git host and let the hook fire; the assertions about the *hook's own* filtering (a branch
+ * deletion must not produce an event) went with the hook and belong to qits-artifacts.
  */
 @QuarkusTest
 public class CiPipelineBoundaryTest {
+
+  /** The all-zero sha git reports as the old id of a newly created branch. */
+  private static final String ZERO_SHA = "0".repeat(40);
 
   private static final String CONFIG_GREEN =
       """
@@ -39,22 +50,14 @@ public class CiPipelineBoundaryTest {
             echo two-ran
       """;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
-  String dataDir;
-
-  @TestHTTPResource("/git")
-  URL gitBase;
-
-  private final String fixtureUrl;
-
-  public CiPipelineBoundaryTest() throws Exception {
-    fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-  }
+  @ConfigProperty(name = "qits.ci.git-host-url")
+  String gitHostUrl;
 
   @Test
   public void pushWithConfigRecordsAGreenRunWithStepOutputs() throws Exception {
     String repoId = seedOrigin();
     String sha = pushBranchWithConfig(repoId, "ci-green", CONFIG_GREEN);
+    postReceive(repoId, "ci-green", ZERO_SHA, sha);
 
     Map<String, Object> run = awaitTerminalRun(repoId);
     assertEquals("SUCCESS", run.get("status"));
@@ -83,18 +86,20 @@ public class CiPipelineBoundaryTest {
   @Test
   public void failingScriptRecordsTheExitCodeAndSkipsTheRest() throws Exception {
     String repoId = seedOrigin();
-    pushBranchWithConfig(
-        repoId,
-        "ci-red",
-        """
-        steps:
-          - image: alpine:3
-            script: |
-              echo before-the-crash
-              exit 7
-          - image: alpine:3
-            script: echo never-runs
-        """);
+    String sha =
+        pushBranchWithConfig(
+            repoId,
+            "ci-red",
+            """
+            steps:
+              - image: alpine:3
+                script: |
+                  echo before-the-crash
+                  exit 7
+              - image: alpine:3
+                script: echo never-runs
+            """);
+    postReceive(repoId, "ci-red", ZERO_SHA, sha);
 
     Map<String, Object> run = awaitTerminalRun(repoId);
     assertEquals("FAILED", run.get("status"));
@@ -110,7 +115,8 @@ public class CiPipelineBoundaryTest {
   @Test
   public void malformedConfigRecordsAConfigErrorRun() throws Exception {
     String repoId = seedOrigin();
-    pushBranchWithConfig(repoId, "ci-broken", "steps: [unclosed\n");
+    String sha = pushBranchWithConfig(repoId, "ci-broken", "steps: [unclosed\n");
+    postReceive(repoId, "ci-broken", ZERO_SHA, sha);
 
     Map<String, Object> run = awaitTerminalRun(repoId);
     assertEquals("CONFIG_ERROR", run.get("status"));
@@ -126,7 +132,9 @@ public class CiPipelineBoundaryTest {
     git(clone, "checkout", "-q", "-b", "ci-silent");
     Files.writeString(clone.resolve("plain.txt"), "no ci here\n");
     commitAll(clone, "plain change");
+    String sha = git(clone, "rev-parse", "HEAD").trim();
     git(clone, "push", "-q", "origin", "ci-silent");
+    postReceive(repoId, "ci-silent", ZERO_SHA, sha);
 
     Thread.sleep(1500); // grace for the (absent) async run to have appeared
     assertEquals(0, listRuns(repoId).size(), "a config-less push must record nothing");
@@ -145,46 +153,59 @@ public class CiPipelineBoundaryTest {
     Files.createDirectories(configFile.getParent());
     Files.writeString(configFile, CONFIG_GREEN);
     commitAll(clone, "add ci config");
+    String replaced = git(clone, "rev-parse", "HEAD").trim();
     Files.writeString(clone.resolve("extra.txt"), "rewritten\n");
     commitAll(clone, "amended");
+    String sha = git(clone, "rev-parse", "HEAD").trim();
     git(clone, "push", "-q", "--force", "origin", "ci-rewritten");
+    postReceive(repoId, "ci-rewritten", replaced, sha);
 
     Map<String, Object> run = awaitTerminalRun(repoId);
     assertEquals("SUCCESS", run.get("status"));
-    assertEquals(
-        git(clone, "rev-parse", "HEAD").trim(),
-        run.get("commitSha"),
-        "the recorded run must belong to the pushed tip");
+    assertEquals(sha, run.get("commitSha"), "the recorded run must belong to the pushed tip");
     assertEquals(1, listRuns(repoId).size(), "one ref update ⇒ one run");
   }
 
-  @Test
-  public void branchDeletionRecordsNoRun() throws Exception {
-    String repoId = seedOrigin();
-    pushBranchWithConfig(repoId, "ci-doomed", CONFIG_GREEN);
-    awaitTerminalRun(repoId); // the creation push's run
+  // --- the wire contract the git host speaks (CiPostReceiveNotifier's payload) ---
 
-    Path clone = cloneRepo(repoId);
-    git(clone, "push", "-q", "origin", ":ci-doomed");
-    Thread.sleep(1500); // grace for a (wrongly) triggered run to have appeared
-    assertEquals(1, listRuns(repoId).size(), "a deletion must not trigger a run");
+  private void postReceive(String repoId, String branch, String oldSha, String newSha) {
+    given()
+        .contentType(ContentType.JSON)
+        .body(Map.of("repoId", repoId, "branch", branch, "oldSha", oldSha, "newSha", newSha))
+        .when()
+        .post("/api/ci/events/post-receive")
+        .then()
+        .statusCode(202);
   }
 
-  // --- git plumbing (the GitHostTest mechanics) ---
+  // --- git plumbing (the git host stands in as <base>/git/<repoId> over file://) ---
 
-  /** Seeds a bare origin at {@code <data-dir>/<repoId>/origin} from the fixture. */
+  /** The directory this suite's {@code qits.ci.git-host-url} points at. */
+  private Path gitHostRoot() {
+    return Path.of(gitHostUrl.replaceFirst("^file://", ""), "git");
+  }
+
+  /**
+   * Seeds a bare origin at {@code <git-host>/git/<repoId>} holding one commit with {@code
+   * hello.txt} — built here rather than cloned from a fixture, so the suite needs no submodule.
+   */
   private String seedOrigin() throws Exception {
     String repoId = UUID.randomUUID().toString();
-    Path origin = Path.of(dataDir, repoId, "origin");
+    Path seed = Files.createTempDirectory("ci-boundary-seed");
+    git(seed, "init", "-q", "-b", "main");
+    Files.writeString(seed.resolve("hello.txt"), "hello\n");
+    commitAll(seed, "initial");
+
+    Path origin = gitHostRoot().resolve(repoId);
     Files.createDirectories(origin.getParent());
-    git(null, "clone", "-q", "--bare", fixtureUrl, origin.toString());
+    git(null, "clone", "-q", "--bare", seed.toString(), origin.toString());
     return repoId;
   }
 
   private Path cloneRepo(String repoId) throws Exception {
     Path clone = Files.createTempDirectory("ci-boundary-clone");
     Files.delete(clone); // git clone wants to create the target itself
-    git(null, "clone", "-q", gitBase + "/" + repoId, clone.toString());
+    git(null, "clone", "-q", gitHostRoot().resolve(repoId).toString(), clone.toString());
     return clone;
   }
 
