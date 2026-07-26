@@ -3,23 +3,29 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>eu.wohlben</groupId>
-        <artifactId>qits</artifactId>
+        <groupId>eu.wohlben.qits</groupId>
+        <artifactId>qits-ci</artifactId>
         <version>1.0.0-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <!-- The CI pipeline domain (docs/epics/qits-ci/): the in-repo `.config/qits/ci-<event>.yml`
-         pipelines as a quality gate. A plain library jar like `artifacts`/`epics`: entities,
-         persistence, control, mapper, dto — NO web/JAX-RS and, deliberately, NO dependency on
-         `domain` or any `auth/*` module. Runs reference repositories/branches by *String id/name*
-         (never a JPA @ManyToOne into qits' tables) and it talks to the rest of qits only over the
-         surfaces an EXTRACTED ci service would (the git host's smart-HTTP URL, its own docker CLI
-         shell-out) — so the planned standalone deployable moves files, not data. Its REST boundary
-         (eu.wohlben.qits.ci.api) is hosted (for now) by `service`. It owns its OWN named datasource
-         + persistence unit + Flyway lineage — a separate file-based H2 under ~/.qits/data/ci (see
-         src/main/resources/META-INF/microprofile-config.properties). -->
-    <artifactId>ci</artifactId>
+    <!-- The CI pipeline domain: the in-repo `.config/qits/ci-<event>.yml` pipelines as a quality
+         gate. A plain library jar: entities, persistence, control, mapper, dto — NO web/JAX-RS
+         (that is `service`). Runs reference repositories/branches by *String id/name* (never a JPA
+         @ManyToOne into another context's tables) and this context talks to the rest of qits only
+         over the surfaces it declares: the git host's smart-HTTP URL and its own docker CLI
+         shell-out.
+
+         It owns its OWN named datasource + persistence unit + Flyway lineage — a separate
+         file-based H2 under ~/.qits/data/ci (see src/main/resources/META-INF/microprofile-config.properties).
+         That lineage is carried over from the monorepo UNCHANGED (`db/ci/migration/V1__init.sql`);
+         it was never part of the monorepo's shared V1-V45 lineage, so there was nothing to squash.
+
+         The directory stays `ci/` (the extracted git history is anchored to it) while the
+         artifactId is `qits-ci-domain`: this module is the domain layer of the qits-ci repo, and
+         `eu.wohlben.qits:qits-ci-ci` would be nonsense. -->
+    <artifactId>qits-ci-domain</artifactId>
+    <name>qits-ci :: domain</name>
 
     <dependencies>
         <dependency>
@@ -50,7 +56,7 @@
         <dependency>
             <!-- Parses the repo-committed ci-post-receive.yml (SafeConstructor — plain maps/lists
                  only, never instantiating classes from repository content). Version managed by the
-                 Quarkus BOM, same as domain's use for .qits-config.yml. -->
+                 Quarkus BOM. -->
             <groupId>org.yaml</groupId>
             <artifactId>snakeyaml</artifactId>
         </dependency>
@@ -76,6 +82,12 @@
             </plugin>
             <plugin>
                 <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <!-- The consuming Quarkus app needs an index of this jar's beans and entities; in
+                     the monorepo the reactor's own module discovery covered it. -->
+                <groupId>io.smallrye</groupId>
+                <artifactId>jandex-maven-plugin</artifactId>
             </plugin>
         </plugins>
     </build>
