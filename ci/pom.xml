@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben</groupId>
+        <artifactId>qits</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!-- The CI pipeline domain (docs/epics/qits-ci/): the in-repo `.config/qits/ci-<event>.yml`
+         pipelines as a quality gate. A plain library jar like `artifacts`/`epics`: entities,
+         persistence, control, mapper, dto — NO web/JAX-RS and, deliberately, NO dependency on
+         `domain` or any `auth/*` module. Runs reference repositories/branches by *String id/name*
+         (never a JPA @ManyToOne into qits' tables) and it talks to the rest of qits only over the
+         surfaces an EXTRACTED ci service would (the git host's smart-HTTP URL, its own docker CLI
+         shell-out) — so the planned standalone deployable moves files, not data. Its REST boundary
+         (eu.wohlben.qits.ci.api) is hosted (for now) by `service`. It owns its OWN named datasource
+         + persistence unit + Flyway lineage — a separate file-based H2 under ~/.qits/data/ci (see
+         src/main/resources/META-INF/microprofile-config.properties). -->
+    <artifactId>ci</artifactId>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-arc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-hibernate-orm-panache</artifactId>
+        </dependency>
+        <dependency>
+            <!-- ObjectMapper bean availability for consumers (no REST needed). -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jackson</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jdbc-h2</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-hibernate-validator</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Parses the repo-committed ci-post-receive.yml (SafeConstructor — plain maps/lists
+                 only, never instantiating classes from repository content). Version managed by the
+                 Quarkus BOM, same as domain's use for .qits-config.yml. -->
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.mapstruct</groupId>
+            <artifactId>mapstruct</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
