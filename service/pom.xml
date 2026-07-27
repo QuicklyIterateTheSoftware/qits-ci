@@ -16,10 +16,13 @@
          Everything that needs a web stack and therefore cannot live in the framework-free `ci`
          module.
 
-         A library JAR, not a deployable app (the monorepo packages the artifacts/epics/ci REST
-         boundaries the same way, and qits-workspaces followed it): a consuming Quarkus application
-         pulls it in and gets the routes under its own `quarkus.rest.path`. Packaging it as an app
-         would need an auth variant and a main class, neither of which belongs to this context.
+         A DEPLOYABLE APP, not a library JAR. It was extracted as a library — "a consuming Quarkus
+         application pulls it in and gets the routes under its own `quarkus.rest.path`" — because
+         packaging it would have needed an auth variant and a main class. Both reasons have lapsed:
+         authentication terminates at qits-gateway and this module reads a header (see security/),
+         and Quarkus supplies the main class.
+
+         See migration-deployables-plan.md in the superproject.
 
          The directory stays `service/` because the extracted git history is anchored to it. -->
     <artifactId>qits-ci-service</artifactId>
@@ -72,6 +75,24 @@
 
     <build>
         <plugins>
+            <plugin>
+                <!-- This module is the DEPLOYABLE, not a library jar. Augmentation is what produces
+                     target/quarkus-app/quarkus-run.jar; without this execution `mvn verify` proves
+                     the tests pass and proves nothing about whether the thing starts. Version comes
+                     from the root pom's pluginManagement. -->
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>quarkus-maven-plugin</artifactId>
+                <extensions>true</extensions>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>build</goal>
+                            <goal>generate-code</goal>
+                            <goal>generate-code-tests</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <artifactId>maven-compiler-plugin</artifactId>
             </plugin>

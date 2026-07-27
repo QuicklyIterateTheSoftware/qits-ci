@@ -14,11 +14,17 @@ per-step pass/fail for the push — advisory, queryable over REST.
 | `ci/` | `eu.wohlben.qits.ci.*` — entity, persistence, dto, mapper, control, error. The pipeline itself. No web, no JAX-RS. |
 | `service/` | `eu.wohlben.qits.ci.api` — the JAX-RS event intake, the run read surface, the token filter and the exception mapper. |
 
-Both are library jars, in the shape of the monorepo's `artifacts`/`epics` modules: a consuming
-Quarkus application pulls them in and gets the routes under its own `quarkus.rest.path`. `ci` owns
-its **own datasource, persistence unit and Flyway lineage** (`db/ci/migration`, a separate H2 under
-`~/.qits/data/ci`), which is what makes this a standalone deployable rather than a checkout of the
-monorepo. The directory names are `ci/` and `service/` because the extracted git history is
+`ci/` is a library jar. **`service/` is the application** — augmented by the `quarkus-maven-plugin`
+into a process:
+
+    ./mvnw verify
+    java -jar service/target/quarkus-app/quarkus-run.jar   # :8080, intake on /api/ci/events/post-receive
+
+It was extracted as a library, on the assumption that a consuming Quarkus application would pull it
+in and gain the routes. That application was never written and under the gateway topology never will
+be. `ci` owns its **own datasource, persistence unit and Flyway lineage** (`db/ci/migration`, a
+separate H2 under `~/.qits/data/ci`), which is what makes this a standalone deployable rather than a
+checkout of the monorepo. The directory names are `ci/` and `service/` because the extracted git history is
 anchored to them; the maven coordinates are `eu.wohlben.qits:qits-ci-domain` and `…-service`.
 
 ## The boundary

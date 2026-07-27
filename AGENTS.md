@@ -77,6 +77,20 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
+- `service/src/test/resources/application.properties` is **no longer the only copy** of
+  `quarkus.rest.path` — `src/main/resources/application.properties` carries it for the packaged
+  process. Change one and you must change both; a suite green because the *test* copy is right
+  proves nothing about what ships.
+- `OpenApiSchemaExportTest` writes `docs/openapi.yml`. Regenerate and commit when the surface
+  changes: `./mvnw -pl service test -Dtest=OpenApiSchemaExportTest`.
+  **`paths: {}` is the correct output here and not a broken generator** — all three ci operations
+  carry `@Operation(hidden = true)`, because they are machine surfaces rather than part of the JSON
+  API the Angular client consumes, and the monorepo's own document omits them for the same reason.
+  The file is committed anyway so that *unhiding* one shows up as a diff.
+  Note the test runs as a `@QuarkusTest` and indexes the test classpath, so a `@Path` resource under
+  `src/test` would land in the document — that is why `IdentityEchoResource` is hidden too.
+- A `Failed to start quarkus` / `Port already bound: 8081` failure is the known flake
+  (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first.
 - The ci module's suite is plain JUnit plus `@QuarkusTest`, and fakes the runner
   (`ci/src/test/.../FakeCiStepRunner` scripts a `StepResult` per step index).
 - The service module's `FakeCiStepRunner` is a **different, honest** fake: it performs the real step
