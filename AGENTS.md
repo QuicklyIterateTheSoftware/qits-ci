@@ -77,10 +77,12 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `service/src/test/resources/application.properties` is **no longer the only copy** of
-  `quarkus.rest.path` — `src/main/resources/application.properties` carries it for the packaged
-  process. Change one and you must change both; a suite green because the *test* copy is right
-  proves nothing about what ships.
+- App-level config lives in `service/src/main/resources/application.properties` — this module is the
+  deployable, and Quarkus merges that file into the test config rather than letting
+  `src/test/resources/application.properties` shadow it. **Never re-declare an app-level setting in
+  test resources**: a suite green because the *test* copy is right proves nothing about what ships,
+  and the two silently drift. `src/test/resources/application.properties` carries only genuine
+  test-only overrides (in-memory H2, `target/` data dir, the `file://` git-host stand-in).
 - `OpenApiSchemaExportTest` writes `docs/openapi.yml`. Regenerate and commit when the surface
   changes: `./mvnw -pl service test -Dtest=OpenApiSchemaExportTest`.
   **`paths: {}` is the correct output here and not a broken generator** — all three ci operations

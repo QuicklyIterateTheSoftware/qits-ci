@@ -13,8 +13,8 @@ import org.eclipse.microprofile.openapi.annotations.Operation;
  * Test-only: reports what the request resolved to, so the header contract can be asserted directly
  * rather than inferred from some endpoint that happens to consume an identity.
  *
- * <p>Served under {@code /api/test-identity} — the suite's {@code quarkus.rest.path=/api}
- * mirrors a consuming application's.
+ * <p>Served under {@code /api/test-identity} — the suite inherits {@code quarkus.rest.path=/api}
+ * from the application's own {@code src/main/resources/application.properties}.
  *
  * <p>Hidden from the OpenAPI document. {@code OpenApiSchemaExportTest} generates {@code
  * docs/openapi.yml} from a running {@code @QuarkusTest}, which indexes the test classpath too —
