@@ -175,6 +175,12 @@ public class CiDockerRunner implements CiStepRunner {
         + spec.script();
   }
 
+  /**
+   * The id-addressed smart-HTTP url of a repository. {@code /git} is the codebase's second-level
+   * segment for the git wire protocol, so it lives here; the configured base names only which
+   * service hosts it, and on qits-net that is qits-artifacts under its own gateway segment —
+   * {@code http://qits-artifacts:8080/artifacts} + {@code /git/<repoId>}.
+   */
   String cloneUrl(String repoId) {
     return containerGitUrl.replaceAll("/+$", "") + "/git/" + repoId;
   }

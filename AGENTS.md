@@ -30,6 +30,21 @@ The **directories** are `ci/` and `service/`; the artifactIds are `qits-ci-domai
 directory names, and generic coordinates like `eu.wohlben:ci` would collide in the shared `~/.m2`
 that every workspace container mounts.
 
+## Addressing
+
+`README.md` has the shape; two things bite when you change a path here.
+
+**`quarkus.rest.path=/ci/api` lives in `service/src/main/resources/application.properties` and the
+suite inherits it.** So a resource's `@Path` is relative to `/ci/api` and must never repeat `ci`.
+Tests address the absolute path, which is what makes them catch a prefix regression.
+
+**`CiTokenFilter` matches on `UriInfo.getPath()`, which is relative to `quarkus.rest.path`.** It
+matches the literal `events`. Move or rename `CiEventController`'s `@Path` and the guard stops
+matching — and it fails *open*, because a request the filter does not recognise is simply not
+checked. `CiTokenGuardTest` is what stands between that and shipping: it POSTs the intake's real
+address with no token and demands a 401, so a filter that quietly stopped guarding shows up as a
+202. Change the two together and keep that test on the absolute path.
+
 ## Adding a dependency on another context
 
 Don't. This context has no compile-time dependency on any other qits module and should not grow
@@ -44,7 +59,7 @@ in ci's **own** physical database; a foreign key cannot span it.
 
 Two things reaching this code are attacker-controlled and must stay that way in your head:
 
-- **The intake payload.** `/api/ci/events/` sits on the token-free allowlist and the token defaults
+- **The intake payload.** `/ci/api/events/` sits on the token-free allowlist and the token defaults
   to blank. `CiIdentifiers.require{RepoId,Branch,Sha}` validates all three *before* they reach a
   filesystem path or an argv. Never widen those, never bypass them, never interpolate an identifier
   into a shell string.

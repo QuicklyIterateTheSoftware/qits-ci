@@ -18,7 +18,7 @@ per-step pass/fail for the push — advisory, queryable over REST.
 into a process:
 
     ./mvnw verify
-    java -jar service/target/quarkus-app/quarkus-run.jar   # :8080, intake on /api/ci/events/post-receive
+    java -jar service/target/quarkus-app/quarkus-run.jar   # :8080, intake on /ci/api/events/post-receive
 
 It was extracted as a library, on the assumption that a consuming Quarkus application would pull it
 in and gain the routes. That application was never written and under the gateway topology never will
@@ -26,6 +26,22 @@ be. `ci` owns its **own datasource, persistence unit and Flyway lineage** (`db/c
 separate H2 under `~/.qits/data/ci`), which is what makes this a standalone deployable rather than a
 checkout of the monorepo. The directory names are `ci/` and `service/` because the extracted git history is
 anchored to them; the maven coordinates are `eu.wohlben.qits:qits-ci-domain` and `…-service`.
+
+## Addressing
+
+Every route this service serves lives under **`/ci`**, its gateway segment — the service name
+without the `qits-` prefix. qits-gateway routes *verbatim by prefix*, `/ci/*` → qits-ci with the
+path untouched, so the prefix is not decoration the gateway strips: the service has to serve it,
+and there is no unprefixed form. Service-to-service calls on `qits-net` bypass the gateway and
+address the same paths.
+
+Beneath the segment sits the kind of surface: `/ci/api/…` for the JSON API
+(`quarkus.rest.path`), `/ci/q/…` for what Quarkus itself serves —
+`/ci/q/openapi`, `/ci/q/swagger-ui` (`quarkus.http.non-application-root-path`, which is outside
+`quarkus.rest.path` and so has to carry the segment separately).
+
+Nothing under `/ci/api` repeats `ci` again: the segment already said it. That is the one shape
+change here beyond the prefix, along with runs becoming their own entity (below).
 
 ## The boundary
 
@@ -35,15 +51,22 @@ rest of qits it reaches over a URL it is configured with:
 
 | Direction | Surface | Config |
 |---|---|---|
-| in | `POST /api/ci/events/post-receive` — `{repoId, branch, oldSha, newSha}`, one per updated branch ref | guarded by `qits.ci.token` (`X-CI-Token`) |
-| in | `GET /api/ci/repositories/{repoId}/runs`, `GET /api/ci/runs/{runId}` | not token-guarded; they carry build logs, so a deployment must keep them behind its auth policy |
-| out | the git host's smart-HTTP base, for ci's **own** `git fetch` of the pushed ref | `qits.ci.git-host-url` |
-| out | the same git host as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
+| in | `POST /ci/api/events/post-receive` — `{repoId, branch, oldSha, newSha}`, one per updated branch ref | guarded by `qits.ci.token` (`X-CI-Token`) |
+| in | `GET /ci/api/runs?repositoryId={repoId}`, `GET /ci/api/runs/{runId}` | not token-guarded; they carry build logs, so a deployment must keep them behind its auth policy |
+| out | where the git host answers, for ci's **own** `git fetch` of the pushed ref — ci appends `/git/<repoId>` | `qits.ci.git-host-url` |
+| out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
+
+The run listing takes the repository as a **query filter, not a path segment**. ci does not own
+repositories, so `/repositories/{repoId}/runs` asserted a containment this context does not have —
+and put three services under one gateway prefix. `runs` is the entity; `{runId}` stays in the path
+because there it is identity rather than scope.
 
 The event sender is the git host's post-receive hook, which lives in
 [qits-artifacts](https://github.com/QuicklyIterateTheSoftware/qits-artifacts) (`CiPostReceiveNotifier`).
 It was already an HTTP call while ci ran in-process, so the split moved files, not the contract —
-only `qits.ci.intake-url` on the sending side changes.
+only `qits.ci.intake-url` on the sending side changes. That call is **fire-and-forget**: it swallows
+delivery failures at debug, so if the two ends disagree about the intake path nothing errors
+anywhere and CI simply never runs. Both ends are pinned to `/ci/api/events/post-receive`.
 
 ci never touches the bare origins on disk: it keeps its **own** bare cache per repository under
 `<qits.ci.data-dir>/repos/<repoId>.git` and fetches into it over the git host's URL. That is what
@@ -71,12 +94,16 @@ is a known, documented issue.
 ## Deploying it
 
 - Set `qits.ci.git-host-url` / `qits.ci.container-git-url` to the git host as reachable from the ci
-  host and from a step container respectively. The container-side alias only resolves on the network
-  ci itself is on, so `qits.ci.network` must be set together with it.
+  host and from a step container respectively. **Both end at the service, not at `/git`** — ci
+  appends `/git/<repoId>` itself, because `/git` is the codebase's segment for the smart-HTTP wire
+  protocol while *which* service hosts it is a deployment fact. The git host is qits-artifacts,
+  which serves it under its own gateway segment, so the value is `http://qits-artifacts:8080/artifacts`
+  and a fetch lands on `/artifacts/git/<repoId>`. The container-side alias only resolves on the
+  network ci itself is on, so `qits.ci.network` must be set together with it.
 - Set `qits.ci.token` and configure the git host's notifier with the same value. Blank is the
   dev/test default and means *no guard*.
-- Allow-list `/api/ci/events/` for unauthenticated access — the caller is the git host's hook, a
-  different process with no user session. In the monorepo this lives in `auth/core`'s `PublicPaths`.
+- Allow-list `/ci/api/events/` for unauthenticated access — the caller is the git host's hook, a
+  different process with no user session. That allowlist is qits-gateway's `PublicPaths`.
 - Keep the run **read** surface behind the deployment's auth policy. It is not token-guarded, and it
   returns build logs.
 

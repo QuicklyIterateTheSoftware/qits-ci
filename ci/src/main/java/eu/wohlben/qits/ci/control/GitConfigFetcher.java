@@ -103,7 +103,13 @@ public class GitConfigFetcher implements CiConfigSource {
     return true;
   }
 
-  /** Fetches the branch's current tip into a ci-private local ref (forced — branches move). */
+  /**
+   * Fetches the branch's current tip into a ci-private local ref (forced — branches move). The
+   * remote is {@code <qits.ci.git-host-url>/git/<repoId>}: {@code /git} is the codebase's
+   * second-level segment for the git wire protocol and belongs here, while the configured base
+   * names only which service hosts it — qits-artifacts, under its gateway segment, so the fetch
+   * lands on {@code /artifacts/git/<repoId>}.
+   */
   private boolean fetchBranch(Path cache, String repoId, String branch, String localRef) {
     String remote = gitHostUrl.replaceAll("/+$", "") + "/git/" + repoId;
     CiProcess.Result fetch =

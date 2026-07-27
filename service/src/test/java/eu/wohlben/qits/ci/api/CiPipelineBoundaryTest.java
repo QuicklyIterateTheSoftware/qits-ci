@@ -68,7 +68,7 @@ public class CiPipelineBoundaryTest {
     JsonPath detail =
         given()
             .when()
-            .get("/api/ci/runs/" + run.get("id"))
+            .get("/ci/api/runs/" + run.get("id"))
             .then()
             .statusCode(200)
             .extract()
@@ -104,7 +104,7 @@ public class CiPipelineBoundaryTest {
     Map<String, Object> run = awaitTerminalRun(repoId);
     assertEquals("FAILED", run.get("status"));
     JsonPath detail =
-        given().when().get("/api/ci/runs/" + run.get("id")).then().extract().jsonPath();
+        given().when().get("/ci/api/runs/" + run.get("id")).then().extract().jsonPath();
     List<Map<String, Object>> steps = detail.getList("steps");
     assertEquals("FAILED", steps.get(0).get("status"));
     assertEquals(7, steps.get(0).get("exitCode"));
@@ -121,7 +121,7 @@ public class CiPipelineBoundaryTest {
     Map<String, Object> run = awaitTerminalRun(repoId);
     assertEquals("CONFIG_ERROR", run.get("status"));
     JsonPath detail =
-        given().when().get("/api/ci/runs/" + run.get("id")).then().extract().jsonPath();
+        given().when().get("/ci/api/runs/" + run.get("id")).then().extract().jsonPath();
     assertEquals(0, detail.getList("steps").size());
   }
 
@@ -166,6 +166,13 @@ public class CiPipelineBoundaryTest {
     assertEquals(1, listRuns(repoId).size(), "one ref update ⇒ one run");
   }
 
+  @Test
+  public void runListingRequiresARepositoryFilter() {
+    // The repository is scope, and it moved from the path into ?repositoryId= — so a caller that
+    // omits it must be told, not handed every run on the instance or a misleading empty list.
+    given().when().get("/ci/api/runs").then().statusCode(400);
+  }
+
   // --- the wire contract the git host speaks (CiPostReceiveNotifier's payload) ---
 
   private void postReceive(String repoId, String branch, String oldSha, String newSha) {
@@ -173,7 +180,7 @@ public class CiPipelineBoundaryTest {
         .contentType(ContentType.JSON)
         .body(Map.of("repoId", repoId, "branch", branch, "oldSha", oldSha, "newSha", newSha))
         .when()
-        .post("/api/ci/events/post-receive")
+        .post("/ci/api/events/post-receive")
         .then()
         .statusCode(202);
   }
@@ -231,7 +238,7 @@ public class CiPipelineBoundaryTest {
   private List<Map<String, Object>> listRuns(String repoId) {
     return given()
         .when()
-        .get("/api/ci/repositories/" + repoId + "/runs")
+        .get("/ci/api/runs?repositoryId=" + repoId)
         .then()
         .statusCode(200)
         .extract()

@@ -15,11 +15,17 @@ import org.eclipse.microprofile.openapi.annotations.Operation;
 /**
  * The CI event intake (docs/epics/qits-ci/) — the wire contract between the git host's post-receive
  * hook and ci, kept HTTP even in-process so an extracted ci service receives the identical payload.
- * The only write surface of {@code /api/ci} (token-guarded by {@link CiTokenFilter}); hidden from
+ * The only write surface of {@code /ci/api} (token-guarded by {@link CiTokenFilter}); hidden from
  * the OpenAPI document (a wire/system API — like the capture/OTLP receivers — so {@code
  * docs/openapi.yml} and the generated Angular client stay untouched).
+ *
+ * <p>{@code POST /ci/api/events/post-receive} is a cross-repo contract: qits-artifacts' {@code
+ * CiPostReceiveNotifier} POSTs to exactly this path via its {@code qits.ci.intake-url}, and it is
+ * fire-and-forget — a delivery failure is logged at debug and nothing else. A mismatch here
+ * therefore raises no error anywhere; CI just stops running. The path carries no {@code ci}
+ * segment of its own because {@code quarkus.rest.path=/ci/api} already says it twice over.
  */
-@Path("/ci/events")
+@Path("/events")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class CiEventController {

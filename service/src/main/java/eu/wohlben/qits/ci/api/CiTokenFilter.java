@@ -11,8 +11,8 @@ import java.util.Set;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
- * Guards the ci <b>write</b> surface (the event intake under {@code /api/ci/}) with a single static
- * token — this is a pure system API (docs/epics/qits-ci/). The paths are on {@code auth-core}'s
+ * Guards the ci <b>write</b> surface (the event intake under {@code /ci/api/events/}) with a single
+ * static token — this is a pure system API (docs/epics/qits-ci/). The paths are on the gateway's
  * token-free {@code PublicPaths} allowlist (the caller is the git host's post-receive hook — after
  * extraction, a different process with no user session), so this filter is the write protection;
  * the {@code ArtifactsTokenFilter} pattern exactly.
@@ -39,13 +39,15 @@ public class CiTokenFilter implements ContainerRequestFilter {
     if (token == null) {
       return; // open in dev/test — no token configured
     }
-    // getPath() is relative to the JAX-RS base (/api); normalize any leading slash. A write to
-    // /api/ci/... lands here as "ci/...".
+    // getPath() is relative to the JAX-RS base (quarkus.rest.path, /ci/api); normalize any leading
+    // slash. A write to /ci/api/events/... lands here as "events/...". Matching the resource rather
+    // than the whole service is deliberate: the intake is the write surface, and a future write
+    // elsewhere under /ci/api should have to opt into this guard consciously.
     String path = requestContext.getUriInfo().getPath();
     if (path.startsWith("/")) {
       path = path.substring(1);
     }
-    if (!(path.equals("ci") || path.startsWith("ci/"))
+    if (!(path.equals("events") || path.startsWith("events/"))
         || !WRITE_METHODS.contains(requestContext.getMethod())) {
       return;
     }

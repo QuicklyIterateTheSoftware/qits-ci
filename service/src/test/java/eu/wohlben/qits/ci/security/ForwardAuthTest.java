@@ -26,7 +26,7 @@ class ForwardAuthTest {
     given()
         .header("X-Qits-User", "alice")
         .when()
-        .get("/api/test-identity")
+        .get("/ci/api/test-identity")
         .then()
         .statusCode(200)
         .body("anonymous", equalTo(false))
@@ -38,7 +38,7 @@ class ForwardAuthTest {
     // Anonymous is "no name for the audit row", not a security state — the request proceeds.
     given()
         .when()
-        .get("/api/test-identity")
+        .get("/ci/api/test-identity")
         .then()
         .statusCode(200)
         .body("anonymous", equalTo(true));
@@ -49,7 +49,7 @@ class ForwardAuthTest {
     given()
         .header("X-Qits-User", "  ")
         .when()
-        .get("/api/test-identity")
+        .get("/ci/api/test-identity")
         .then()
         .statusCode(200)
         .body("anonymous", equalTo(true));
@@ -63,7 +63,7 @@ class ForwardAuthTest {
         .header("X-Qits-User", "alice")
         .header("X-Qits-Groups", "admin")
         .when()
-        .get("/api/test-identity")
+        .get("/ci/api/test-identity")
         .then()
         .statusCode(200)
         .body("principal", equalTo("alice"))

