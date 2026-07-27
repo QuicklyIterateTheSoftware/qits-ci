@@ -62,6 +62,19 @@ Keep it that way; do not buffer a step's output whole.
 was never part of the monorepo's shared `db/migration` lineage, so it came across from the
 extraction unsquashed and unchanged — keep appending to it.
 
+## Authentication
+
+Authentication happens at `qits-gateway`. This service resolves a principal from a trusted header
+(`X-Qits-User`, read by `ci/security/ForwardAuthMechanism`) and authenticates nothing.
+
+**`identity.isAnonymous()` is not a security state** — it means "no name for the audit row". A check
+of the form `if (identity.isAnonymous()) deny` would look like a security control and be worth
+nothing, because reaching this service at all already implies you are inside the trusted network.
+
+There is no auth variant to select and no authorization policy here, and roles are deliberately not
+resolved — the single role check the system has (`qits.auth.required-role`) is the gateway's. See
+`migration-auth-plan.md`.
+
 ## Tests
 
 - The ci module's suite is plain JUnit plus `@QuarkusTest`, and fakes the runner
