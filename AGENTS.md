@@ -3,16 +3,41 @@
 Read `README.md` first: it defines the boundary (what arrives over HTTP, what ci fetches for
 itself) and the config surface. This file is the working conventions on top of it.
 
-## The one rule that shapes everything
+## The two rules that shape everything
 
-This repo must build and test green from a **clone of itself alone** — no monorepo, no docker, no
-prior `mvn install` elsewhere, no credentials. `mvn verify` is the gate. Anything that would break
-that is not a tradeoff to weigh, it is the thing this repo exists to avoid.
+**A clone of this repo alone builds and tests green** — no monorepo, no docker, no prior
+`mvn install` elsewhere, no credentials. `mvn verify` is the gate. Anything that would break that is
+not a tradeoff to weigh, it is the thing this repo exists to avoid.
 
 That is why: the poms duplicate versions instead of inheriting them, the suites stand up their own
 bare git repos instead of using fixture submodules, the git host is a `file://` directory laid out
 as `<base>/git/<repoId>`, and the one seam that needs real docker is faked (`FakeCiStepRunner`)
 rather than skipped.
+
+**`service/` compiles to a GraalVM native image**, the same rule qits-gateway and
+qits-workspace-daemon carry. `.sdkmanrc` names `25.0.2-graalce`, so `sdk env` gives you a
+`native-image` and `./mvnw verify -Dnative` produces `service/target/qits-ci` in about two minutes
+with no container involved. Do not read that as a qualification of the clone-alone rule; it is a
+second rule of the same kind, and three things follow:
+
+- **A missing GraalVM does not fail the build.** Quarkus logs `Cannot find the native-image ...
+  Attempting to fall back to container build` and shells out to docker for a 1.8 GB Mandrel image.
+  Green either way, so the fallback is easy to be in without noticing. Grep a native build's log for
+  that line before believing it proved anything. (This context shells out to `docker` at *runtime*
+  by design, which makes the word useless as a signal in a log — look for the line, not the word.)
+- **Every dependency is a decision about what the builder has to be told.** Reflection, dynamic
+  proxies, `ServiceLoader`, resources loaded by computed name and JNI/JNA all need registering, and
+  when they are missing the failure lands at *runtime, in the binary*, while the JVM suite stays
+  green. Prefer what is already in the image — `ProcessBuilder` over a process library (which is why
+  `CiDockerRunner` and `GitConfigFetcher` shell out rather than link a docker or git client), and
+  `java.lang.foreign` over JNA. If a native build needs configuration to pass, that configuration is
+  part of the change.
+- **So is every config default the app boots with.** `quarkus.datasource.ci.jdbc.url` carried
+  `AUTO_SERVER=TRUE` out of the monorepo; it asks H2 to start its own TCP server, whose classes are
+  not in the image, and the binary died at boot on a default no JVM test ever used. It was dropped
+  rather than registered — see the note in `ci/src/main/resources/META-INF/microprofile-config.properties`.
+  `CiPackagedSurfaceIT` is the guard, and it relocates `user.home` rather than restating the
+  settings precisely so that the shipped values stay the ones under test.
 
 ## Package and module conventions
 
@@ -108,6 +133,16 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   `src/test` would land in the document — that is why `IdentityEchoResource` is hidden too.
 - A `Failed to start quarkus` / `Port already bound: 8081` failure is the known flake
   (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first.
+  `CiPackagedSurfaceIT` is deliberately outside that race: failsafe passes it
+  `quarkus.http.test-port=0`, so the packaged app it launches takes a free port instead of queueing
+  behind whatever surefire has not finished releasing.
+- `CiPackagedSurfaceIT` is the only test that runs the **packaged artifact** — the fast-jar under
+  `-DskipITs=false`, the binary under `-Dnative`. It is not a second boundary test and behaviour
+  does not belong in it: it asserts the handful of things a `@QuarkusTest` structurally cannot see,
+  because they only exist once the app is built (the routes' build-time prefixes, the shipped
+  datasource URL, Flyway's migration surviving as a resource, SnakeYAML and Panache on a real run).
+  Its pipeline declares no steps, so it needs no container; step execution stays in
+  `CiDockerRunnerIT`.
 - The ci module's suite is plain JUnit plus `@QuarkusTest`, and fakes the runner
   (`ci/src/test/.../FakeCiStepRunner` scripts a `StepResult` per step index).
 - The service module's `FakeCiStepRunner` is a **different, honest** fake: it performs the real step
@@ -121,3 +156,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   only covers the first two — on a host where the container cannot route back to the JVM (plain
   WSL2, no compose stack up) it fails rather than skips. That is a property of the IT, carried over
   from the monorepo unchanged; do not "fix" it by weakening the assertions.
+  It is tagged `extended`, and the `native` profile excludes that tag (`qits.it.excluded-groups` in
+  the root pom) while flipping `skipITs`: a native build has to run the ITs to be worth anything,
+  and this one would fail it for reasons that are about the host's networking rather than the
+  binary. `-DskipITs=false` still runs it, unchanged.

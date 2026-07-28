@@ -27,6 +27,7 @@
          The directory stays `service/` because the extracted git history is anchored to it. -->
     <artifactId>qits-ci-service</artifactId>
     <name>qits-ci :: service</name>
+    <packaging>quarkus</packaging>
 
     <dependencies>
         <dependency>
@@ -76,22 +77,18 @@
     <build>
         <plugins>
             <plugin>
-                <!-- This module is the DEPLOYABLE, not a library jar. Augmentation is what produces
-                     target/quarkus-app/quarkus-run.jar; without this execution `mvn verify` proves
-                     the tests pass and proves nothing about whether the thing starts. Version comes
-                     from the root pom's pluginManagement. -->
+                <!-- This module is the DEPLOYABLE, not a library jar, and `<packaging>quarkus</packaging>`
+                     above is what says so: it binds generate-code, generate-code-tests and build into
+                     the lifecycle, so augmentation stops being an execution block that can be
+                     misplaced. One already was, in a sibling of this repo — declared under a `<build>`
+                     whose `<testResources>` came first, so the goal never applied while `mvn verify`
+                     stayed green and the deployable was never actually built. A packaging type cannot
+                     fail quietly that way: drop the `<extensions>true</extensions>` below and the build
+                     stops at "Unknown packaging: quarkus". Version comes from the root pom's
+                     pluginManagement. -->
                 <groupId>${quarkus.platform.group-id}</groupId>
                 <artifactId>quarkus-maven-plugin</artifactId>
                 <extensions>true</extensions>
-                <executions>
-                    <execution>
-                        <goals>
-                            <goal>build</goal>
-                            <goal>generate-code</goal>
-                            <goal>generate-code-tests</goal>
-                        </goals>
-                    </execution>
-                </executions>
             </plugin>
             <plugin>
                 <artifactId>maven-compiler-plugin</artifactId>
@@ -100,9 +97,11 @@
                 <artifactId>maven-surefire-plugin</artifactId>
             </plugin>
             <plugin>
-                <!-- CiDockerRunnerIT binds here. skipITs=true is the parent's default, so a fresh
-                     clone's `mvn verify` is green without docker; `-DskipITs=false` runs it and it
-                     self-skips (JUnit Assumptions) when docker or the image is absent. -->
+                <!-- CiDockerRunnerIT and CiPackagedSurfaceIT bind here. skipITs=true is the parent's
+                     default, so a fresh clone's `mvn verify` is green without docker;
+                     `-DskipITs=false` runs both and CiDockerRunnerIT self-skips (JUnit Assumptions)
+                     when docker or the image is absent. The `native` profile flips skipITs too, but
+                     narrows to CiPackagedSurfaceIT via qits.it.excluded-groups (see the root pom). -->
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <executions>
                     <execution>
@@ -113,7 +112,22 @@
                     </execution>
                 </executions>
                 <configuration>
+                    <excludedGroups>${qits.it.excluded-groups}</excludedGroups>
                     <systemPropertyVariables>
+                        <!-- How @QuarkusIntegrationTest finds the compiled binary in a `-Dnative`
+                             build; without it the native run has nothing to launch. The name is
+                             `quarkus.package.output-name` from application.properties, NOT maven's
+                             finalName — with an output-name set, ${project.build.finalName}-runner
+                             is a path that does not exist, and failsafe would silently launch
+                             nothing. The two spellings move together. -->
+                        <native.image.path>${project.build.directory}/qits-ci</native.image.path>
+                        <!-- Launch the packaged app on a free port instead of the default 8081.
+                             8081 is the @QuarkusTest port, and this repo's known flake is exactly a
+                             race for it (AGENTS.md) — surefire's last Quarkus instance can still
+                             hold it when failsafe starts, which would make the native gate fail for
+                             a reason that has nothing to do with the binary. 0 is understood by the
+                             launcher: it reads the actual port back out of the startup line. -->
+                        <quarkus.http.test-port>0</quarkus.http.test-port>
                         <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
                     </systemPropertyVariables>
                 </configuration>
@@ -124,4 +138,28 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!-- GraalVM native build (the profile qits-gateway and qits-workspace-daemon already carry):
+             `-Dnative` turns the fast-jar off and the native image on. It lives in THIS module, not
+             the root pom, because only this module is an application — `ci` is a library jar with
+             nothing to native-compile. skipITs flips with it so the build runs
+             CiPackagedSurfaceIT against the binary it just produced rather than packaging one
+             nobody starts; qits.it.excluded-groups keeps the docker-and-network-dependent
+             CiDockerRunnerIT out of that (root pom). -->
+        <profile>
+            <id>native</id>
+            <activation>
+                <property>
+                    <name>native</name>
+                </property>
+            </activation>
+            <properties>
+                <quarkus.package.jar.enabled>false</quarkus.package.jar.enabled>
+                <skipITs>false</skipITs>
+                <quarkus.native.enabled>true</quarkus.native.enabled>
+                <qits.it.excluded-groups>extended</qits.it.excluded-groups>
+            </properties>
+        </profile>
+    </profiles>
 </project>

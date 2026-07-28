@@ -14,11 +14,26 @@ per-step pass/fail for the push — advisory, queryable over REST.
 | `ci/` | `eu.wohlben.qits.ci.*` — entity, persistence, dto, mapper, control, error. The pipeline itself. No web, no JAX-RS. |
 | `service/` | `eu.wohlben.qits.ci.api` — the JAX-RS event intake, the run read surface, the token filter and the exception mapper. |
 
-`ci/` is a library jar. **`service/` is the application** — augmented by the `quarkus-maven-plugin`
-into a process:
+`ci/` is a library jar. **`service/` is the application** — it carries
+`<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary:
 
     ./mvnw verify
     java -jar service/target/quarkus-app/quarkus-run.jar   # :8080, intake on /ci/api/events/post-receive
+
+    ./mvnw package -Dnative
+    ./service/target/qits-ci                              # same routes, ~0.2s to listening
+
+**Native is the shipping form.** `.sdkmanrc` names a GraalVM (`25.0.2-graalce`), so `sdk env` alone
+is enough toolchain: the build wants a `native-image` on `GRAALVM_HOME`, `JAVA_HOME` or `PATH`, and
+finding none it does not fail — it falls back to pulling a 1.8 GB Mandrel image and compiling under
+docker. That fallback still works and is what a GraalVM-less CI gets; it is just not the intended
+path, and it is worth recognising by name when a build that normally takes two minutes starts
+downloading a container image. Note the coincidence: this service *runs* docker, per step, by
+design (below) — the **build** must not touch it.
+
+Most of the 0.2s is opening the H2 file and running Flyway; the framework itself is up in
+milliseconds. That is the point of packaging it this way — a restart is a non-event rather than a
+window in which pushes arrive and record nothing.
 
 It was extracted as a library, on the assumption that a consuming Quarkus application would pull it
 in and gain the routes. That application was never written and under the gateway topology never will
@@ -106,6 +121,9 @@ is a known, documented issue.
   different process with no user session. That allowlist is qits-gateway's `PublicPaths`.
 - Keep the run **read** surface behind the deployment's auth policy. It is not token-guarded, and it
   returns build logs.
+- Give the process a persistent `~/.qits/data/ci` (or override `quarkus.datasource.ci.jdbc.url` and
+  `qits.ci.data-dir`). The H2 there is a plain **single-writer file** — no `AUTO_SERVER`, so nothing
+  else may open it while ci runs, and nothing listens on a database port.
 
 ## What is deliberately *not* here
 

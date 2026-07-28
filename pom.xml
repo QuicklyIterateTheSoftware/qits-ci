@@ -60,8 +60,19 @@
 
         <!-- CiDockerRunnerIT needs real docker and a built `qits/workspace` image, neither of which
              a fresh clone has. `mvn verify` must be green without them — the same default the
-             monorepo and qits-workspaces carry. Run it with -DskipITs=false. -->
+             monorepo and qits-workspaces carry. Run it with -DskipITs=false. `service`'s `native`
+             profile also flips it, so a `-Dnative` build exercises the binary it just compiled
+             instead of packaging it and asserting nothing. -->
         <skipITs>true</skipITs>
+
+        <!-- JUnit tags failsafe must NOT run, empty by default so `-DskipITs=false` still means
+             "run everything", which is what AGENTS.md documents. Only the `native` profile sets it,
+             to `extended`: that build wants the @QuarkusIntegrationTest against the binary, and
+             CiDockerRunnerIT — tagged `extended`, needing real docker AND a step container that can
+             route back to the JVM — is an infrastructure test that has nothing to say about
+             native-image and fails rather than skips on a plain WSL2 host. Excluding it there keeps
+             the native gate about the binary; it is still run, unchanged, by -DskipITs=false. -->
+        <qits.it.excluded-groups/>
         <!-- Surefire's @{argLine} has no value unless something (jacoco/quarkus) sets it. -->
         <argLine/>
     </properties>
