@@ -112,8 +112,20 @@ of the form `if (identity.isAnonymous()) deny` would look like a security contro
 nothing, because reaching this service at all already implies you are inside the trusted network.
 
 There is no auth variant to select and no authorization policy here, and roles are deliberately not
-resolved — the single role check the system has (`qits.auth.required-role`) is the gateway's. See
-`migration-auth-plan.md`.
+resolved — the single role check the system has (`qits.auth.required-role`) is the gateway's. The
+gateway authenticates every human request (OIDC, with the variant fixed at **build** time via
+`-Dqits.variant`, so no runtime setting can reopen a gateway built as `oauth`) and asserts the
+result as headers. `X-Qits-*` is its reserved namespace and is stripped from every inbound request
+unconditionally, which is the entire reason a header can be trusted as an identity here.
+
+`qits.ci.token` is not part of any of this. It guards one machine-to-machine path and knows nothing
+about users, so edge auth neither replaces it nor excuses it — `CiTokenGuardTest` stays exactly as
+load-bearing as it was.
+
+`ForwardAuthTest` sets a real `X-Qits-User` rather than reaching for `@TestSecurity`, and that is
+deliberate: the header **is** the contract under test. `@TestSecurity` installs an identity without
+going through the mechanism, so it would pass just as well against a service that shipped no
+mechanism at all — which is what every service here was before the header landed.
 
 ## Tests
 
