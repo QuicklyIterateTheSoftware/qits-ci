@@ -1,27 +1,35 @@
 package eu.wohlben.qits.ci.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
+import eu.wohlben.qits.ci.control.CiStepRunner.StepOutcome;
 import eu.wohlben.qits.ci.control.CiStepRunner.StepResult;
 import eu.wohlben.qits.ci.entity.CiRun;
 import eu.wohlben.qits.ci.entity.CiRunStatus;
 import eu.wohlben.qits.ci.entity.CiStep;
 import eu.wohlben.qits.ci.entity.CiStepStatus;
 import eu.wohlben.qits.ci.error.BadRequestException;
+import eu.wohlben.qits.ci.error.ConflictException;
+import eu.wohlben.qits.ci.error.NotFoundException;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
  * Drives the orchestrator synchronously (package-private {@code execute}) against the fake config
- * source and step runner — the whole run/step state machine without docker or a git host.
+ * source and the scripted-event step runner — the whole run/step state machine with no docker, no
+ * container and no git host.
  */
 @QuarkusTest
 public class CiRunServiceTest extends CiTestSupport {
@@ -62,6 +70,8 @@ public class CiRunServiceTest extends CiTestSupport {
     assertEquals("main", run.branch);
     assertEquals(sha, run.commitSha);
     assertNotNull(run.finishedAt);
+    // The run is pinned to one daemon build, resolved once before any step launched.
+    assertEquals("fake-daemon", run.daemonVersion);
 
     List<CiStep> recorded = service.stepsFor(run.id);
     assertEquals(2, recorded.size());
@@ -70,17 +80,28 @@ public class CiRunServiceTest extends CiTestSupport {
       assertEquals(0, step.exitCode);
       assertEquals("ok step " + step.stepIndex, step.output);
       assertEquals("alpine:3", step.image);
+      // Host-stamped at the two points the host knows about first-hand, and in that order.
+      assertNotNull(step.startedAt, "a step that ran must carry a started_at");
+      assertNotNull(step.finishedAt, "a step that ran must carry a finished_at");
+      assertFalse(step.finishedAt.isBefore(step.startedAt));
     }
-    // The runner saw the right specs, in order.
+    // The runner saw the right specs, in order, each carrying the run's pinned binary url.
     assertEquals(2, fakeRunner.executed().size());
     assertEquals("echo one", fakeRunner.executed().get(0).script());
     assertEquals(sha, fakeRunner.executed().get(0).sha());
+    assertEquals("main", fakeRunner.executed().get(0).branch());
+    assertEquals(
+        "http://fake.invalid/ci-daemon/fake-daemon", fakeRunner.executed().get(0).daemonBinaryUrl());
+    // Chunks reached the listener while the step ran — the seam's event half.
+    assertEquals(List.of("ok step 0", "ok step 1"), fakeRunner.emitted());
+    // And the run released whatever the runner was holding for it.
+    assertEquals(List.of(run.id), fakeRunner.closed());
   }
 
   @Test
   public void failingStepFailsTheRunAndSkipsTheRest() {
     seedConfig(CONFIG_TWO_STEPS);
-    fakeRunner.script(0, new StepResult(7, "boom", false, true));
+    fakeRunner.script(0, new StepResult(7, false, StepOutcome.OK, "boom"));
     service.execute(repoId, "main", sha);
 
     CiRun run = soleRun();
@@ -91,6 +112,9 @@ public class CiRunServiceTest extends CiTestSupport {
     assertEquals("boom", recorded.get(0).output);
     assertEquals(CiStepStatus.SKIPPED, recorded.get(1).status);
     assertNull(recorded.get(1).exitCode);
+    // A skipped step never started, so it carries neither timestamp.
+    assertNull(recorded.get(1).startedAt);
+    assertNull(recorded.get(1).finishedAt);
     // Only the failing step actually executed.
     assertEquals(1, fakeRunner.executed().size());
   }
@@ -98,14 +122,35 @@ public class CiRunServiceTest extends CiTestSupport {
   @Test
   public void timedOutStepFailsTheRunWithAMarkedOutput() {
     seedConfig(CONFIG_TWO_STEPS);
-    fakeRunner.script(0, new StepResult(-1, "partial output", true, true));
+    fakeRunner.script(0, new StepResult(143, true, StepOutcome.OK, "partial output"));
     service.execute(repoId, "main", sha);
 
     CiRun run = soleRun();
     assertEquals(CiRunStatus.FAILED, run.status);
     CiStep first = service.stepsFor(run.id).get(0);
     assertEquals(CiStepStatus.FAILED, first.status);
+    // Recorded as a timeout, not as a script that happened to exit 143.
     assertTrue(first.output.contains("[step timed out]"), first.output);
+    assertTrue(first.output.contains("partial output"), first.output);
+    assertEquals(143, first.exitCode);
+  }
+
+  @Test
+  public void aDeclaredPerStepTimeoutOverridesTheDeploymentDefault() {
+    seedConfig(
+        """
+        steps:
+          - image: alpine:3
+            script: echo quick
+            timeout-seconds: 30
+          - image: alpine:3
+            script: echo slow
+        """);
+    service.execute(repoId, "main", sha);
+
+    assertEquals(30, fakeRunner.executed().get(0).timeoutSeconds());
+    // An absent field means exactly the behaviour before the key existed: the shipped default.
+    assertEquals(900, fakeRunner.executed().get(1).timeoutSeconds());
   }
 
   @Test
@@ -116,6 +161,8 @@ public class CiRunServiceTest extends CiTestSupport {
     CiRun run = soleRun();
     assertEquals(CiRunStatus.CONFIG_ERROR, run.status);
     assertNotNull(run.finishedAt);
+    // Nothing was ever launched, so the run pins no daemon.
+    assertNull(run.daemonVersion);
     assertEquals(0, service.stepsFor(run.id).size());
     assertEquals(0, fakeRunner.executed().size());
   }
@@ -168,48 +215,93 @@ public class CiRunServiceTest extends CiTestSupport {
   }
 
   @Test
-  public void workspaceSetupFailureDiscardsTheRunWhenTheCommitIsGone() {
-    // The prelude failed AND the commit has since vanished (force-pushed away mid-queue), so the
-    // exit code belongs to git, not the pipeline: the run describes a push that no longer exists.
+  public void aShaGoneCheckoutDiscardsTheRunWhenTheCommitIsIndeedGone() {
+    // The daemon's checkout is the probe now: it reports SHA_GONE, and the config re-read confirms
+    // the commit was force-pushed away mid-queue. The run describes a push that no longer exists.
     seedConfig(CONFIG_TWO_STEPS);
     fakeConfig.put(repoId, sha, ConfigLookup.gone()); // what the post-failure re-read sees
     fakeRunner.script(
-        0, new StepResult(128, "fatal: reference is not a tree: deadbeef", false, false));
+        0,
+        new StepResult(-1, false, StepOutcome.SHA_GONE, "fatal: reference is not a tree: deadbeef"));
     service.execute(repoId, "main", sha);
     assertEquals(0, service.runsFor(repoId).size());
   }
 
   @Test
-  public void workspaceSetupFailureOnAReachableCommitStaysOnTheRecord() {
-    // Same symptom, different cause: the commit is fine, so the prelude failed for a reason the
-    // user
-    // must see — typically an image without git/bash. Discarding here would hide a broken pipeline.
+  public void aShaGoneCheckoutOnAReachableCommitStaysOnTheRecord() {
+    // Same frame, different truth: the commit is still there, so something else broke the checkout
+    // and the user must see it. Discarding here would hide a broken pipeline.
     seedConfig(CONFIG_TWO_STEPS);
-    fakeRunner.script(0, new StepResult(127, "bash: git: command not found", false, false));
+    fakeRunner.script(
+        0, new StepResult(-1, false, StepOutcome.SHA_GONE, "fatal: could not read from remote"));
     service.execute(repoId, "main", sha);
 
     CiRun run = soleRun();
     assertEquals(CiRunStatus.FAILED, run.status);
     List<CiStep> recorded = service.stepsFor(run.id);
     assertEquals(CiStepStatus.FAILED, recorded.get(0).status);
-    assertEquals(127, recorded.get(0).exitCode);
-    assertTrue(recorded.get(0).output.contains("git: command not found"));
+    assertTrue(recorded.get(0).output.contains("could not read from remote"));
+    assertTrue(recorded.get(0).output.contains("could not check out"), recorded.get(0).output);
     assertEquals(CiStepStatus.SKIPPED, recorded.get(1).status);
   }
 
   @Test
-  public void timedOutStepIsRecordedEvenWithoutAReadyWorkspace() {
-    // A timeout is a real pipeline outcome, not a vanished commit — it must still be recorded.
+  public void anInitFailureWithNoReasonIsRecordedGenericallyAndNeverDiscardsTheRun() {
+    // A hostile daemon can send InitFailed with an absent reason — the codec decodes that to null
+    // rather than throwing, deliberately. It has to land as a generic setup failure and must NOT
+    // fall through the SHA_GONE branch, which would let a container delete the run watching it.
     seedConfig(CONFIG_TWO_STEPS);
-    fakeRunner.script(0, new StepResult(-1, "hung", true, false));
+    fakeConfig.put(repoId, sha, ConfigLookup.gone()); // the re-read would say "discard" if reached
+    fakeRunner.script(0, new StepResult(-1, false, StepOutcome.INIT_FAILED, "(no reason given)"));
     service.execute(repoId, "main", sha);
-    assertEquals(CiRunStatus.FAILED, soleRun().status);
+
+    CiRun run = soleRun();
+    assertEquals(CiRunStatus.FAILED, run.status);
+    CiStep first = service.stepsFor(run.id).get(0);
+    assertEquals(CiStepStatus.FAILED, first.status);
+    assertTrue(first.output.contains("could not prepare its workspace"), first.output);
   }
 
   @Test
-  public void aFailureMidRunLeavesNoStepStuckRunningOrPending() {
-    // A crash after a step went RUNNING must not persist a finished run whose step still claims to
-    // be executing. The fake throws instead of returning, standing in for a transient DB error.
+  public void eachDistinguishableFailureStateIsRecordedAsItself() {
+    // The transferred failure-state rule: docker refusing the launch, a container that never started
+    // a daemon, one that registered and never finished a checkout, and a socket lost mid-step are
+    // four different things, and none of them is "the step failed with exit -1".
+    for (StepOutcome outcome :
+        List.of(
+            StepOutcome.LAUNCH_FAILED,
+            StepOutcome.NEVER_STARTED,
+            StepOutcome.NEVER_INITIALIZED,
+            StepOutcome.CONNECTION_LOST)) {
+      resetCiState();
+      seedConfig(CONFIG_TWO_STEPS);
+      fakeRunner.script(0, new StepResult(-1, false, outcome, "diagnosis for " + outcome));
+      service.execute(repoId, "main", sha);
+
+      CiStep first = service.stepsFor(soleRun().id).get(0);
+      assertEquals(CiStepStatus.FAILED, first.status, outcome.name());
+      assertTrue(first.output.contains("diagnosis for " + outcome), first.output);
+      assertEquals(
+          expectedNote(outcome),
+          first.output.substring(first.output.lastIndexOf('[')),
+          "each state must record a message that is only its own");
+    }
+  }
+
+  private static String expectedNote(StepOutcome outcome) {
+    return switch (outcome) {
+      case LAUNCH_FAILED -> "[the step container could not be started]";
+      case NEVER_STARTED -> "[the step container never started its ci daemon]";
+      case NEVER_INITIALIZED -> "[the step container never reported its checkout done]";
+      case CONNECTION_LOST -> "[the connection to the step container was lost]";
+      default -> throw new IllegalArgumentException(outcome.name());
+    };
+  }
+
+  @Test
+  public void aFailureMidRunRecordsTheStepItHappenedOnAndSkipsTheRest() {
+    // A crash inside the runner must not make a declared step vanish from the run: nothing is
+    // written upfront any more, so the exception path is what has to write those rows.
     seedConfig(CONFIG_TWO_STEPS);
     fakeRunner.throwOn(0, new IllegalStateException("transient failure"));
     service.execute(repoId, "main", sha);
@@ -217,17 +309,73 @@ public class CiRunServiceTest extends CiTestSupport {
     CiRun run = soleRun();
     assertEquals(CiRunStatus.FAILED, run.status);
     assertNotNull(run.finishedAt);
-    for (CiStep step : service.stepsFor(run.id)) {
-      assertTrue(
-          step.status == CiStepStatus.FAILED || step.status == CiStepStatus.SKIPPED,
-          "step " + step.stepIndex + " left in " + step.status);
-    }
+    List<CiStep> recorded = service.stepsFor(run.id);
+    assertEquals(2, recorded.size(), "every declared step must still have a row");
+    assertEquals(CiStepStatus.FAILED, recorded.get(0).status);
+    assertTrue(recorded.get(0).output.contains("transient failure"), recorded.get(0).output);
+    assertEquals(CiStepStatus.SKIPPED, recorded.get(1).status);
+  }
+
+  @Test
+  public void aCancellationMidStepFailsThatStepAndSkipsTheRest() throws Exception {
+    // Staged the way it really happens: the run is on the worker, step 0 is executing, and the
+    // cancellation arrives from another thread — the HTTP one. The fake holds step 0 open until the
+    // POST has landed, so there is no sleep and no race about when "mid-step" is.
+    //
+    // Note the step still FINISHES normally afterwards — a daemon answers a Cancel with a terminal
+    // frame — so cancelledness has to be read from the flag, never inferred from how run() returned.
+    seedConfig(CONFIG_TWO_STEPS);
+    CompletableFuture<String> reachedStepZero = new CompletableFuture<>();
+    CountDownLatch cancelled = new CountDownLatch(1);
+    fakeRunner.during(
+        0,
+        spec -> {
+          reachedStepZero.complete(spec.runId());
+          try {
+            cancelled.await(10, TimeUnit.SECONDS);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        });
+    fakeRunner.script(0, new StepResult(137, false, StepOutcome.OK, "half a line"));
+
+    service.onPostReceive(repoId, "main", "0".repeat(40), sha);
+    String runId = reachedStepZero.get(10, TimeUnit.SECONDS);
+    service.cancel(runId);
+    cancelled.countDown();
+    service.awaitIdle();
+
+    // The cancel above read the run into this thread's persistence context while it was still
+    // RUNNING; without this the assertions below would read that copy back rather than the worker's.
+    forgetLoadedEntities();
+    CiRun run = soleRun();
+    assertEquals(CiRunStatus.FAILED, run.status);
+    List<CiStep> recorded = service.stepsFor(run.id);
+    assertEquals(CiStepStatus.FAILED, recorded.get(0).status);
+    assertTrue(recorded.get(0).output.contains("cancelled"), recorded.get(0).output);
+    assertTrue(recorded.get(0).output.contains("half a line"), recorded.get(0).output);
+    assertEquals(CiStepStatus.SKIPPED, recorded.get(1).status);
+    // The runner was actually asked to stop the container, not just flagged.
+    assertEquals(List.of(run.id), fakeRunner.cancelled());
+    assertEquals(1, fakeRunner.executed().size(), "step 1 must never have been launched");
+  }
+
+  @Test
+  public void cancellingAFinishedRunIsAConflictAndAnUnknownRunIsANotFound() {
+    seedConfig(CONFIG_TWO_STEPS);
+    service.execute(repoId, "main", sha);
+    String runId = soleRun().id;
+
+    assertThrows(ConflictException.class, () -> service.cancel(runId));
+    assertThrows(NotFoundException.class, () -> service.cancel("no-such-run"));
+    // A refused cancellation must not have reached the runner at all.
+    assertEquals(List.of(), fakeRunner.cancelled());
   }
 
   @Test
   public void hostileIdentifiersAreRejectedAtTheEntryPoint() {
     // The intake is reachable without a session, so the ids it supplies are validated before they
-    // reach a filesystem path or a git/bash argv.
+    // reach a filesystem path or an argv.
     String good = UUID.randomUUID().toString();
     assertThrows(
         BadRequestException.class,

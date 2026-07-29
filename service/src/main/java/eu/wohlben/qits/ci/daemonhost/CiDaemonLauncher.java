@@ -15,9 +15,8 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
- * Starts one step container and takes it away again. Everything {@code CiDockerRunner.buildArgv}
- * does minus the script, plus the daemon contract: the same sandbox flags, the entrypoint overridden
- * to a fixed host-authored bootstrap, and the run's whole context as environment.
+ * Starts one step container and takes it away again: the sandbox flags, the entrypoint overridden to
+ * a fixed host-authored bootstrap, and the run's whole context as environment.
  *
  * <p><b>qits-ci never executes anything.</b> Its docker vocabulary is container lifecycle — {@code
  * run}, {@code logs}, {@code rm}, {@code network inspect}/{@code create}, {@code ps} — and {@code
@@ -35,9 +34,8 @@ import org.jboss.logging.Logger;
  * the {@code qits.ci.run} label plus the boot sweep below is what catches the ones a crash left
  * behind.
  *
- * <p>Inert in phase B: {@code CiDockerRunner} still executes production steps and this class is
- * reachable only from the gate IT. Its {@link #ensureNetwork()} is a copy of the runner's rather
- * than a move, for that reason — the runner still needs its own until phase C deletes it whole.
+ * <p>This is the whole of qits-ci's container vocabulary. {@link CiDaemonStepRunner} is its only
+ * caller in production; {@code CiDaemonGateIT} drives it against a real image.
  */
 @ApplicationScoped
 public class CiDaemonLauncher {
@@ -171,8 +169,8 @@ public class CiDaemonLauncher {
 
   /**
    * Best-effort ensure the step network exists — inspect, then create, warning rather than failing
-   * when docker is absent. A copy of {@code CiDockerRunner.ensureNetwork} rather than a move: that
-   * runner is still the production path in phase B and still needs its own. Phase C deletes it there.
+   * when docker is absent. Called from the boot observer below, and directly by the gate IT, which
+   * has no Quarkus lifecycle to fire it.
    */
   public void ensureNetwork() {
     if (CiProcess.run(null, List.of(runtime, "network", "inspect", network), CLEANUP_TIMEOUT, 8192)
@@ -330,14 +328,14 @@ public class CiDaemonLauncher {
   /**
    * The id-addressed smart-HTTP url of a repository, as reachable from inside a step container.
    * {@code /git} is the codebase's second-level segment for the git wire protocol, so it lives here;
-   * the configured base names only which service hosts it. Moved from {@code CiDockerRunner}, where
-   * it produced a bash positional argument — here it is the daemon's {@code $QITS_CI_REPOSITORY_URL}.
+   * the configured base names only which service hosts it. It is the daemon's {@code
+   * $QITS_CI_REPOSITORY_URL} — a value the container clones from, never a word in a command line.
    */
   String cloneUrl(String repoId) {
     return containerGitUrl.replaceAll("/+$", "") + "/git/" + repoId;
   }
 
-  /** The same name shape the attached runner used, so one label and one name convention survive. */
+  /** One name shape and one label convention, shared by the launch, the reap and the boot sweep. */
   static String containerName(String runId, int stepIndex) {
     String shortRun = runId.length() > 8 ? runId.substring(0, 8) : runId;
     return "qits-ci-" + shortRun + "-" + stepIndex;

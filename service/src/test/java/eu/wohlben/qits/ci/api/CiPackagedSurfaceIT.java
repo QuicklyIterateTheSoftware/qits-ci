@@ -52,8 +52,8 @@ import org.junit.jupiter.api.Test;
  * <p>The pipeline it pushes declares <b>no steps</b> — a config-less push records nothing at all, so
  * an empty {@code steps} list is the smallest config that still records a run, and it takes the path
  * through the parser and the database without needing docker. Step execution needs a container and
- * belongs to {@link eu.wohlben.qits.ci.control.CiDockerRunnerIT} (tagged {@code extended}, and
- * excluded from the native build for that reason — see the root pom).
+ * belongs to {@code CiDaemonGateIT} (tagged {@code extended}, and excluded from the native build
+ * for that reason — see the root pom).
  */
 @QuarkusIntegrationTest
 @TestProfile(CiPackagedSurfaceIT.PackagedUnderTarget.class)

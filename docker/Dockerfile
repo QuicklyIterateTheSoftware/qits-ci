@@ -62,7 +62,7 @@
 # See README.md, "Deploying it", for the whole surface.
 #
 # --- READ THIS BEFORE DEPLOYING: ci is not a self-contained process -------------------------------
-# ci is HOST-SIDE by design (README.md, "Host-side by design") — it does its work by shelling out,
+# ci is HOST-SIDE by design (README.md, "How a step runs") — it does its work by shelling out,
 # so the runtime stage below is deliberately NOT the usual "the binary and nothing else". Two
 # external programs are part of this service's *runtime*, and neither is something a config value
 # can substitute:
@@ -73,16 +73,17 @@
 #           pipeline" — the same silent shape as a wrong git-host url above. Installed below, from
 #           the image's own UBI repositories.
 #
-#   docker  `CiDockerRunner` spawns one `docker run --rm` per step, and its `ensureNetwork()`
-#           observer fires on `StartupEvent`. The CLI is installed below — but it is only half of
-#           what a deployment has to supply, and the other half is a decision, not a default:
+#   docker  `CiDaemonLauncher` starts one detached container per step (and removes it again, and
+#           sweeps orphans at boot); its `ensureNetwork()` observer fires on `StartupEvent`. The CLI
+#           is installed below — but it is only half of what a deployment has to supply, and the
+#           other half is a decision, not a default:
 #
 #             THE DOCKER SOCKET IS NOT IN THIS IMAGE. Run with
 #             `-v /var/run/docker.sock:/var/run/docker.sock`, or ci can start no step.
 #
 #           That mount hands this container control of the host's docker daemon, which is
 #           root-equivalent. This repo is emphatic that a *step* container never gets the socket
-#           (README.md, "Host-side by design"); ci itself needs it, and that asymmetry is the whole
+#           (README.md, "How a step runs"); ci itself needs it, and that asymmetry is the whole
 #           trust boundary, so it is left as an explicit deployment act rather than baked in.
 #           Without it the service still starts and serves: `ensureNetwork` logs one WARN and each
 #           step fails with a docker connection error instead of a pipeline result.

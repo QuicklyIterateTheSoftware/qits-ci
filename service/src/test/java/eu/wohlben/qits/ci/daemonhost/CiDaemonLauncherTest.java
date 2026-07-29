@@ -12,9 +12,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Argv and bootstrap assembly only — the real {@code docker run} is covered by the extended {@code
- * CiDaemonHandshakeIT}. The same shape {@code CiDockerRunnerTest} has for the runner it replaces,
- * for the same reason: the argv <b>is</b> the sandbox, and a flag lost in a refactor is invisible
- * everywhere else.
+ * CiDaemonHandshakeIT}. Worth its own test because the argv <b>is</b> the sandbox: a flag lost in a
+ * refactor is invisible everywhere else until it is invisible in production.
  */
 public class CiDaemonLauncherTest {
 

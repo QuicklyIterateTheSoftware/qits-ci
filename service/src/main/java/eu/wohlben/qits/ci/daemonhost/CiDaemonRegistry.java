@@ -57,8 +57,7 @@ import org.jboss.logging.Logger;
  * connection is attacker-influenced data, recorded and never trusted (which is why timestamps are
  * host-stamped and a {@code Hello}'s {@code daemonId} is checked rather than believed).
  *
- * <p>Nothing here is reachable from production code yet: phase B lands behind {@code
- * CiDockerRunner}, which still executes steps. The gate IT is the only caller.
+ * <p>{@link CiDaemonStepRunner} is what drives this in production, one step at a time.
  */
 @ApplicationScoped
 public class CiDaemonRegistry {
@@ -92,8 +91,8 @@ public class CiDaemonRegistry {
   public record Credentials(String daemonId, String secret) {}
 
   /**
-   * Where a running step's output goes as it arrives. Phase C feeds the live relay and the bounded
-   * tail from here; phase B's tests just collect.
+   * Where a running step's output goes as it arrives — {@link CiStepRelay}, which is both the live
+   * surface and the accumulator the persisted tail is read back out of.
    *
    * <p>Called on the socket's virtual thread, so it must not block for long — and a throw is
    * swallowed rather than allowed to close the connection, because a listener that fails must cost

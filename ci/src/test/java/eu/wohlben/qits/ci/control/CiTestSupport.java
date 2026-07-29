@@ -18,6 +18,20 @@ public abstract class CiTestSupport {
   @Inject protected FakeCiStepRunner fakeRunner;
   @Inject protected FakeCiConfigSource fakeConfig;
 
+  /**
+   * Drop everything this test thread has already loaded, so the next read really goes to the
+   * database.
+   *
+   * <p>Needed exactly when a test reads a row <em>before</em> the run worker changes it: a {@code
+   * @QuarkusTest} method has one request-scoped persistence context, and Hibernate's identity map
+   * wins over a query's own results — so a second read would hand back the stale instance the first
+   * read cached and the test would be asserting against its own memory rather than the worker's
+   * work.
+   */
+  protected void forgetLoadedEntities() {
+    runs.getEntityManager().clear();
+  }
+
   @BeforeEach
   void resetCiState() {
     QuarkusTransaction.requiringNew()

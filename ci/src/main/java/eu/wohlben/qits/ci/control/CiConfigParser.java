@@ -70,9 +70,32 @@ public class CiConfigParser {
       if (!(entry instanceof Map<?, ?> step)) {
         throw new CiConfigException("Step " + i + ": expected a mapping, got: " + typeOf(entry));
       }
-      steps.add(new CiStepDecl(requireString(step, "image", i), requireString(step, "script", i)));
+      steps.add(
+          new CiStepDecl(
+              requireString(step, "image", i),
+              requireString(step, "script", i),
+              optionalTimeoutSeconds(step, i)));
     }
     return new CiPipeline(List.copyOf(steps));
+  }
+
+  /**
+   * The one optional per-step key: {@code timeout-seconds}. Absent means the deployment's {@code
+   * qits.ci.step-timeout-seconds}, i.e. exactly the behaviour before this key existed — the
+   * leniency above is about keys this parser does not <em>know</em>, and this one it knows, so a
+   * value that cannot be a deadline is a config error rather than something quietly ignored. A repo
+   * that meant to bound a step and mistyped the number must find out.
+   */
+  private static Integer optionalTimeoutSeconds(Map<?, ?> step, int index) {
+    Object value = step.get("timeout-seconds");
+    if (value == null) {
+      return null;
+    }
+    if (!(value instanceof Integer seconds) || seconds <= 0) {
+      throw new CiConfigException(
+          "Step " + index + ": 'timeout-seconds' must be a positive whole number of seconds");
+    }
+    return seconds;
   }
 
   private static String requireString(Map<?, ?> step, String key, int index) {

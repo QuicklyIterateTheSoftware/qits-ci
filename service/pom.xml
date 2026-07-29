@@ -122,11 +122,12 @@
                 <artifactId>maven-surefire-plugin</artifactId>
             </plugin>
             <plugin>
-                <!-- CiDockerRunnerIT and CiPackagedSurfaceIT bind here. skipITs=true is the parent's
-                     default, so a fresh clone's `mvn verify` is green without docker;
-                     `-DskipITs=false` runs both and CiDockerRunnerIT self-skips (JUnit Assumptions)
-                     when docker or the image is absent. The `native` profile flips skipITs too, but
-                     narrows to CiPackagedSurfaceIT via qits.it.excluded-groups (see the root pom). -->
+                <!-- CiPackagedSurfaceIT and the docker-backed gates (CiDaemonHandshakeIT,
+                     CiDaemonGateIT) bind here. skipITs=true is the parent's default, so a fresh
+                     clone's `mvn verify` is green without docker; `-DskipITs=false` runs them all and
+                     the gates self-skip (JUnit Assumptions) when docker, the step image or the daemon
+                     binary is absent. The `native` profile flips skipITs too, but narrows to
+                     CiPackagedSurfaceIT via qits.it.excluded-groups (see the root pom). -->
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <executions>
                     <execution>
@@ -188,7 +189,7 @@
              nothing to native-compile. skipITs flips with it so the build runs
              CiPackagedSurfaceIT against the binary it just produced rather than packaging one
              nobody starts; qits.it.excluded-groups keeps the docker-and-network-dependent
-             CiDockerRunnerIT out of that (root pom). -->
+             docker-backed gates out of that (root pom). -->
         <profile>
             <id>native</id>
             <activation>

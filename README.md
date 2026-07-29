@@ -69,8 +69,11 @@ rest of qits it reaches over a URL it is configured with:
 |---|---|---|
 | in | `POST /ci/api/events/post-receive` — `{repoId, branch, oldSha, newSha}`, one per updated branch ref | guarded by `qits.ci.token` (`X-CI-Token`) |
 | in | `GET /ci/api/runs?repositoryId={repoId}`, `GET /ci/api/runs/{runId}` | not token-guarded; they carry build logs, so a deployment must keep them behind its auth policy |
+| in | `POST /ci/api/runs/{runId}/cancel` → 202, 409 on a run that is not running | same: no token, behind the deployment's auth policy |
+| in | `ws://…/ci/daemon` — the socket each step container's daemon dials **out** to | authenticated by a host-minted per-container secret, not by any token |
 | out | where the git host answers, for ci's **own** `git fetch` of the pushed ref — ci appends `/git/<repoId>` | `qits.ci.git-host-url` |
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
+| out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + `qits.ci.daemon-version` |
 
 The run listing takes the repository as a **query filter, not a path segment**. ci does not own
 repositories, so `/repositories/{repoId}/runs` asserted a containment this context does not have —
@@ -93,36 +96,82 @@ relaxing the git host's want policy for every unauthenticated client. ci then ve
 sha is still an ancestor of the fetched tip: a racing push still runs, a force-pushed-away commit
 records nothing rather than a spurious red run.
 
-## Host-side by design
+## How a step runs — qits-ci starts containers, and that is all
 
-This context runs entirely **outside** any workspace container:
+> **No code path in qits-ci runs repo-controlled code as a host process, and none runs it through
+> `docker exec`.** A step's script reaches a container only as the reply on the socket that
+> container's own daemon dialled, and executes only as that daemon's child inside the sandbox.
 
-- `CiDockerRunner` spawns one ephemeral `docker run --rm` per step on `qits.ci.network`, with the
-  git clone of the pushed sha done by the container's own prelude.
-- `GitConfigFetcher` shells ci's own host `git` against its bare cache.
+One container per step, launched from the step's declared image, in sequence — only a step's
+completion starts the next one, and no state crosses steps. Per step:
 
-That is the boundary, not residue of the monorepo. A step's script is **repo-controlled code**, so
-the step container is treated as a hostile-code sandbox: `--cap-drop=ALL`, `no-new-privileges`, no
-docker socket, and memory/pids/cpu caps (`qits.ci.memory-limit`, `…pids-limit`, `…cpus`). The
-residual gap — a push is itself unauthenticated, and running repo-committed scripts is the feature —
-is a known, documented issue.
+1. **Launch.** qits-ci mints an id and a secret, then `docker run -d` with the image's entrypoint
+   overridden to a fixed, host-authored bootstrap: fetch the daemon binary from
+   `$QITS_CI_DAEMON_BINARY_URL`, `chmod +x`, `exec`. Nothing about the repository is interpolated
+   into that text — the whole contract rides as environment. The image contract is therefore `git`,
+   `bash`, and a downloader (`wget` **or** `curl`).
+2. **Register.** The daemon **dials out** to `ws://…/ci/daemon` presenting its id and secret.
+   qits-ci never dials in and never learns an address from a container.
+3. **Initialize.** The daemon does its own shallow clone and checks out the pushed sha, then says so
+   — or reports a structured failure. A checkout that cannot find the commit is how a force-push
+   between the host's ancestor check and the container's clone surfaces, and it makes qits-ci
+   re-read the config source and discard a run that describes a push which no longer exists.
+4. **The step arrives as the answer.** The host replies to `Initialized` with this step's script.
+   The container never receives the config file, only its own script.
+5. **Execute and stream.** The daemon runs the script in the checkout and streams stdout/stderr back
+   as chunks, then a terminal frame with the exit code and whether its own deadline killed the
+   child. Timestamps are stamped **here**, on receipt, never taken from the container.
+6. **Persist at finish.** Chunks feed a bounded in-memory relay that `GET /ci/api/runs/{runId}`
+   exposes as `live` while the run is running; the step's **row is written once, already terminal**,
+   at the step's end. The database never holds a half-written step.
+7. **Teardown.** The container is `docker rm -f`'d on every path, its secret is forgotten, and the
+   next step starts — or the run closes and the remaining steps are recorded `SKIPPED`.
 
-## The step-container control plane
+`GitConfigFetcher` shells ci's own host `git` against its own bare cache, and that plus the docker
+CLI is the entire set of processes qits-ci spawns. Its docker vocabulary is container lifecycle:
+`run`, `logs`, `rm`, `ps`, `network inspect`/`create`. `exec` is not in it, not even to deliver the
+daemon binary.
 
-`eu.wohlben.qits.ci.daemonhost` is where that is going. A step container will run
-`qits-ci-daemon` — fetched by a fixed, host-authored bootstrap that overrides the image's entrypoint
-— and the daemon **dials out** to `ws://…/ci/daemon`, presenting a host-minted per-container secret,
-reports its own clone and checkout done, and receives the step's script as the reply. qits-ci
-initiates nothing toward a container and executes nothing itself; its whole docker vocabulary is
-container lifecycle.
+A step's script is **repo-controlled code**, so the step container is a hostile-code sandbox:
+`--cap-drop=ALL`, `no-new-privileges`, no docker socket, and memory/pids/cpu caps
+(`qits.ci.memory-limit`, `…pids-limit`, `…cpus`). The daemon lives *inside* that sandbox and the
+script is its child, so everything arriving over the socket is attacker-influenced data about the
+run: recorded, never trusted. The residual gap — a push is itself unauthenticated, and running
+repo-committed scripts is the feature — is a known, documented issue.
 
-**Not the execution path yet.** `CiDockerRunner` still runs every production step; the socket, the
-launch registry and the launcher are reachable only from `CiDaemonHandshakeIT`. What is live already
-is the endpoint itself and the boot sweep that `docker rm -f`s containers carrying the `qits.ci.run`
-label. Deployments that want the daemon path ahead of that need `qits.ci.daemon-version` (the
-binary's sha256, blank by default) and, if they are not on `qits-net` under the standard aliases,
-`qits.ci.container-daemon-url`; both are documented where they are shipped, in the `ci` jar's
-`META-INF/microprofile-config.properties`.
+**The daemon is pinned per run.** `qits.ci.daemon-version` is resolved once when a run is created,
+recorded on the run row, and injected into every one of that run's containers, so a deploy landing
+mid-run cannot make step 3 speak a different protocol than step 1. With the shipped url template
+that version is the binary's **sha256** and the download is qits-artifacts' OCI blob route, so the
+version pin and the integrity pin are one field. It ships **blank**, which yields a url that 404s and
+the honest never-registered failure state rather than a default this repo invented; a deployment sets
+it together with the daemon it deployed. Deployments not on `qits-net` under the standard aliases
+also need `qits.ci.container-daemon-url`. Both are documented where they are shipped, in the `ci`
+jar's `META-INF/microprofile-config.properties`.
+
+**Failures stay distinguishable.** Docker refusing the launch, a container whose bootstrap never
+produced a daemon (its own `docker logs` tail is captured *before* the reap and becomes the step's
+output), a daemon that registered and then went quiet, a structured setup failure, a lost socket and
+a genuine step timeout are six different recorded outcomes — none of them is "the step failed with
+exit −1".
+
+## Following a run, and stopping one
+
+`GET /ci/api/runs/{runId}` is the whole live surface: while the run is `RUNNING` it carries a `live`
+object — the step index in flight and the bounded tail it has printed. **Poll it.** There is no SSE
+and no WebSocket on the read side; the daemon makes live output possible, it does not oblige a push
+transport. The relay is memory and dies with the process — the persisted tail on each step row is
+the record.
+
+`POST /ci/api/runs/{runId}/cancel` answers 202 and asks the in-flight container to stop. The step it
+was on is recorded `FAILED` with "cancelled" in its output and the rest `SKIPPED`. Cancelling a run
+that is not running is a 409. It is the one operation here a person invokes on purpose, so — unlike
+the intake and the run reads — it is **not** hidden from `docs/openapi.yml`.
+
+A restart mid-run costs that run, honestly: on boot, runs left `RUNNING` are marked `FAILED`,
+containers carrying the `qits.ci.run` label are removed, and a daemon from a previous life that
+dials in presents a secret this process does not know and is closed 1008. No durability is added for
+this by design — the launch table is memory, and that is what makes the restart story free.
 
 ## Deploying it
 
@@ -149,4 +198,7 @@ The git host and its post-receive hook (qits-artifacts), the repository and work
 anything to do with running a pipeline inside a workspace container. Pipelines run in their own
 throwaway containers; a workspace is never involved.
 
-Per-step timeouts, retries, and a non-advisory gate are follow-ups, not omissions of the extraction.
+Retries, a non-advisory gate, and clone/dependency caching across the per-step containers are
+follow-ups, not omissions of the extraction. Per-step timeouts are not: a step may declare
+`timeout-seconds:` in `.config/qits/ci-post-receive.yml`, and one that declares none gets
+`qits.ci.step-timeout-seconds`.

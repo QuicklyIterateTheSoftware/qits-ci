@@ -29,7 +29,7 @@ second rule of the same kind, and three things follow:
   proxies, `ServiceLoader`, resources loaded by computed name and JNI/JNA all need registering, and
   when they are missing the failure lands at *runtime, in the binary*, while the JVM suite stays
   green. Prefer what is already in the image — `ProcessBuilder` over a process library (which is why
-  `CiDockerRunner` and `GitConfigFetcher` shell out rather than link a docker or git client), and
+  `CiProcess` and `GitConfigFetcher` shell out rather than link a docker or git client), and
   `java.lang.foreign` over JNA. If a native build needs configuration to pass, that configuration is
   part of the change.
 - **So is every config default the app boots with.** `quarkus.datasource.ci.jdbc.url` carried
@@ -48,11 +48,13 @@ package:
   that matters: no JAX-RS, no websockets. Entities are Panache; mappers are MapStruct
   `@Mapper(componentModel = "jakarta")`.
 - `service/` — `api` (the JAX-RS routes, the `ContainerRequestFilter` and the `ExceptionMapper`),
-  `security`, and `daemonhost` (the ci-daemon control socket, the launch registry and the container
-  launcher). It read "`api` only" until the daemon control plane landed; the transport lives beside
-  the API because it needs a web stack, which is the same line that put `api` here rather than in
-  `ci/`, and it is where qits-workspaces keeps its own `daemonhost` for the same reason. `ci/` keeps
-  the `CiStepRunner` seam and the orchestrator and gains no web dependency.
+  `security`, and `daemonhost` (the ci-daemon control socket, the launch registry, the container
+  launcher, the live relay and `CiDaemonStepRunner` — the sole implementation of the step seam). It
+  read "`api` only" until the daemon control plane landed; the transport lives beside the API because
+  it needs a web stack, which is the same line that put `api` here rather than in `ci/`, and it is
+  where qits-workspaces keeps its own `daemonhost` for the same reason. `ci/` keeps the
+  `CiStepRunner` seam and the orchestrator and gains no web dependency — the step runner is in
+  `service/` because it *is* the transport.
 - `ci-daemon-protocol/` — the vendored wire contract (below). Its package is
   `eu.wohlben.qits.cidaemon.protocol`, deliberately not under `eu.wohlben.qits.ci`: it is a copy of
   another repo's module and its package must stay byte-identical with the original.
@@ -105,8 +107,24 @@ Three things bite:
   package's sources for `.get()`, `.join()` and `sendTextAndAwait`. If you add an await, give it a
   deadline or that test tells you so.
 
-Phase B landed this behind `CiDockerRunner`, which still executes production steps: the registry,
-socket and launcher are reachable only from `CiDaemonHandshakeIT` until the seam swaps.
+This is the execution path, not a plan for one. `CiDaemonStepRunner` is the only implementation of
+`CiStepRunner`; the approach it replaced — one `docker run` of a composite `bash -c` with a
+clone/checkout prelude and a `PRELUDE_FAILED_MARKER` sentinel — was **eradicated**, not retired. It
+does not exist in any form, there is no config toggle selecting it, and no fake performs its
+semantics. If a `bash -c` of repository content ever reappears here, host-side or in a docker argv,
+that is the regression, not a refactor.
+
+Two more things live in this package and belong to it rather than to `ci/`:
+
+- **`CiStepRelay`** is both halves of one bound. It is the live surface (`GET /ci/api/runs/{runId}`'s
+  `live` object, polled — there is no SSE and no WebSocket) *and* the accumulator the persisted tail
+  is read back out of at the step's end. One buffer, one budget: the bound is a security property
+  and two implementations of it drift into one that is not applied.
+- **Cancellation** is a flag plus a `Cancel` frame. A cancelled step still *finishes* — the daemon
+  answers with a terminal frame — so the worker's await completes normally and cancelledness is read
+  from `CiRunService`'s own flag, never inferred from how the call came back. Before a step has
+  started there is nothing to cancel, so the launch is torn down instead, which completes the same
+  await at once.
 
 ## Addressing
 
@@ -141,10 +159,21 @@ Two things reaching this code are attacker-controlled and must stay that way in 
   to blank. `CiIdentifiers.require{RepoId,Branch,Sha}` validates all three *before* they reach a
   filesystem path or an argv. Never widen those, never bypass them, never interpolate an identifier
   into a shell string.
-- **The step script.** It is code from a repository. It rides into the container as a bash
-  positional argument, never spliced into the prelude, and the container gets `--cap-drop=ALL`,
-  `no-new-privileges` and resource caps. Anything that would hand a step more privilege — a docker
-  socket, a host mount, a shared network with services — is a security change, not a convenience.
+- **The step script.** It is code from a repository, and **qits-ci never executes it.** No code
+  path here runs repo-controlled code as a host process, and none runs it through `docker exec`. A
+  script leaves this process as a field of one JSON frame, on a socket the step container's own
+  daemon dialled outbound, and executes as that daemon's child inside a sandbox with
+  `--cap-drop=ALL`, `no-new-privileges`, no docker socket and resource caps. qits-ci's whole docker
+  vocabulary is container lifecycle — `run`, `logs`, `rm`, `ps`, `network inspect`/`create` — and
+  `exec` is not in it, not even as a way to deliver the daemon binary. The only host processes this
+  service spawns are that CLI and its own `git` against its own bare cache: ci tooling over
+  ci-owned state, never pipeline content.
+
+  `bash -c <anything from a repository>` appearing anywhere in this repo, in `src/main` or
+  `src/test`, host-side or inside a docker argv, is the regression this paragraph exists to make
+  unambiguous. The grep is `grep -rn "bash -c\|PRELUDE_FAILED\|docker exec"` over both modules; it
+  must find nothing that executes. Anything that would hand a step more privilege — a docker socket,
+  a host mount, a shared network with services — is a security change, not a convenience.
 - **Everything arriving over the ci-daemon control socket.** A container turns hostile the moment
   step code runs in it, so its frames are data about a run: recorded, never trusted. The `daemonId`
   in a `Hello` is a claim the host checks against the connection it already authenticated rather than
@@ -195,11 +224,18 @@ mechanism at all — which is what every service here was before the header land
   and the two silently drift. `src/test/resources/application.properties` carries only genuine
   test-only overrides (in-memory H2, `target/` data dir, the `file://` git-host stand-in).
 - `OpenApiSchemaExportTest` writes `docs/openapi.yml`. Regenerate and commit when the surface
-  changes: `./mvnw -pl service test -Dtest=OpenApiSchemaExportTest`.
-  **`paths: {}` is the correct output here and not a broken generator** — all three ci operations
-  carry `@Operation(hidden = true)`, because they are machine surfaces rather than part of the JSON
-  API the Angular client consumes, and the monorepo's own document omits them for the same reason.
-  The file is committed anyway so that *unhiding* one shows up as a diff.
+  changes: `./mvnw -pl service -am test -Dtest=OpenApiSchemaExportTest
+  -Dsurefire.failIfNoSpecifiedTests=false`. Both extra flags are load-bearing: `-am` because the
+  reactor's own modules are not installed anywhere, so `-pl service` alone cannot resolve them, and
+  `failIfNoSpecifiedTests=false` because `-am` then walks the sibling modules, which have no test by
+  that name.
+  **The document holds exactly one path, and that is correct.** The intake and the two run reads
+  carry `@Operation(hidden = true)` because they are machine surfaces rather than part of the JSON
+  API the Angular client consumes, and the monorepo's own document omits them for the same reason —
+  so for a long time this file was `paths: {}` and *that* was the right output. `POST
+  /ci/api/runs/{runId}/cancel` is deliberately **not** hidden: it is the one operation here a person
+  invokes on purpose, so it belongs in the document a client is generated from. The file is committed
+  precisely so that hiding or unhiding an operation shows up as a diff.
   Note the test runs as a `@QuarkusTest` and indexes the test classpath, so a `@Path` resource under
   `src/test` would land in the document — that is why `IdentityEchoResource` is hidden too.
 - A `Failed to start quarkus` / `Port already bound: 8081` failure is the known flake
@@ -213,7 +249,7 @@ mechanism at all — which is what every service here was before the header land
   because they only exist once the app is built (the routes' build-time prefixes, the shipped
   datasource URL, Flyway's migration surviving as a resource, SnakeYAML and Panache on a real run,
   and that `/ci/daemon` is on the artifact's router). Its pipeline declares no steps, so it needs no
-  container; step execution stays in `CiDockerRunnerIT`.
+  container; step execution stays in `CiDaemonGateIT`.
   The `/ci/daemon` assertion is there because websockets-next registers that endpoint at
   *augmentation*: "the extension is native-image supported" is a claim the binary has to prove here,
   and a native build that silently dropped the route would otherwise surface as every run stuck at
@@ -228,7 +264,7 @@ mechanism at all — which is what every service here was before the header land
 - `CiDaemonHandshakeIT` is the **phase-B gate**: a real container from `buildpack-deps:scm` (verified
   to carry git, bash, wget *and* curl — the whole image contract), a real download of the daemon
   binary from a file-served stand-in, a real dial back, a real step. Tagged `extended`, run with
-  `-DskipITs=false`, excluded from the `native` profile exactly as `CiDockerRunnerIT` is and for the
+  `-DskipITs=false`, excluded from the `native` profile as every docker-backed IT here is and for the
   same reason. It carries **the same host-networking assumption and the same caveat**: the assumptions
   cover docker, the image and the binary, but not the container's route back to the JVM through
   `host.docker.internal`, so on a host without one it fails rather than skips — do not "fix" that by
@@ -261,20 +297,36 @@ mechanism at all — which is what every service here was before the header land
      http-backend` as CGI, which is what qits-artifacts does behind `/git/<repoId>`. Do not "fix" a
      recurrence by dropping `--depth`: depth 50 is deliberate (a recent-but-not-tip sha must still be
      in the clone) and the daemon is behaving correctly for production.
-- The ci module's suite is plain JUnit plus `@QuarkusTest`, and fakes the runner
-  (`ci/src/test/.../FakeCiStepRunner` scripts a `StepResult` per step index).
-- The service module's `FakeCiStepRunner` is a **different, honest** fake: it performs the real step
-  semantics (clone at the pushed sha, `bash -c <script>`) as host processes. The two fakes are
+- **Both `FakeCiStepRunner`s are scripted-event fakes, and neither performs a step.** A test
+  declares the chunks a step "prints" and the `StepResult` it ends with; the fake replays that
+  against the listener and returns it. No processes, no `bash`, no clone. The service module's copy
+  used to be a deliberately *honest* fake that cloned and ran the script as host processes — that
+  died with the approach it modelled, because a fixture that keeps executing repository code keeps
+  the retired approach alive in the test sources after it left the main ones. Real step semantics are
+  proven in exactly one place, `CiDaemonGateIT`, against a real container. The two fakes are
   duplicated on purpose — the modules do not share a test classpath.
+  The ci module's copy also carries a `during(stepIndex, …)` hook: it runs something on the worker
+  thread *while* a step is executing, which is how a cancellation arriving mid-step is staged with no
+  sleep and no race about when "mid-step" is.
 - `CiPipelineBoundaryTest` starts at the intake POST, not at a `git push`, because the git host is
   in qits-artifacts. Assertions about what the git host's hook does or does not send belong there.
-- `CiDockerRunnerIT` needs real docker, a built `qits/workspace` image, **and** a step container
-  that can reach `host.docker.internal` on the `qits.ci.network` it joins. `skipITs=true` is the
-  default so `mvn verify` is runnable anywhere; run it with `-DskipITs=false`. Its JUnit assumption
-  only covers the first two — on a host where the container cannot route back to the JVM (plain
-  WSL2, no compose stack up) it fails rather than skips. That is a property of the IT, carried over
-  from the monorepo unchanged; do not "fix" it by weakening the assertions.
+- `CiDaemonGateIT` is **the** gate: the outline's whole lifecycle through the real intake path, on
+  real containers. A two-step pipeline pushed into a real bare, the event POSTed, live chunks read
+  off the `live` object mid-run, terminal per-step rows with host-stamped timestamps after, a
+  cancellation honored mid-step, and a per-step timeout recorded as timed-out rather than failed. It
+  deliberately includes a **noisy** step (`yes` for a second) — bounded memory under a chunk flood is
+  a property of the relay, and the only place to prove it is against a daemon really producing them.
+  It needs the same three things `CiDaemonHandshakeIT` needs (docker, the step image,
+  `-Dqits.ci.daemon-binary=<path>`) plus the same host-networking route back to the JVM, and it
+  carries the same caveat: on a host without that route it fails rather than skips. Do not "fix" that
+  by weakening the assertions.
+  It reaches the **injected** launcher rather than a hand-wired one, because the point is the
+  production path — so it overrides the container-facing config through a `QuarkusTestProfile` whose
+  `getConfigOverrides()` starts the fixture's server first (the port has to exist before the app
+  boots), and unwraps the launcher's CDI proxy for the one value that cannot be known that early, the
+  daemon url with this JVM's own test port in it. Both are commented in place; neither is a pattern
+  to spread.
   It is tagged `extended`, and the `native` profile excludes that tag (`qits.it.excluded-groups` in
   the root pom) while flipping `skipITs`: a native build has to run the ITs to be worth anything,
-  and this one would fail it for reasons that are about the host's networking rather than the
-  binary. `-DskipITs=false` still runs it, unchanged.
+  and this one would fail it for reasons that are about the host's docker and networking rather than
+  the binary. `-DskipITs=false` still runs it, unchanged.

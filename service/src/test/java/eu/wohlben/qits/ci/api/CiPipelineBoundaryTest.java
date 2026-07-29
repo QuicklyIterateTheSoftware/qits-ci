@@ -2,28 +2,40 @@ package eu.wohlben.qits.ci.api;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import eu.wohlben.qits.ci.control.CiStepRunner.StepOutcome;
+import eu.wohlben.qits.ci.control.CiStepRunner.StepResult;
+import eu.wohlben.qits.ci.control.FakeCiStepRunner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import io.restassured.path.json.JsonPath;
+import jakarta.inject.Inject;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
  * The whole MVP loop at the seams this repo owns (docs/epics/qits-ci/): a post-receive event
  * reaches the intake, ci fetches the pushed commit back from the git host, reads {@code
- * .config/qits/ci-post-receive.yml} out of it, and the (host-process) fake runner executes the
- * steps against a real clone at the pushed sha — asserted through the public read surface.
- * Docker-free: only {@code CiDockerRunner} is faked (by {@code
- * eu.wohlben.qits.ci.control.FakeCiStepRunner} in this module's test sources).
+ * .config/qits/ci-post-receive.yml} out of it, parses the steps and drives them through the step
+ * seam — asserted through the public read surface. Docker-free: only the step seam is faked (by
+ * {@code eu.wohlben.qits.ci.control.FakeCiStepRunner} in this module's test sources).
+ *
+ * <p><b>What a step "did" is scripted, not performed.</b> The fake used to clone and run the script
+ * as host processes, so assertions here could read a committed file back out of a step's output;
+ * that fake died with the approach it modelled, because qits-ci never executes a repository's code.
+ * What survives at this level is everything between the intake and the read surface — which config
+ * a push produced, how many steps it declared, what each step was asked to run, and how outcomes
+ * become rows. What a real container does with a real script is {@code CiDaemonGateIT}'s job.
  *
  * <p><b>Where the loop starts.</b> The git host is not in this repo — it belongs to qits-artifacts,
  * and it reaches ci over HTTP (its {@code CiPostReceiveNotifier} POSTs to {@code
@@ -53,6 +65,13 @@ public class CiPipelineBoundaryTest {
   @ConfigProperty(name = "qits.ci.git-host-url")
   String gitHostUrl;
 
+  @Inject FakeCiStepRunner fakeRunner;
+
+  @BeforeEach
+  void resetRunner() {
+    fakeRunner.reset();
+  }
+
   @Test
   public void pushWithConfigRecordsAGreenRunWithStepOutputs() throws Exception {
     String repoId = seedOrigin();
@@ -64,6 +83,8 @@ public class CiPipelineBoundaryTest {
     assertEquals("ci-green", run.get("branch"));
     assertEquals(sha, run.get("commitSha"));
     assertNull(run.get("steps"), "listing must not carry step output");
+    // Every run is pinned to one daemon build, resolved before the first container.
+    assertEquals("fake-daemon", run.get("daemonVersion"));
 
     JsonPath detail =
         given()
@@ -77,10 +98,22 @@ public class CiPipelineBoundaryTest {
     assertEquals(2, steps.size());
     assertEquals("SUCCESS", steps.get(0).get("status"));
     assertEquals(0, steps.get(0).get("exitCode"));
-    // The step really ran against a clone of the pushed commit (reads the committed file).
-    assertTrue(steps.get(0).get("output").toString().contains("one-says-hello"));
+    assertTrue(steps.get(0).get("output").toString().contains("step 0 ran"));
     assertEquals("SUCCESS", steps.get(1).get("status"));
-    assertTrue(steps.get(1).get("output").toString().contains("two-ran"));
+    assertNotNull(steps.get(1).get("startedAt"), "a step that ran carries host-stamped timestamps");
+    assertNotNull(steps.get(1).get("finishedAt"));
+    // The run finished, so there is nothing live left to follow.
+    assertNull(detail.get("live"), "a finished run must expose no live step");
+
+    // The scripts the config declared reached the seam verbatim, in declaration order — this is the
+    // assertion the honest fake used to make by executing them.
+    assertEquals(2, fakeRunner.executed().size());
+    assertTrue(
+        fakeRunner.executed().get(0).script().contains("one-says-$(cat hello.txt)"),
+        fakeRunner.executed().get(0).script());
+    assertTrue(fakeRunner.executed().get(1).script().contains("two-ran"));
+    assertEquals(sha, fakeRunner.executed().get(0).sha());
+    assertEquals("ci-green", fakeRunner.executed().get(0).branch());
   }
 
   @Test
@@ -99,6 +132,8 @@ public class CiPipelineBoundaryTest {
               - image: alpine:3
                 script: echo never-runs
             """);
+    fakeRunner.script(
+        0, new StepResult(7, false, StepOutcome.OK, "before-the-crash"), "before-the-crash");
     postReceive(repoId, "ci-red", ZERO_SHA, sha);
 
     Map<String, Object> run = awaitTerminalRun(repoId);
@@ -110,6 +145,20 @@ public class CiPipelineBoundaryTest {
     assertEquals(7, steps.get(0).get("exitCode"));
     assertTrue(steps.get(0).get("output").toString().contains("before-the-crash"));
     assertEquals("SKIPPED", steps.get(1).get("status"));
+    // The remainder is written when the run closes, terminal like every other row — never PENDING.
+    assertNull(steps.get(1).get("startedAt"));
+  }
+
+  @Test
+  public void cancellingAFinishedRunIsRefusedAndAnUnknownRunIsNotFound() throws Exception {
+    String repoId = seedOrigin();
+    String sha = pushBranchWithConfig(repoId, "ci-done", CONFIG_GREEN);
+    postReceive(repoId, "ci-done", ZERO_SHA, sha);
+    Map<String, Object> run = awaitTerminalRun(repoId);
+
+    // 409, not a cheerful 202: a finished run has nothing to stop.
+    given().when().post("/ci/api/runs/" + run.get("id") + "/cancel").then().statusCode(409);
+    given().when().post("/ci/api/runs/no-such-run/cancel").then().statusCode(404);
   }
 
   @Test

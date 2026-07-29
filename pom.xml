@@ -10,9 +10,11 @@
          ci reads the config back out of the pushed commit over the git host's smart-HTTP URL, runs
          each step's script in a fresh container, and records an advisory pass/fail per push.
 
-         This context is HOST-SIDE by design and lives outside any workspace container:
-         CiDockerRunner spawns ephemeral `docker run` steps on its own network, and GitConfigFetcher
-         keeps its own bare git cache. That is the boundary, not an accident of the monorepo.
+         This context is HOST-SIDE by design and lives outside any workspace container: it starts
+         one ephemeral step container per step on its own network — each running a qits-ci-daemon
+         that dials back and executes the step as its own child — and GitConfigFetcher keeps its own
+         bare git cache. qits-ci itself executes nothing. That is the boundary, not an accident of
+         the monorepo.
 
          DELIBERATELY ITS OWN GAV, the qits-workspaces case rather than the qits-workspace-daemon
          one. The child directories are `ci` and `service`, generic names that would collide in the
@@ -59,20 +61,21 @@
         <lombok-mapstruct-binding.version>0.2.0</lombok-mapstruct-binding.version>
         <mapstruct.version>1.6.3</mapstruct.version>
 
-        <!-- CiDockerRunnerIT needs real docker and a built `qits/workspace` image, neither of which
-             a fresh clone has. `mvn verify` must be green without them — the same default the
-             monorepo and qits-workspaces carry. Run it with -DskipITs=false. `service`'s `native`
-             profile also flips it, so a `-Dnative` build exercises the binary it just compiled
-             instead of packaging it and asserting nothing. -->
+        <!-- The docker-backed ITs (CiDaemonHandshakeIT, CiDaemonGateIT) need real docker, a real
+             step image and a built qits-ci-daemon binary, none of which a fresh clone has. `mvn
+             verify` must be green without them — the same default the monorepo and qits-workspaces
+             carry. Run them with -DskipITs=false. `service`'s `native` profile also flips it, so a
+             `-Dnative` build exercises the binary it just compiled instead of packaging it and
+             asserting nothing. -->
         <skipITs>true</skipITs>
 
         <!-- JUnit tags failsafe must NOT run, empty by default so `-DskipITs=false` still means
              "run everything", which is what AGENTS.md documents. Only the `native` profile sets it,
-             to `extended`: that build wants the @QuarkusIntegrationTest against the binary, and
-             CiDockerRunnerIT — tagged `extended`, needing real docker AND a step container that can
-             route back to the JVM — is an infrastructure test that has nothing to say about
-             native-image and fails rather than skips on a plain WSL2 host. Excluding it there keeps
-             the native gate about the binary; it is still run, unchanged, by -DskipITs=false. -->
+             to `extended`: that build wants the @QuarkusIntegrationTest against the binary, and the
+             docker-backed ITs — tagged `extended`, needing real docker AND a step container that can
+             route back to the JVM — are infrastructure tests that have nothing to say about
+             native-image and fail rather than skip on a plain WSL2 host. Excluding them there keeps
+             the native gate about the binary; they are still run, unchanged, by -DskipITs=false. -->
         <qits.it.excluded-groups/>
         <!-- Surefire's @{argLine} has no value unless something (jacoco/quarkus) sets it. -->
         <argLine/>

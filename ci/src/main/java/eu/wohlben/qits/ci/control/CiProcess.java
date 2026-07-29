@@ -9,10 +9,14 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * ci's own tiny process shell-out (the {@code DockerExecutor.runCapturing} shape plus the {@code
- * ProcessExecutor} hard timeout) — deliberately NOT shared with {@code domain}'s executors, so the
- * runner leaves with the module. Combined stdout+stderr, drained on a virtual thread; on timeout
- * the process is {@link Process#destroyForcibly() force-killed} and whatever output was captured so
- * far is returned with {@code timedOut=true}.
+ * ProcessExecutor} hard timeout) — deliberately NOT shared with {@code domain}'s executors, so this
+ * context stays extractable. Combined stdout+stderr, drained on a virtual thread; on timeout the
+ * process is {@link Process#destroyForcibly() force-killed} and whatever output was captured so far
+ * is returned with {@code timedOut=true}.
+ *
+ * <p><b>What it is used for is the docker CLI and ci's own git, and nothing else.</b> No caller
+ * anywhere hands it a step's script: a step's script is repo-controlled code, it never becomes a
+ * host process, and the only argv it ever reaches is none. See the invariant in {@code CLAUDE.md}.
  *
  * <p>Output is <b>bounded while reading</b>: the buffer keeps only the trailing {@code maxChars} (a
  * step's tail is where the failure is) and reports {@code truncated}. This is not merely cosmetic —
@@ -20,11 +24,11 @@ import java.util.concurrent.TimeUnit;
  * cat} of a huge file), and buffering it whole would let one step OOM the shared qits JVM.
  *
  * <p><b>Public so that {@code service}'s {@code daemonhost} can shell the docker CLI too</b> (launch,
- * {@code logs}, {@code rm -f}, {@code network inspect/create}) without a second copy of the rolling
- * tail. A second copy is the thing to avoid here specifically: the bound is a security property, not
- * a nicety, and two implementations of it drift into one that is unbounded. It stays framework-free
- * and stays in this module — the container-lifecycle vocabulary outlives the runner that introduced
- * it.
+ * {@code logs}, {@code rm -f}, {@code ps}, {@code network inspect/create}) without a second copy of
+ * the rolling tail. A second copy is the thing to avoid here specifically: the bound is a security
+ * property, not a nicety, and two implementations of it drift into one that is unbounded. It stays
+ * framework-free and stays in this module — the container-lifecycle vocabulary outlived the runner
+ * that introduced it.
  */
 public final class CiProcess {
 

@@ -40,4 +40,15 @@ public class CiRun extends PanacheEntityBase {
 
   @Column(name = "finished_at")
   public Instant finishedAt;
+
+  /**
+   * Which {@code qits-ci-daemon} build produced this run's results — resolved once when the run is
+   * created and repeated into every one of its step containers, so a deploy landing mid-run cannot
+   * make step 3 speak a different protocol than step 1, and the row records forever what ran it.
+   *
+   * <p>Null on a run that never launched a container (a {@code CONFIG_ERROR}), and on every run
+   * recorded before the daemon existed.
+   */
+  @Column(name = "daemon_version", length = 64)
+  public String daemonVersion;
 }

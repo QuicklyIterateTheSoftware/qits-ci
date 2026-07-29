@@ -1,6 +1,7 @@
 package eu.wohlben.qits.ci.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -63,6 +64,45 @@ public class CiConfigParserTest {
             """);
     assertEquals(1, pipeline.steps().size());
     assertEquals("alpine:3", pipeline.steps().get(0).image());
+  }
+
+  @Test
+  public void anAbsentTimeoutMeansTheDeploymentsDefault() {
+    // Null rather than a number: the parser does not know what a deployment configured, and the
+    // absent field has to keep meaning exactly what it meant before the key existed.
+    CiPipeline pipeline = parser.parse("steps:\n  - image: alpine:3\n    script: \"true\"\n");
+    assertNull(pipeline.steps().get(0).timeoutSeconds());
+  }
+
+  @Test
+  public void aDeclaredTimeoutIsReadPerStep() {
+    CiPipeline pipeline =
+        parser.parse(
+            """
+            steps:
+              - image: alpine:3
+                script: "true"
+                timeout-seconds: 45
+              - image: alpine:3
+                script: "true"
+            """);
+    assertEquals(45, pipeline.steps().get(0).timeoutSeconds());
+    assertNull(pipeline.steps().get(1).timeoutSeconds());
+  }
+
+  @Test
+  public void anUnusableTimeoutIsAConfigErrorRatherThanIgnored() {
+    // The leniency above is about keys this parser does not KNOW. It knows this one, so a repo that
+    // meant to bound a step and mistyped the number must find out rather than silently get 900s.
+    assertThrows(
+        CiConfigException.class,
+        () -> parser.parse("steps:\n  - image: alpine:3\n    script: \"true\"\n    timeout-seconds: soon\n"));
+    assertThrows(
+        CiConfigException.class,
+        () -> parser.parse("steps:\n  - image: alpine:3\n    script: \"true\"\n    timeout-seconds: 0\n"));
+    assertThrows(
+        CiConfigException.class,
+        () -> parser.parse("steps:\n  - image: alpine:3\n    script: \"true\"\n    timeout-seconds: -5\n"));
   }
 
   @Test
