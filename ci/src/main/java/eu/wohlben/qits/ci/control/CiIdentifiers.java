@@ -3,13 +3,15 @@ package eu.wohlben.qits.ci.control;
 import eu.wohlben.qits.ci.error.BadRequestException;
 
 /**
- * Validates the three identifiers that arrive from the event intake before they reach a filesystem
- * path, a {@code git} argv, or a container script. ci's inputs are attacker-reachable by design —
- * the intake sits on the token-free {@code PublicPaths} list and its token is blank in dev — so
- * every one of them is checked here rather than trusted.
+ * Validates the untrusted strings that reach a filesystem path or an argv. Three arrive from the
+ * event intake — which sits on the token-free {@code PublicPaths} list with a token that is blank in
+ * dev — and one, the step's {@code image}, arrives from a file in the repository being tested. All
+ * four are attacker-reachable by design, so all four are checked here rather than trusted.
  *
- * <p>The runner additionally passes the url and sha as {@code bash} <em>positional arguments</em>
- * rather than interpolating them, so these patterns are defence in depth, not the only guard.
+ * <p>These patterns are <b>defence in depth, not the only guard</b>. Nothing here is ever
+ * interpolated into a shell string: the container's whole contract rides as environment and the
+ * bootstrap is a constant, so an argv assembled from these values is passed to {@code
+ * ProcessBuilder}, which never re-splits it.
  */
 public final class CiIdentifiers {
 
@@ -42,6 +44,26 @@ public final class CiIdentifiers {
       throw new BadRequestException("Invalid commit sha");
     }
     return sha;
+  }
+
+  /**
+   * The step's container image, as declared in the repository's own pipeline config.
+   *
+   * <p>Deliberately loose: an image reference can carry a registry host, a port, a path, a tag and a
+   * digest, and deciding which of those resolve is the registry's job, not this one's. What it must
+   * not do is <b>begin with {@code -}</b>. That value is handed to the docker CLI as a positional
+   * argument, and while no exploit is known through it — {@code ProcessBuilder} never shell-splits,
+   * and the fixed {@code -c <BOOTSTRAP>} tokens that follow defeat the obvious re-parses — "the
+   * argument parser will surely never take this for a flag" is not a claim worth defending once a
+   * year. Hardening, not a fix for anything demonstrated.
+   *
+   * @throws BadRequestException if the image is blank or could be read as an option
+   */
+  public static String requireImage(String image) {
+    if (image == null || image.isBlank() || image.startsWith("-")) {
+      throw new BadRequestException("Invalid step image");
+    }
+    return image;
   }
 
   /**

@@ -73,10 +73,13 @@ public class CiDaemonStepRunner implements CiStepRunner {
 
   @Override
   public StepResult run(StepSpec spec, StepListener listener) {
-    // Before anything reaches an argv: the intake is unauthenticated and these three arrive from it.
+    // Before anything reaches an argv, and before a secret is minted or a relay opened: three of
+    // these arrive from the unauthenticated intake and the fourth from a file in the repository
+    // being tested. The launcher checks them again at the argv itself.
     CiIdentifiers.requireRepoId(spec.repoId());
     CiIdentifiers.requireBranch(spec.branch());
     CiIdentifiers.requireSha(spec.sha());
+    CiIdentifiers.requireImage(spec.image());
 
     relay.begin(spec.runId(), spec.stepIndex());
     CiDaemonRegistry.Credentials credentials =

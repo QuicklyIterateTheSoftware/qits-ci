@@ -39,6 +39,14 @@ public class CiDaemonRegistryTimeoutTest {
   /** Generous: the point is bounded, not fast. A hang fails this by timing the suite out. */
   private static final long MUST_RETURN_WITHIN_MS = 5_000;
 
+  /**
+   * Every spelling of "wait with no deadline" this package must not contain. Hoisted out of the grep
+   * below so it can be tested against known strings — a guard whose coverage is itself unasserted is
+   * how {@code closeAndAwait} slipped past an earlier version of it.
+   */
+  private static final Pattern UNTIMED =
+      Pattern.compile("\\.(get|join|indefinitely)\\(\\)|[A-Za-z]+AndAwait\\s*\\(");
+
   @Test
   public void everyAwaitReturnsWhenNothingEverDials() {
     CiDaemonRegistry registry = new CiDaemonRegistry();
@@ -120,30 +128,79 @@ public class CiDaemonRegistryTimeoutTest {
    * only prove the awaits that exist today are bounded — this is what stops a fourth one from being
    * added untimed next year, and it is cheap enough to be worth the unusual shape.
    *
-   * <p>{@code sendTextAndAwait} is on the list beside {@code get()} and {@code join()} because it is
-   * exactly {@code sendText(m).await().indefinitely()} — the precedent's spelling, and an untimed
-   * block on a socket whose peer runs repo-controlled code.
+   * <p><b>The {@code …AndAwait} family is banned by shape rather than by name</b>, and that
+   * generalisation was bought the hard way. The pattern first listed {@code sendTextAndAwait} and
+   * {@code sendBinaryAndAwait} explicitly, on the correct reasoning that each is
+   * {@code sendText(m).await().indefinitely()} — and then sat green over two live calls to {@code
+   * closeAndAwait}, which is the identical shape under a name nobody had thought to enumerate. The
+   * untimed part of these lives inside the framework's default method, so it never appears in this
+   * package's own source and only the <em>call</em> is visible here. Any convenience the extension
+   * spells that way is one this package must not take: give the bounded form instead —
+   * {@code close(…).await().atMost(…)}, {@code sendText(m).await().atMost(…)}.
+   *
+   * <p>The one thing the shape rule cannot catch is a wait added through some future spelling that
+   * looks like neither. That is what the class javadoc on {@code CiDaemonRegistry} is for, and why
+   * this test's failure message says what to do rather than only that something is wrong.
    */
   @Test
   public void noAwaitInTheDaemonhostPackageIsUntimed() throws IOException {
     Path pkg = Path.of("src/main/java/eu/wohlben/qits/ci/daemonhost");
     assertTrue(Files.isDirectory(pkg), "expected the daemonhost sources at " + pkg.toAbsolutePath());
 
-    Pattern untimed =
-        Pattern.compile("\\.(get|join|indefinitely)\\(\\)|sendTextAndAwait|sendBinaryAndAwait");
     List<String> offences = new ArrayList<>();
     try (Stream<Path> sources = Files.list(pkg)) {
       for (Path source : sources.filter(p -> p.toString().endsWith(".java")).toList()) {
         List<String> lines = Files.readAllLines(source);
         for (int i = 0; i < lines.size(); i++) {
-          Matcher matcher = untimed.matcher(stripComment(lines.get(i)));
+          Matcher matcher = UNTIMED.matcher(stripComment(lines.get(i)));
           if (matcher.find()) {
             offences.add(source.getFileName() + ":" + (i + 1) + " " + lines.get(i).strip());
           }
         }
       }
     }
-    assertEquals(List.of(), offences, "untimed waits in daemonhost");
+    assertEquals(
+        List.of(),
+        offences,
+        "untimed waits in daemonhost — the run worker parks here, so one of these wedges all of CI."
+            + " Spell the bounded form instead: close(…).await().atMost(CLOSE_TIMEOUT),"
+            + " sendText(m).await().atMost(SEND_TIMEOUT), future.get(timeout, unit)");
+  }
+
+  /**
+   * The grep above can only fail on what its pattern matches, so assert what its pattern matches.
+   *
+   * <p>This exists because the earlier pattern enumerated {@code sendTextAndAwait} and {@code
+   * sendBinaryAndAwait} by name and therefore stayed green over two live {@code closeAndAwait}
+   * calls — the same {@code …().await().indefinitely()} under a name the list had not anticipated.
+   * A guard that can be silently incomplete is worth what its coverage is, and its coverage was
+   * never asserted. Now it is, in both directions: the conveniences must be caught, and the bounded
+   * spellings the package actually uses must not be, or the guard becomes noise someone disables.
+   */
+  @Test
+  public void theUntimedPatternCatchesEveryConvenienceAndNoBoundedSpelling() {
+    for (String banned :
+        List.of(
+            "connection.closeAndAwait();",
+            "connection.closeAndAwait(new CloseReason(1008, reason));",
+            "connection.sendTextAndAwait(text);",
+            "connection.sendBinaryAndAwait(bytes);",
+            "connection.sendPingAndAwait(buffer);",
+            "return future.get();",
+            "return future.join();",
+            "uni.await().indefinitely();")) {
+      assertTrue(UNTIMED.matcher(banned).find(), "must be flagged: " + banned);
+    }
+    for (String allowed :
+        List.of(
+            "connection.close().await().atMost(CLOSE_TIMEOUT);",
+            "connection.close(reason).await().atMost(CLOSE_TIMEOUT);",
+            "connection.sendText(codec.encode(message)).await().atMost(SEND_TIMEOUT);",
+            "return future.get(Math.max(0, timeout.toMillis()), TimeUnit.MILLISECONDS);",
+            "Launch launch = launches.get(daemonId);",
+            "return relay.snapshot(runId).map(Snapshot::output).orElse(\"\");")) {
+      assertFalse(UNTIMED.matcher(allowed).find(), "must not be flagged: " + allowed);
+    }
   }
 
   /** Crude but sufficient: the pattern only has to survive prose about itself in the javadoc. */

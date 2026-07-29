@@ -110,11 +110,19 @@ public class CiDaemonSocket {
     }
   }
 
+  /**
+   * Refuse a dial, with a deadline on the refusal.
+   *
+   * <p>Bounded through {@link CiDaemonRegistry#closeBounded} rather than {@code closeAndAwait} for
+   * the package's one rule: that convenience is {@code close().await().indefinitely()}, and the peer
+   * being refused here is by definition one this host has no reason to trust — an unknown id, a
+   * wrong secret, or something claiming a launch that is already connected. A caller that could hang
+   * the refusal could pin a virtual thread per dial simply by never completing the handshake.
+   */
   private void close(WebSocketConnection connection, String reason) {
-    try {
-      connection.closeAndAwait(new CloseReason(CiDaemonRegistry.CLOSE_UNAUTHORIZED, reason));
-    } catch (RuntimeException e) {
-      LOG.debugf("Closing a refused ci-daemon dial failed: %s", e.getMessage());
-    }
+    CiDaemonRegistry.closeBounded(
+        connection,
+        new CloseReason(CiDaemonRegistry.CLOSE_UNAUTHORIZED, reason),
+        "a refused ci-daemon dial");
   }
 }

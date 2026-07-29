@@ -12,6 +12,7 @@ import eu.wohlben.qits.cidaemon.protocol.RunStep;
 import eu.wohlben.qits.cidaemon.protocol.StepChunk;
 import eu.wohlben.qits.cidaemon.protocol.StepFinished;
 import eu.wohlben.qits.cidaemon.protocol.Stream;
+import io.quarkus.websockets.next.CloseReason;
 import io.quarkus.websockets.next.WebSocketConnection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -41,11 +42,22 @@ import org.jboss.logging.Logger;
  * one step at a time, and that thread used to park on a {@code docker run} process. It now parks
  * here instead: {@link #awaitRegistered}, {@link #awaitInitialized} and {@link #awaitFinished} each
  * block on one {@code CompletableFuture} per lifecycle transition while chunks flow to the step's
- * listener as they arrive. The failure mode that swap introduces is a future that never completes
- * wedging all of CI, so <b>every await in this package carries its transition's timeout and there
- * is no untimed {@code get()} anywhere in it</b> — {@link #await} is the single place a future is
- * waited on, it always passes a deadline, and {@code CiDaemonRegistryTimeoutTest} holds both the
- * behaviour and the absence of a second, untimed one.
+ * listener as they arrive. The failure mode that swap introduces is anything that never returns
+ * wedging all of CI, so <b>nothing in this package waits without a deadline</b> — and that covers
+ * three kinds of wait, not one:
+ *
+ * <ul>
+ *   <li>the lifecycle futures, through {@link #await}, the single place a future is waited on and
+ *       one that always passes a deadline;
+ *   <li>writing a frame, through {@link #send}, which spells out {@code .await().atMost(…)} rather
+ *       than taking the {@code sendTextAndAwait} convenience;
+ *   <li>closing a socket, through {@link #closeBounded}, for the same reason and against the same
+ *       convenience — {@code closeAndAwait} is {@code close().await().indefinitely()} with the
+ *       untimed part one frame out of sight.
+ * </ul>
+ *
+ * <p>{@code CiDaemonRegistryTimeoutTest} holds the behaviour and greps this package for every one of
+ * those conveniences, so a fourth wait added untimed fails a build rather than a run.
  *
  * <p><b>The secret authenticates the container, and only for one thing.</b> It is minted per launch
  * from {@link SecureRandom}, injected as env, presented on the dial, compared with {@link
@@ -80,6 +92,18 @@ public class CiDaemonRegistry {
 
   /** How long one frame may take to leave. See {@link #send}. */
   private static final Duration SEND_TIMEOUT = Duration.ofSeconds(30);
+
+  /**
+   * How long a close handshake may take before the host stops caring.
+   *
+   * <p>Much shorter than {@link #SEND_TIMEOUT} on purpose. A send is trying to deliver something the
+   * run needs; a close is trying to be polite to a peer the host has already finished with, and the
+   * container is about to be {@code docker rm -f}'d either way. The one moment this fires is the one
+   * that matters most: the step-timeout backstop closes a socket whose peer is <em>by definition</em>
+   * not answering, and the {@code docker rm -f} that actually removes the container is the next
+   * statement after it.
+   */
+  static final Duration CLOSE_TIMEOUT = Duration.ofSeconds(5);
 
   @Inject CiDaemonMessageCodec codec;
 
@@ -258,6 +282,11 @@ public class CiDaemonRegistry {
    * Forget a launch: close its socket, complete anything still pending so no await can outlive the
    * record, and zero the secret. Called on every teardown path — the secret's lifetime is the
    * container's, and after this a dial presenting it is closed 1008 like any stranger's.
+   *
+   * <p>The close is <b>bounded</b>, for the reason the whole package is: this runs on the run
+   * worker, and the caller's very next statement is the {@code docker rm -f} that removes the
+   * container. A close that waited on an unresponsive peer would wedge all of CI <em>and</em> leak
+   * the container it was being polite to. See {@link #closeBounded}.
    */
   public void reap(String daemonId) {
     Launch launch = launches.remove(daemonId);
@@ -270,13 +299,38 @@ public class CiDaemonRegistry {
     launch.finished.complete(Completion.of(Completion.Status.CONNECTION_LOST));
     WebSocketConnection connection = launch.connection;
     if (connection != null && connection.isOpen()) {
-      try {
-        connection.closeAndAwait();
-      } catch (RuntimeException e) {
-        LOG.debugf("Closing the socket of reaped ci-daemon %s failed: %s", daemonId, e.getMessage());
-      }
+      closeBounded(connection, null, "reaped ci-daemon " + daemonId);
     }
     Arrays.fill(launch.secret, (byte) 0);
+  }
+
+  /**
+   * Close a connection with a deadline on it, and treat a missed deadline as "not confirmed, carry
+   * on" rather than as something to keep waiting for.
+   *
+   * <p><b>Why this is not {@code closeAndAwait}.</b> That convenience is a default method spelled
+   * {@code close().await().indefinitely()} — precisely the shape this package forbids, hidden one
+   * frame deeper than the source grep in {@code CiDaemonRegistryTimeoutTest} could see. The peer here
+   * is a container running repo-controlled code, and the one path that reaches this most reliably is
+   * the step-timeout backstop, whose whole meaning is that the peer has stopped answering. Nothing
+   * downstream needs the close to have completed: the connection is already off the launch table and
+   * the container is about to be removed, so the close is a courtesy and a courtesy gets a deadline.
+   *
+   * <p>Shared with {@link CiDaemonSocket}, which refuses dials with it, so there is one bounded close
+   * in the package rather than two spellings that can drift.
+   */
+  static void closeBounded(WebSocketConnection connection, CloseReason reason, String what) {
+    try {
+      if (reason == null) {
+        connection.close().await().atMost(CLOSE_TIMEOUT);
+      } else {
+        connection.close(reason).await().atMost(CLOSE_TIMEOUT);
+      }
+    } catch (RuntimeException e) {
+      // Includes the deadline expiring. The socket is abandoned either way; the peer's opinion of
+      // the handshake stops being this host's problem here.
+      LOG.debugf("Closing the socket of %s did not complete: %s", what, e.getMessage());
+    }
   }
 
   /** Observational: how far a launch got, or null once it is reaped. */

@@ -161,6 +161,16 @@ public class CiDaemonLauncherTest {
     LaunchSpec injectedBranch =
         new LaunchSpec("run", 0, "repo-1", "main/../..", "cafebabe", "img", "d", "s", "u");
     assertThrows(BadRequestException.class, () -> launcher.launch(injectedBranch));
+    // The image is repo-declared rather than intake-supplied, and it is a positional argument to the
+    // docker CLI. Nothing is known to get through it — ProcessBuilder does not shell-split and the
+    // trailing `-c <BOOTSTRAP>` defeats the obvious re-parses — but an argument that can be read as
+    // an option is not a thing to leave to the parser's good manners.
+    LaunchSpec optionShapedImage =
+        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "--privileged", "d", "s", "u");
+    assertThrows(BadRequestException.class, () -> launcher.launch(optionShapedImage));
+    LaunchSpec blankImage =
+        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "  ", "d", "s", "u");
+    assertThrows(BadRequestException.class, () -> launcher.launch(blankImage));
   }
 
   @Test

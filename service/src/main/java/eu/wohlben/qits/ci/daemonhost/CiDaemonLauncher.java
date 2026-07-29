@@ -210,6 +210,9 @@ public class CiDaemonLauncher {
     CiIdentifiers.requireRepoId(spec.repoId());
     CiIdentifiers.requireBranch(spec.branch());
     CiIdentifiers.requireSha(spec.sha());
+    // The image comes from the repository's own config rather than from the intake, but it lands in
+    // the same argv as the rest, so it is checked in the same place and to the same standard.
+    CiIdentifiers.requireImage(spec.image());
 
     String name = containerName(spec.runId(), spec.stepIndex());
     CiProcess.Result result =

@@ -102,10 +102,25 @@ Three things bite:
   move both. It is not a gateway route and must not become one: one process per container with a
   lifetime of one step has no stable address worth configuring.
 - **No untimed wait may enter this package.** The single-threaded run worker parks here instead of on
-  a process, so a future that never completes wedges *all* of CI. Every await carries its
-  transition's timeout; `CiDaemonRegistryTimeoutTest` holds that behaviourally *and* by grepping the
-  package's sources for `.get()`, `.join()` and `sendTextAndAwait`. If you add an await, give it a
-  deadline or that test tells you so.
+  a process, so anything that never returns wedges *all* of CI. That covers three kinds of wait, not
+  one: the lifecycle futures (`CiDaemonRegistry.await`), writing a frame (`send`), and closing a
+  socket (`closeBounded`). `CiDaemonRegistryTimeoutTest` holds it behaviourally *and* by grepping
+  this package's sources.
+
+  **The `…AndAwait` family is banned by shape, and that generalisation was bought.** The grep first
+  listed `sendTextAndAwait` and `sendBinaryAndAwait` by name, on the correct reasoning that each is
+  `sendText(m).await().indefinitely()` — and then sat green over two live `closeAndAwait` calls,
+  which are the identical shape under a name nobody had enumerated. One of them was on the reap
+  path, so the step-timeout backstop closed a socket whose peer is *by definition* not answering,
+  on the run worker, with `docker rm -f` as the next statement: a hang there would have wedged CI
+  and orphaned the container from a single cause. The untimed part of these lives inside the
+  framework's default method, so it never appears in this package's own source and only the *call*
+  is visible to a grep. Write the bounded form —
+  `close(…).await().atMost(CLOSE_TIMEOUT)`, `sendText(m).await().atMost(SEND_TIMEOUT)` — and note
+  that a close gets a much shorter deadline than a send, because a send is delivering something the
+  run needs while a close is being polite to a peer that is about to be `rm -f`'d anyway.
+  The pattern's own coverage is asserted against known strings in the same test: a guard that can be
+  silently incomplete is worth exactly what its coverage is, and that coverage used to be unasserted.
 
 This is the execution path, not a plan for one. `CiDaemonStepRunner` is the only implementation of
 `CiStepRunner`; the approach it replaced — one `docker run` of a composite `bash -c` with a
@@ -153,12 +168,19 @@ in ci's **own** physical database; a foreign key cannot span it.
 
 ## Untrusted input
 
-Two things reaching this code are attacker-controlled and must stay that way in your head:
+Four things reaching this code are attacker-controlled and must stay that way in your head:
 
 - **The intake payload.** `/ci/api/events/` sits on the token-free allowlist and the token defaults
   to blank. `CiIdentifiers.require{RepoId,Branch,Sha}` validates all three *before* they reach a
   filesystem path or an argv. Never widen those, never bypass them, never interpolate an identifier
   into a shell string.
+- **The step's `image`.** It comes from a file in the repository being tested and lands in the
+  `docker run` argv as a positional argument, so it is checked in the same place and to the same
+  standard: `CiIdentifiers.requireImage` rejects blank and anything starting with `-`. Deliberately
+  loose otherwise — which registry hosts, tags and digests resolve is the registry's business. This
+  is hardening rather than a fix: no exploit through it is known (`ProcessBuilder` never
+  shell-splits, and the fixed trailing `-c <BOOTSTRAP>` tokens defeat the obvious re-parses), and
+  "the argument parser will surely never take this for a flag" is not a claim worth re-defending.
 - **The step script.** It is code from a repository, and **qits-ci never executes it.** No code
   path here runs repo-controlled code as a host process, and none runs it through `docker exec`. A
   script leaves this process as a field of one JSON frame, on a socket the step container's own
