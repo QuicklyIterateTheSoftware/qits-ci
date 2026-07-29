@@ -39,6 +39,13 @@
             <artifactId>quarkus-arc</artifactId>
         </dependency>
         <dependency>
+            <!-- OTLP export to qits-observability. The extension is what instruments the process;
+                 the endpoint and protocol in application.properties are what make it arrive, since
+                 the defaults are gRPC to localhost:4317 and the receiver speaks HTTP/protobuf. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-opentelemetry</artifactId>
+        </dependency>
+        <dependency>
             <!-- SecurityIdentity + the HttpAuthenticationMechanism SPI, for the single thing this
                  service does about auth: read qits-gateway's X-Qits-User header into an identity
                  (see security/ForwardAuthMechanism). NOT an auth variant and NOT an authorization
