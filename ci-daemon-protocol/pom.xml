@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben.qits</groupId>
+        <artifactId>qits-ci</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!-- The ci-daemon control-socket wire contract: plain records + enums + the shared type/field
+         name constants, framework-free and dependency-free. No JSON library on purpose — each side
+         serializes with whatever it already carries (Jackson here, a Vert.x JsonObject in the
+         native `ci-daemon` binary).
+
+         VENDORED COPY. The canonical source is
+         qits-ci-daemon/ci-daemon-protocol (this repo's sibling submodule). It is copied rather
+         than depended on because that module is published to no registry, and a clone of qits-ci
+         alone must `mvn verify` green — no GitHub Packages credentials, no prior `mvn install` in
+         another repo, no recursive submodule checkout dragging a GraalVM native build into this
+         reactor. The same arrangement qits-workspaces has with workspace-daemon-protocol; this is
+         knowingly the third such mirrored pair (finish-ci-feature.md §4 decision 3 says so out
+         loud rather than letting it accumulate quietly).
+
+         Three things keep the copy honest:
+           - The java PACKAGE is identical (eu.wohlben.qits.cidaemon.protocol), so the day this
+             artifact is published somewhere, deleting this module and adding a <dependency> is a
+             one-line change with no source edits.
+           - The artifactId is NOT identical — qits-ci-daemon-protocol under a different groupId —
+             so the two jars can never collide in ~/.m2 or on one classpath.
+           - CiDaemonCodecTest travels with it. It is the contract test and it runs on both sides;
+             a drift in either repo fails a build rather than a socket at runtime.
+
+         THIS COPY IS NEVER EDITED HERE. The daemon repo owns the contract: a change lands there,
+         bumps CiDaemonProtocol.CAPABILITY_VERSION, and is re-copied whole. `diff -r` against
+         ../../../daemons/qits-ci-daemon/ci-daemon-protocol/src is the drift detector. A "small
+         fix" applied to this side instead is exactly how the workspace pair drifted once already
+         (migration-plan.md §9 item 19). -->
+    <artifactId>qits-ci-daemon-protocol</artifactId>
+    <name>qits-ci :: daemon-protocol (vendored)</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -36,7 +36,8 @@
     <name>qits-ci</name>
 
     <modules>
-        <!-- Listed first: `service` depends on it. -->
+        <!-- Listed first: `service` depends on both. -->
+        <module>ci-daemon-protocol</module>
         <module>ci</module>
         <module>service</module>
     </modules>
@@ -99,10 +100,15 @@
             </dependency>
             <!-- org.yaml:snakeyaml (CiConfigParser's SafeConstructor) is managed by the Quarkus
                  BOM, so it stays version-less in the child pom exactly as in the monorepo. -->
-            <!-- The reactor's own module, so `service` depends on it version-less. -->
+            <!-- The reactor's own modules, so `service` depends on them version-less. -->
             <dependency>
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-ci-domain</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-ci-daemon-protocol</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

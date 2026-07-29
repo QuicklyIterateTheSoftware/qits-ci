@@ -35,8 +35,26 @@
             <artifactId>qits-ci-domain</artifactId>
         </dependency>
         <dependency>
+            <!-- The ci-daemon wire contract. Vendored into this repo (see that module's pom)
+                 because it is published to no registry. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-ci-daemon-protocol</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-arc</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The ci-daemon control socket (@WebSocket /ci/daemon, daemonhost/). A step
+                 container's daemon dials it; qits-ci never dials in.
+
+                 A native-image-supported extension, but this repo's rule is that the BINARY's ITs
+                 are the proof rather than the extension's documentation — so CiPackagedSurfaceIT
+                 asserts /ci/daemon is actually reachable on the packaged artifact. A `-Dnative`
+                 build that silently dropped the endpoint fails there instead of at the first push
+                 in a deployment. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-websockets-next</artifactId>
         </dependency>
         <dependency>
             <!-- OTLP export to qits-observability. The extension is what instruments the process;

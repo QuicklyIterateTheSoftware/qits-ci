@@ -5,12 +5,16 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import eu.wohlben.qits.ci.daemonhost.FakeCiDaemon;
 import io.quarkus.test.junit.QuarkusIntegrationTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -38,7 +42,11 @@ import org.junit.jupiter.api.Test;
  *   <li>{@code db/ci/migration/V1__init.sql} survived as a resource and Flyway applied it — a
  *       migration is loaded by scanning a classpath location, exactly the shape native-image drops;
  *   <li>a real run reaches SnakeYAML and Panache: the intake queues, ci fetches the pushed commit
- *       with its own {@code git}, parses the committed config, and persists through Hibernate.
+ *       with its own {@code git}, parses the committed config, and persists through Hibernate;
+ *   <li>the ci-daemon control socket is on the artifact's router at {@code /ci/daemon} — a
+ *       {@code @WebSocket} endpoint is registered by an extension at augmentation, so "websockets-next
+ *       is native-image supported" is a claim this repo's rule says the binary has to prove rather
+ *       than the documentation.
  * </ul>
  *
  * <p>The pipeline it pushes declares <b>no steps</b> — a config-less push records nothing at all, so
@@ -101,6 +109,24 @@ public class CiPackagedSurfaceIT {
         .post("/ci/api/events/post-receive")
         .then()
         .statusCode(400);
+  }
+
+  @Test
+  public void theCiDaemonControlSocketIsOnTheArtifactsRouter() throws Exception {
+    // Route presence, not behaviour: a step container's daemon dials this literal (it is
+    // qits.ci.container-daemon-url's path) and a native build that silently dropped the endpoint
+    // would leave every run stuck at "never registered" with nothing in any log to say why.
+    //
+    // The dial carries credentials the registry cannot know, so the assertion is: the upgrade
+    // SUCCEEDS — proving the endpoint is registered and reachable at /ci/daemon — and the server
+    // then closes it 1008. A missing route fails the upgrade instead, with a 404.
+    URI socket = URI.create("http://localhost:" + RestAssured.port + "/ci/daemon");
+    try (FakeCiDaemon daemon = FakeCiDaemon.dial(socket, "not-a-launched-daemon", "not-a-secret")) {
+      assertEquals(
+          (Short) (short) 1008,
+          daemon.awaitClose(Duration.ofSeconds(20)),
+          "the packaged artifact must serve /ci/daemon and refuse an unknown daemon on it");
+    }
   }
 
   @Test

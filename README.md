@@ -12,7 +12,8 @@ per-step pass/fail for the push — advisory, queryable over REST.
 | Module | What |
 |---|---|
 | `ci/` | `eu.wohlben.qits.ci.*` — entity, persistence, dto, mapper, control, error. The pipeline itself. No web, no JAX-RS. |
-| `service/` | `eu.wohlben.qits.ci.api` — the JAX-RS event intake, the run read surface, the token filter and the exception mapper. |
+| `service/` | `eu.wohlben.qits.ci.api` — the JAX-RS event intake, the run read surface, the token filter and the exception mapper — plus `…ci.daemonhost`, the step-container control plane (below). |
+| `ci-daemon-protocol/` | `eu.wohlben.qits.cidaemon.protocol` — the ci-daemon wire contract, **vendored** from [qits-ci-daemon](https://github.com/QuicklyIterateTheSoftware/qits-ci-daemon) and never edited here. Framework-free; `diff -r` is the drift detector. |
 
 `ci/` is a library jar. **`service/` is the application** — it carries
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary:
@@ -105,6 +106,23 @@ the step container is treated as a hostile-code sandbox: `--cap-drop=ALL`, `no-n
 docker socket, and memory/pids/cpu caps (`qits.ci.memory-limit`, `…pids-limit`, `…cpus`). The
 residual gap — a push is itself unauthenticated, and running repo-committed scripts is the feature —
 is a known, documented issue.
+
+## The step-container control plane
+
+`eu.wohlben.qits.ci.daemonhost` is where that is going. A step container will run
+`qits-ci-daemon` — fetched by a fixed, host-authored bootstrap that overrides the image's entrypoint
+— and the daemon **dials out** to `ws://…/ci/daemon`, presenting a host-minted per-container secret,
+reports its own clone and checkout done, and receives the step's script as the reply. qits-ci
+initiates nothing toward a container and executes nothing itself; its whole docker vocabulary is
+container lifecycle.
+
+**Not the execution path yet.** `CiDockerRunner` still runs every production step; the socket, the
+launch registry and the launcher are reachable only from `CiDaemonHandshakeIT`. What is live already
+is the endpoint itself and the boot sweep that `docker rm -f`s containers carrying the `qits.ci.run`
+label. Deployments that want the daemon path ahead of that need `qits.ci.daemon-version` (the
+binary's sha256, blank by default) and, if they are not on `qits-net` under the standard aliases,
+`qits.ci.container-daemon-url`; both are documented where they are shipped, in the `ci` jar's
+`META-INF/microprofile-config.properties`.
 
 ## Deploying it
 

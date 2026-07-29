@@ -18,8 +18,15 @@ import java.util.concurrent.TimeUnit;
  * step's tail is where the failure is) and reports {@code truncated}. This is not merely cosmetic —
  * a CI step's output is attacker-controlled and unbounded (a chatty build, an accidental {@code
  * cat} of a huge file), and buffering it whole would let one step OOM the shared qits JVM.
+ *
+ * <p><b>Public so that {@code service}'s {@code daemonhost} can shell the docker CLI too</b> (launch,
+ * {@code logs}, {@code rm -f}, {@code network inspect/create}) without a second copy of the rolling
+ * tail. A second copy is the thing to avoid here specifically: the bound is a security property, not
+ * a nicety, and two implementations of it drift into one that is unbounded. It stays framework-free
+ * and stays in this module — the container-lifecycle vocabulary outlives the runner that introduced
+ * it.
  */
-final class CiProcess {
+public final class CiProcess {
 
   /** Rolling buffer slack: trim back to {@code maxChars} once it grows past this multiple. */
   private static final int TRIM_FACTOR = 2;
@@ -28,11 +35,11 @@ final class CiProcess {
    * Exit code, bounded combined output, whether the hard timeout expired ({@code exitCode} is -1
    * then), and whether output was dropped from the front.
    */
-  record Result(int exitCode, String output, boolean timedOut, boolean truncated) {}
+  public record Result(int exitCode, String output, boolean timedOut, boolean truncated) {}
 
   private CiProcess() {}
 
-  static Result run(Path cwd, List<String> command, Duration timeout, int maxChars) {
+  public static Result run(Path cwd, List<String> command, Duration timeout, int maxChars) {
     try {
       ProcessBuilder pb = new ProcessBuilder(command);
       if (cwd != null) {

@@ -41,19 +41,72 @@ second rule of the same kind, and three things follow:
 
 ## Package and module conventions
 
-`eu.wohlben.qits.ci.*`, split across two maven modules with disjoint sub-packages so there is no
-split package:
+`eu.wohlben.qits.ci.*`, split across maven modules with disjoint sub-packages so there is no split
+package:
 
 - `ci/` — `entity`, `persistence`, `dto`, `mapper`, `control`, `error`. Framework-free in the sense
-  that matters: no JAX-RS. Entities are Panache; mappers are MapStruct
+  that matters: no JAX-RS, no websockets. Entities are Panache; mappers are MapStruct
   `@Mapper(componentModel = "jakarta")`.
-- `service/` — `api` only: the JAX-RS routes, the `ContainerRequestFilter` and the
-  `ExceptionMapper`.
+- `service/` — `api` (the JAX-RS routes, the `ContainerRequestFilter` and the `ExceptionMapper`),
+  `security`, and `daemonhost` (the ci-daemon control socket, the launch registry and the container
+  launcher). It read "`api` only" until the daemon control plane landed; the transport lives beside
+  the API because it needs a web stack, which is the same line that put `api` here rather than in
+  `ci/`, and it is where qits-workspaces keeps its own `daemonhost` for the same reason. `ci/` keeps
+  the `CiStepRunner` seam and the orchestrator and gains no web dependency.
+- `ci-daemon-protocol/` — the vendored wire contract (below). Its package is
+  `eu.wohlben.qits.cidaemon.protocol`, deliberately not under `eu.wohlben.qits.ci`: it is a copy of
+  another repo's module and its package must stay byte-identical with the original.
 
-The **directories** are `ci/` and `service/`; the artifactIds are `qits-ci-domain` and
-`qits-ci-service`. The mismatch is deliberate — the extracted git history is anchored to the
-directory names, and generic coordinates like `eu.wohlben:ci` would collide in the shared `~/.m2`
-that every workspace container mounts.
+The **directories** are `ci/`, `service/` and `ci-daemon-protocol/`; the artifactIds are
+`qits-ci-domain`, `qits-ci-service` and `qits-ci-daemon-protocol`. The first two mismatch
+deliberately — the extracted git history is anchored to the directory names, and generic coordinates
+like `eu.wohlben:ci` would collide in the shared `~/.m2` that every workspace container mounts.
+
+## The vendored protocol module
+
+`ci-daemon-protocol/` is a copy of
+[qits-ci-daemon](https://github.com/QuicklyIterateTheSoftware/qits-ci-daemon)'s module of the same
+name: same java package, different artifactId, so the two jars can never collide while the day the
+artifact is published somewhere stays a one-line change. It is copied rather than depended on
+because that module is published to no registry and the clone-alone rule is not negotiable.
+
+**Never edit this copy.** The daemon repo owns the contract; a change lands there, bumps
+`CiDaemonProtocol.CAPABILITY_VERSION`, and is re-copied whole:
+
+    diff -r ../../daemons/qits-ci-daemon/ci-daemon-protocol/src ci-daemon-protocol/src
+
+must be silent. `CiDaemonCodecTest` travels with the copy and runs on both sides, so a drift fails a
+build rather than a socket. A "small fix" applied here instead is how the workspace pair drifted once
+already (`migration-plan.md` §9 item 19), and this is knowingly the third such mirrored pair.
+
+## The ci-daemon control plane
+
+`service/…/daemonhost/` is the host half of the arrangement qits-workspaces has with its own daemon:
+a step container runs `qits-ci-daemon`, which **dials out** to qits-ci and receives its step as the
+reply to its own `Initialized`. qits-ci never dials in, and — the invariant the whole feature rests
+on — **no code path here runs repo-controlled code as a host process or through `docker exec`**. The
+docker vocabulary is container lifecycle only. `CiDaemonLauncher.BOOTSTRAP` is a `static final
+String` with zero interpolation; a step script never appears in an argv.
+
+Three things bite:
+
+- **`@WebSocket(path = "/ci/daemon")` is a literal that does not follow `quarkus.rest.path`**, so it
+  carries the `/ci` segment itself — and it is outside `CiTokenFilter`'s reach by construction, since
+  that filter matches `UriInfo.getPath()` relative to `quarkus.rest.path`. Correct rather than an
+  oversight: the callers are containers holding no intake token, and the authentication is the
+  per-container secret.
+- **The path is a cross-repo contract.** `qits.ci.container-daemon-url` (default
+  `ws://qits-ci:8080/ci/daemon`) is injected as `$QITS_CI_DAEMON_URL` and dialled verbatim. Move one,
+  move both. It is not a gateway route and must not become one: one process per container with a
+  lifetime of one step has no stable address worth configuring.
+- **No untimed wait may enter this package.** The single-threaded run worker parks here instead of on
+  a process, so a future that never completes wedges *all* of CI. Every await carries its
+  transition's timeout; `CiDaemonRegistryTimeoutTest` holds that behaviourally *and* by grepping the
+  package's sources for `.get()`, `.join()` and `sendTextAndAwait`. If you add an await, give it a
+  deadline or that test tells you so.
+
+Phase B landed this behind `CiDockerRunner`, which still executes production steps: the registry,
+socket and launcher are reachable only from `CiDaemonHandshakeIT` until the seam swaps.
 
 ## Addressing
 
@@ -92,6 +145,12 @@ Two things reaching this code are attacker-controlled and must stay that way in 
   positional argument, never spliced into the prelude, and the container gets `--cap-drop=ALL`,
   `no-new-privileges` and resource caps. Anything that would hand a step more privilege — a docker
   socket, a host mount, a shared network with services — is a security change, not a convenience.
+- **Everything arriving over the ci-daemon control socket.** A container turns hostile the moment
+  step code runs in it, so its frames are data about a run: recorded, never trusted. The `daemonId`
+  in a `Hello` is a claim the host checks against the connection it already authenticated rather than
+  an identity it accepts; timestamps are host-stamped rather than daemon-reported, because a clock is
+  the cheapest thing to forge; and the per-container secret authorizes exactly "deliver data about
+  this run" and nothing else, ever.
 
 Step output is bounded by a rolling tail while it is read, so a chatty step cannot OOM the JVM.
 Keep it that way; do not buffer a step's output whole.
@@ -152,9 +211,32 @@ mechanism at all — which is what every service here was before the header land
   `-DskipITs=false`, the binary under `-Dnative`. It is not a second boundary test and behaviour
   does not belong in it: it asserts the handful of things a `@QuarkusTest` structurally cannot see,
   because they only exist once the app is built (the routes' build-time prefixes, the shipped
-  datasource URL, Flyway's migration surviving as a resource, SnakeYAML and Panache on a real run).
-  Its pipeline declares no steps, so it needs no container; step execution stays in
-  `CiDockerRunnerIT`.
+  datasource URL, Flyway's migration surviving as a resource, SnakeYAML and Panache on a real run,
+  and that `/ci/daemon` is on the artifact's router). Its pipeline declares no steps, so it needs no
+  container; step execution stays in `CiDockerRunnerIT`.
+  The `/ci/daemon` assertion is there because websockets-next registers that endpoint at
+  *augmentation*: "the extension is native-image supported" is a claim the binary has to prove here,
+  and a native build that silently dropped the route would otherwise surface as every run stuck at
+  "never registered" with nothing in any log to say why. It dials with credentials no registry can
+  know and asserts the **upgrade succeeds and the server then closes 1008** — a missing route fails
+  the upgrade with a 404 instead.
+- `CiDaemonSocketTest` drives the real socket with a real WebSocket from `FakeCiDaemon`, an in-JVM
+  dialler framing the real protocol exactly as the binary does. The host cannot tell it from a
+  container, which is the point: admission, framing, dispatch and the blocking bridge are all
+  provable with no docker and no published binary, and only the round trip through a real image is
+  left to the gate.
+- `CiDaemonHandshakeIT` is the **phase-B gate**: a real container from `buildpack-deps:scm` (verified
+  to carry git, bash, wget *and* curl — the whole image contract), a real download of the daemon
+  binary from a file-served stand-in, a real dial back, a real step. Tagged `extended`, run with
+  `-DskipITs=false`, excluded from the `native` profile exactly as `CiDockerRunnerIT` is and for the
+  same reason. It carries **the same host-networking assumption and the same caveat**: the assumptions
+  cover docker, the image and the binary, but not the container's route back to the JVM through
+  `host.docker.internal`, so on a host without one it fails rather than skips — do not "fix" that by
+  weakening the assertions.
+  The daemon binary is `-Dqits.ci.daemon-binary=<path>`, not a fixture: `$QITS_CI_DAEMON_BINARY_URL`
+  can point anywhere, which is precisely why it is env, so the gate never waits on a publish to
+  qits-artifacts. Without the property the two round-trip cases skip and the never-registers case —
+  which needs only docker — still runs and asserts its `docker logs` capture.
 - The ci module's suite is plain JUnit plus `@QuarkusTest`, and fakes the runner
   (`ci/src/test/.../FakeCiStepRunner` scripts a `StepResult` per step index).
 - The service module's `FakeCiStepRunner` is a **different, honest** fake: it performs the real step
