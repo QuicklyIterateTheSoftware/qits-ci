@@ -237,6 +237,30 @@ mechanism at all — which is what every service here was before the header land
   can point anywhere, which is precisely why it is env, so the gate never waits on a publish to
   qits-artifacts. Without the property the two round-trip cases skip and the never-registers case —
   which needs only docker — still runs and asserts its `docker logs` capture.
+
+  **Three environmental hazards cost a day between them, and all three are now handled in the tree.
+  Each fails in a way that blames the wrong thing, so do not undo any of them:**
+
+  1. **The JVM must bind IPv4.** Left alone it binds a dual-stack IPv6 socket for `0.0.0.0` — `ss
+     -ltn -f inet` shows nothing, `-f inet6` shows `*:<port>` — and docker's host gateway forwards
+     only IPv4, so every listener the test stands up is invisible to the container. `service/pom.xml`
+     gives failsafe `-Djava.net.preferIPv4Stack=true`; it has to be an `argLine` because the JVM
+     reads it when networking initialises, before any test runs. Same line qits-workspaces carries,
+     for the same reason.
+  2. **Host-gateway forwarding lags a freshly-bound listener.** A container started the instant
+     `listen()` returns gets `Connection refused`; two seconds later the same port serves 45MB fine.
+     The bootstrap fetches *once* and exits, so the container is dead within a second and the host
+     then waits out its whole 120s register deadline — surfacing as `wget could not fetch`, which
+     reads like a broken url. `awaitReachableFromAContainer` gates the fixture on a real TCP connect
+     from a real container first. Deliberately **not** fixed by retrying in `BOOTSTRAP`: the race is
+     the fixture's (production ports belong to long-lived services), and papering over a harness
+     artefact by changing shipped behaviour is the wrong trade.
+  3. **The git fixture must serve *smart* HTTP.** The daemon clones `--depth 50`, and shallow is a
+     capability only the smart transport advertises — a static-file handler gets exactly as far as
+     `fatal: dumb http transport does not support shallow capabilities`. The fixture shells `git
+     http-backend` as CGI, which is what qits-artifacts does behind `/git/<repoId>`. Do not "fix" a
+     recurrence by dropping `--depth`: depth 50 is deliberate (a recent-but-not-tip sha must still be
+     in the clone) and the daemon is behaving correctly for production.
 - The ci module's suite is plain JUnit plus `@QuarkusTest`, and fakes the runner
   (`ci/src/test/.../FakeCiStepRunner` scripts a `StepResult` per step index).
 - The service module's `FakeCiStepRunner` is a **different, honest** fake: it performs the real step

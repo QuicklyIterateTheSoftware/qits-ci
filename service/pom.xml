@@ -138,6 +138,23 @@
                 </executions>
                 <configuration>
                     <excludedGroups>${qits.it.excluded-groups}</excludedGroups>
+                    <!-- The docker-backed ITs stand a server up in THIS JVM for a container to dial
+                         back through host.docker.internal, and that only works if the JVM binds an
+                         IPv4 listener. Left alone it binds a dual-stack IPv6 socket for 0.0.0.0 —
+                         `ss -ltnp -f inet` shows nothing, `-f inet6` shows `*:<port>` — and docker's
+                         host gateway forwards only IPv4, so the container cannot see it. The symptom
+                         is not a connection error either: it is the register deadline expiring after
+                         two minutes with `wget could not fetch` in the container's log, which reads
+                         like a broken bootstrap rather than a host that cannot be reached.
+                         Confirmed A/B on one host: a `python3 -m http.server` (IPv4) serving the same
+                         file succeeds from the same container at the same moment the JVM's port
+                         fails. It has to be an argLine because the JVM reads it when networking
+                         initialises, before any test runs.
+                         Harmless for the rest of the suite — CiPackagedSurfaceIT reaches its launched
+                         artifact over loopback — and it is the same line qits-workspaces carries for
+                         the same reason. The parent's `native` profile drops the docker-backed ITs
+                         entirely, so this costs that build nothing either. -->
+                    <argLine>-Djava.net.preferIPv4Stack=true</argLine>
                     <systemPropertyVariables>
                         <!-- How @QuarkusIntegrationTest finds the compiled binary in a `-Dnative`
                              build; without it the native run has nothing to launch. The name is
