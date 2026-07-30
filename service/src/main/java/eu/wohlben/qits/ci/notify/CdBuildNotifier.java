@@ -10,7 +10,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Map;
-import java.util.Optional;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
@@ -44,13 +43,12 @@ public class CdBuildNotifier implements CdNotifier {
   private final HttpClient client =
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
 
+  // No token accompanies the POST: cd's intake is not on the gateway's token-free allowlist (this
+  // notifier dials it directly on qits-net, where callers are trusted), so unlike the git host's
+  // X-CI-Token there is no guard on the other end asking for one. If cd's intake is ever
+  // allowlisted at the gateway, the guard and a token here land in the same change.
   @ConfigProperty(name = "qits.cd.intake-url")
   String intakeUrl;
-
-  // The same static secret cd's CdTokenFilter checks — blank (the dev/test default) sends no
-  // header, matching the filter's open mode.
-  @ConfigProperty(name = "qits.cd.token")
-  Optional<String> token;
 
   @Inject ObjectMapper objectMapper;
 
@@ -72,10 +70,6 @@ public class CdBuildNotifier implements CdNotifier {
             .timeout(Duration.ofSeconds(10))
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(body));
-    token
-        .map(String::trim)
-        .filter(t -> !t.isEmpty())
-        .ifPresent(t -> request.header("X-CD-Token", t));
     client
         .sendAsync(request.build(), HttpResponse.BodyHandlers.discarding())
         .whenComplete(

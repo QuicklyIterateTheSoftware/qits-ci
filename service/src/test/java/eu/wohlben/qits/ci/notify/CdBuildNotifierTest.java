@@ -11,7 +11,6 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -64,11 +63,10 @@ class CdBuildNotifierTest {
     server.stop(0);
   }
 
-  private CdBuildNotifier notifier(Optional<String> token) {
+  private CdBuildNotifier notifier() {
     CdBuildNotifier notifier = new CdBuildNotifier();
     notifier.intakeUrl =
         "http://127.0.0.1:" + server.getAddress().getPort() + "/cd/api/events/build-succeeded";
-    notifier.token = token;
     notifier.objectMapper = new ObjectMapper();
     return notifier;
   }
@@ -82,8 +80,8 @@ class CdBuildNotifierTest {
   }
 
   @Test
-  void thePayloadCarriesTheRunsCoordinates() throws Exception {
-    notifier(Optional.empty()).onRunSucceeded("run-1", "repo-1", "epic/some-epic", "a".repeat(40));
+  void thePayloadCarriesTheRunsCoordinatesAndNoToken() throws Exception {
+    notifier().onRunSucceeded("run-1", "repo-1", "epic/some-epic", "a".repeat(40));
 
     Received event = await();
     assertEquals("/cd/api/events/build-succeeded", event.path());
@@ -94,15 +92,9 @@ class CdBuildNotifierTest {
             "branch", "epic/some-epic",
             "commitSha", "a".repeat(40)),
         event.body());
-  }
-
-  @Test
-  void aBlankTokenSendsNoHeaderAndAConfiguredOneTravels() throws Exception {
-    notifier(Optional.of("   ")).onRunSucceeded("run-2", "repo-2", "main", "b".repeat(40));
-    assertNull(await().token(), "a blank token must send no header (the guard's open mode)");
-
-    notifier(Optional.of("cd-secret")).onRunSucceeded("run-3", "repo-3", "main", "c".repeat(40));
-    assertEquals("cd-secret", await().token());
+    // Deliberate: cd's intake is not gateway-allowlisted, so no machine token exists to send —
+    // see the notifier's own comment. This pins that none quietly grows back on the wire.
+    assertNull(event.token());
   }
 
   @Test
@@ -111,7 +103,6 @@ class CdBuildNotifierTest {
     // A TEST-NET address nothing answers on: the 2s connect timeout belongs to the async send, so
     // the call itself has to return immediately — it runs on the single-threaded run worker.
     notifier.intakeUrl = "http://192.0.2.1:9/cd/api/events/build-succeeded";
-    notifier.token = Optional.empty();
     notifier.objectMapper = new ObjectMapper();
 
     long before = System.nanoTime();

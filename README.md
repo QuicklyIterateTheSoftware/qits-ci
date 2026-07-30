@@ -74,7 +74,7 @@ rest of qits it reaches over a URL it is configured with:
 | out | where the git host answers, for ci's **own** `git fetch` of the pushed ref — ci appends `/git/<repoId>` | `qits.ci.git-host-url` |
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + `qits.ci.daemon-version` |
-| out | `POST /cd/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.cd.intake-url` + `qits.cd.token` (`X-CD-Token`) |
+| out | `POST /cd/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.cd.intake-url`; no token — cd's intake is not gateway-allowlisted, the call stays on qits-net |
 
 The run listing takes the repository as a **query filter, not a path segment**. ci does not own
 repositories, so `/repositories/{repoId}/runs` asserted a containment this context does not have —
