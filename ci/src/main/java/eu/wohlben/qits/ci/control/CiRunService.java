@@ -19,6 +19,7 @@ import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.List;
@@ -77,6 +78,9 @@ public class CiRunService {
   @Inject CiStepRunner runner;
   @Inject CiRunRepository runs;
   @Inject CiStepRepository steps;
+
+  /** The green-run announcement port (see {@link CdNotifier}); zero implementations is fine. */
+  @Inject Instance<CdNotifier> cdNotifiers;
 
   @ConfigProperty(name = "qits.ci.output-max-chars")
   int outputMaxChars;
@@ -306,6 +310,25 @@ public class CiRunService {
     }
     boolean red = failed || cancelled.contains(run.id);
     finishRun(run.id, red ? CiRunStatus.FAILED : CiRunStatus.SUCCESS);
+    if (!red) {
+      notifyCd(run);
+    }
+  }
+
+  /**
+   * Announces a green run through the {@link CdNotifier} port — after the terminal row is
+   * committed, so a listener that reads the run back sees {@code SUCCESS}. Absent implementations
+   * are a supported configuration (a deployment without qits-cd), and a throwing one must not turn
+   * a green run red: the run <em>is</em> green, delivery is somebody else's outcome.
+   */
+  private void notifyCd(CiRun run) {
+    for (CdNotifier notifier : cdNotifiers) {
+      try {
+        notifier.onRunSucceeded(run.id, run.repoId, run.branch, run.commitSha);
+      } catch (RuntimeException e) {
+        LOG.warnf(e, "CD notification for run %s failed", run.id);
+      }
+    }
   }
 
   /**

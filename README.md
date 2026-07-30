@@ -74,6 +74,7 @@ rest of qits it reaches over a URL it is configured with:
 | out | where the git host answers, for ci's **own** `git fetch` of the pushed ref — ci appends `/git/<repoId>` | `qits.ci.git-host-url` |
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + `qits.ci.daemon-version` |
+| out | `POST /cd/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.cd.intake-url` + `qits.cd.token` (`X-CD-Token`) |
 
 The run listing takes the repository as a **query filter, not a path segment**. ci does not own
 repositories, so `/repositories/{repoId}/runs` asserted a containment this context does not have —
@@ -86,6 +87,13 @@ It was already an HTTP call while ci ran in-process, so the split moved files, n
 only `qits.ci.intake-url` on the sending side changes. That call is **fire-and-forget**: it swallows
 delivery failures at debug, so if the two ends disagree about the intake path nothing errors
 anywhere and CI simply never runs. Both ends are pinned to `/ci/api/events/post-receive`.
+
+The same arrangement repeats one hop down: a green run is announced to
+[qits-cd](https://github.com/QuicklyIterateTheSoftware/qits-cd)'s
+`/cd/api/events/build-succeeded` by `service/…/notify/CdBuildNotifier` behind the `CdNotifier` seam
+in `ci/control` — fire-and-forget with the same silence hazard, so both ends pin that literal too.
+Only `SUCCESS` announces (a red run, a `CONFIG_ERROR` and a discarded run deploy nothing), and a
+deployment without a qits-cd is a supported configuration that costs one debug line per green run.
 
 ci never touches the bare origins on disk: it keeps its **own** bare cache per repository under
 `<qits.ci.data-dir>/repos/<repoId>.git` and fetches into it over the git host's URL. That is what
