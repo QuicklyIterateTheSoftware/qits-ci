@@ -5,7 +5,8 @@ The **in-repo CI pipeline**: a repository opts in by committing
 commit, runs each step's script in a fresh container of the step's declared image, and records a
 per-step pass/fail for the push — advisory, queryable over REST.
 
-    mvn verify        # a clone of this repo alone builds and tests green — no monorepo, no docker
+    git submodule update --init   # the Angular client at service/src/main/webui
+    mvn verify                    # green from a clone alone — no monorepo, no docker, no credentials
 
 ## Layout
 
@@ -55,6 +56,14 @@ Beneath the segment sits the kind of surface: `/ci/api/…` for the JSON API
 (`quarkus.rest.path`), `/ci/q/…` for what Quarkus itself serves —
 `/ci/q/openapi`, `/ci/q/swagger-ui` (`quarkus.http.non-application-root-path`, which is outside
 `quarkus.rest.path` and so has to carry the segment separately).
+
+`/ci/` itself is the **Angular client**: the
+[qits-spa-ci](https://github.com/QuicklyIterateTheSoftware/qits-spa-ci) submodule at
+`service/src/main/webui`, built by Quinoa into the packaged artifact and served from it, with deep
+links under `/ci/` falling back to `index.html` so the client's own router handles them. The API and
+`/ci/q` are excluded from that fallback automatically — Quinoa derives the exclusions from the two
+keys above rather than from a list. Note `/ci` without the trailing slash is a 404: the SPA is
+mounted at `/ci/`, and nothing here redirects to it.
 
 Nothing under `/ci/api` repeats `ci` again: the segment already said it. That is the one shape
 change here beyond the prefix, along with runs becoming their own entity (below).

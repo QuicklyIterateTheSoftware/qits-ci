@@ -83,6 +83,26 @@
             <artifactId>quarkus-rest-jackson</artifactId>
         </dependency>
         <dependency>
+            <!-- Builds and serves the Angular client at /ci (see application.properties). The
+                 sources are the `qits-spa-ci` submodule at src/main/webui — Quinoa's default
+                 `web-ui-dir`, so the path is a convention rather than a setting, and a fresh clone
+                 needs the submodule initialised before this module builds.
+
+                 NOT in the Quarkus platform BOM, so the version is pinned in the root pom next to
+                 every other version this repo duplicates rather than inherits. 2.8.2 is the last
+                 release built against a Quarkus OLDER than this repo's 3.34.6 (3.27.3 LTS); 2.8.3
+                 moved to 3.36.2, which is ahead of the platform here.
+
+                 quarkus-undertow must never join this module's dependencies: its presence breaks
+                 Quinoa's production static serving, which is why qits-artifacts mounts its git host
+                 on plain Vert.x routes (that repo's README, "The git host"). Nothing here pulls it
+                 in today — `./mvnw -pl service -am dependency:tree -Dincludes=io.quarkus:quarkus-undertow`
+                 is empty and quarkus-vertx-http is the only web stack present. -->
+            <groupId>io.quarkiverse.quinoa</groupId>
+            <artifactId>quarkus-quinoa</artifactId>
+            <version>${quinoa.version}</version>
+        </dependency>
+        <dependency>
             <!-- @Valid on the intake payload. -->
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-hibernate-validator</artifactId>
