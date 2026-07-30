@@ -60,8 +60,9 @@ Beneath the segment sits the kind of surface: `/ci/api/…` for the JSON API
 `/ci/` itself is the **Angular client**: the
 [qits-spa-ci](https://github.com/QuicklyIterateTheSoftware/qits-spa-ci) submodule at
 `service/src/main/webui`, built by Quinoa into the packaged artifact and served from it, with deep
-links under `/ci/` falling back to `index.html` so the client's own router handles them. Note `/ci`
-without the trailing slash is a 404: the SPA is mounted at `/ci/`, and nothing here redirects to it.
+links under `/ci/` falling back to `index.html` so the client's own router handles them. Bare `/ci`
+(no trailing slash) is a 301 to `/ci/` (`WebUiRedirect`, GET/HEAD only, query preserved) — Quinoa
+mounts the SPA at `/ci/*`, which does not match the bare segment on its own.
 
 That fallback is a catch-all, and what it must **not** swallow is named in
 `quarkus.quinoa.ignored-path-prefixes=/api,/q,/daemon` — relative to the UI root, and repeating
