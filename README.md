@@ -161,19 +161,33 @@ host-published mapping substituted for `$QITS_REGISTRY` (the local stack's `loca
 A step writes its own `~/.npmrc` from the two, so no repository ever spells a registry address:
 
 ```sh
+# The token line is npm-CLI ceremony only — the server reads nothing.
 cat > ~/.npmrc <<EOF
 registry=${QITS_NPM_PROXY_URL}
 @qits:registry=${QITS_NPM_REGISTRY_URL}
-${QITS_NPM_REGISTRY_URL#http:}:_authToken=qits-ci   # npm-CLI ceremony only — server reads nothing
+${QITS_NPM_REGISTRY_URL#http:}:_authToken=qits-ci
 EOF
 ```
 
 Two lines there are worth reading twice. The `#http:` strip is parameter expansion, not a comment:
 it turns the url into the `//host/path/` form npm keys credentials by, which is the one non-obvious
 line in the whole preamble. And the token is **npm-CLI ceremony only** — the npm client refuses to
-`publish` against a registry it holds no credential for, a pre-flight that never reaches the wire;
-qits-artifacts requires no credential in either direction on `qits-net` and reads nothing from that
-line. It is not an auth scheme and the day npm accepts an anonymous publish it simply goes away.
+`publish` against a registry it holds no credential for (`ENEEDAUTH`, verified still enforced by
+npm 10.9.4), a pre-flight that never reaches the wire; qits-artifacts requires no credential in
+either direction on `qits-net` and reads nothing from that line. It is not an auth scheme and the
+day npm accepts an anonymous publish it simply goes away. Keep the comment *outside* the heredoc —
+inside it, the line lands in the written file.
+
+**The `~/.npmrc` form only works for a repository that commits no `.npmrc` of its own.** npm and
+pnpm rank a project `.npmrc` above the user one, so in a repo that commits registry routing (a
+frontend pointing developers at the host-published port), the preamble above is written and then
+silently ignored. Such a repo's step uses the environment form instead, which outranks both files:
+
+```sh
+env npm_config_registry="$QITS_NPM_PROXY_URL" \
+    "npm_config_@qits:registry=$QITS_NPM_REGISTRY_URL" \
+    pnpm install --frozen-lockfile
+```
 
 ## How a step runs — qits-ci starts containers, and that is all
 
