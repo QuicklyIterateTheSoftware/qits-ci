@@ -10,6 +10,12 @@ steps:
     docker: true
     timeout-seconds: 3600
     script: |
+      # The daemon runs this with `bash -c` and no -e, so without this a failed docker build is
+      # swallowed: the push fails, `docker rmi || true` answers 0, the run reports SUCCESS, and cd
+      # is told an image exists that does not (the exact shape of the qits-workspaces
+      # IMAGE_MISSING incident). -u makes an unset registry variable stop the step too.
+      set -eu
+
       # The daemon's clone is `--depth 50` and does not recurse, so the qits-spa-ci submodule at
       # service/src/main/webui arrives as an empty directory — and Quinoa fails the image build on
       # exactly that (`No package.json found in Web UI directory`). Initialising it here rather than
