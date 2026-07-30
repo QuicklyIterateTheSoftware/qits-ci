@@ -1,0 +1,16 @@
+# The pipeline qits-ci runs on every push to a tracked branch of this repository.
+#
+# One step: build this repo's docker/Dockerfile and publish it under the tag that is the whole
+# contract with qits-cd — <registry>/<repository>/<this repo's name>:<sha>. The step's own
+# container only drives the docker CLI; the build and the push happen in the host's daemon
+# through the socket this step declares (docker: true). A failed push is a failed step is a
+# FAILED run.
+steps:
+  - image: qits/build-images/ci-base:latest
+    docker: true
+    timeout-seconds: 3600
+    script: |
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-ci:$QITS_CI_SHA"
+      docker build -t "$ref" -f docker/Dockerfile .
+      docker push "$ref"
+      docker rmi "$ref" || true
