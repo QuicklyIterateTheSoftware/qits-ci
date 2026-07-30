@@ -39,6 +39,15 @@ class WebUiRedirectTest {
   }
 
   @Test
+  void theSlashFormIsNotThisRoutesBusiness() {
+    // Vert.x path routes are trailing-slash tolerant, so without the exact-path guard this
+    // redirect would answer /ci/ too — sitting AHEAD of Quinoa and looping onto itself. With
+    // Quinoa off under %test the slash form falls through to a plain 404, which is exactly the
+    // proof: this route let it pass.
+    given().redirects().follow(false).when().get("/ci/").then().statusCode(404);
+  }
+
+  @Test
   void aWriteToTheBareSegmentIsMethodNotAllowed() {
     // The route matches the path but names GET and HEAD, so Vert.x answers 405 — the machine
     // client learns the truth instead of being bounced at HTML.
