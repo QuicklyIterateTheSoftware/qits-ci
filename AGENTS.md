@@ -176,15 +176,34 @@ The third one is not redundant — the browser resolves the client's asset urls 
 so a baseHref that disagrees with where the app is mounted yields a page that loads and then fetches
 its own javascript from the wrong place.
 
-**What SPA routing must not swallow is derived, not listed.** Quinoa reads `quarkus.rest.path` and
-`quarkus.http.non-application-root-path` and ignores each that falls under the ui root path, which
-is why `/ci/api` and `/ci/q` keep answering for themselves. Setting
-`quarkus.quinoa.ignored-path-prefixes` would *replace* that derivation rather than extend it, so
-don't: the list and the paths would drift the next time one moves. `/ci/daemon` is outside the
-derivation and safe for a different reason — websockets-next registers its route at the default
-order and Quinoa's SPA route is deliberately near-last, so the upgrade never reaches the SPA
-handler. `CiPackagedSurfaceIT` asserts that endpoint on the packaged artifact, which is what keeps
-it from being a belief.
+**What SPA routing must not swallow is listed here, not derived — and `/ci/daemon` is why.** Quinoa's
+fallback is a catch-all under `/ci` and the skip list it *derives* holds exactly two things,
+`quarkus.rest.path` and `quarkus.http.non-application-root-path`. The daemon control socket is
+outside it: `@WebSocket(path = "/ci/daemon")` is a literal that follows neither key.
+
+This file used to argue that made no difference, because websockets-next registers its route at the
+default order while Quinoa's SPA route is near-last, so an upgrade never reaches the SPA handler.
+That is true of the **upgrade** and of nothing else. **Measured on the packaged fast-jar before
+`quarkus.quinoa.ignored-path-prefixes` was set**, a plain `GET /ci/daemon` — no `Upgrade` header —
+and `GET /ci/daemon/nope` each answered **200 `text/html`** with the SPA's `index.html`; the socket
+route claims only the handshake and the fallback took the rest. `/ci/daemon` is a cross-repo machine
+contract (`qits.ci.container-daemon-url`, dialled verbatim by every step container's daemon), and a
+machine client handed a web page parses it as data. The correct answer to a mistyped machine path is
+a 404, which is what it is now.
+
+So the key is set: `quarkus.quinoa.ignored-path-prefixes=/api,/q,/daemon`. Setting it **replaces**
+the derivation instead of extending it, which is why `/api` and `/q` are spelled out again by hand —
+drop either and the API answers mistyped paths with `index.html`. The values are **relative** to
+`ui-root-path` (`/api`, never `/ci/api`); an absolute value matches nothing and fails exactly like an
+unset key, which is the failure that hides. The list moves when any of its three sources moves —
+`quarkus.rest.path`, `quarkus.http.non-application-root-path`, or `CiDaemonSocket`'s `@WebSocket`
+literal — so add a literal route and add its prefix in the same commit.
+
+Ignoring a prefix stops the SPA **reroute**; it does not unregister the real route. The upgrade on
+`/ci/daemon` still works, and `CiPackagedSurfaceIT` asserts it on the packaged artifact, which is
+what keeps that from being a belief. The platform rule this follows in the general case: leave the
+key unset when `quarkus.rest.path` and `quarkus.http.non-application-root-path` name the service's
+whole machine surface, set it the moment a literal exists outside them.
 
 **quarkus-undertow must never join this module's dependencies.** Its presence breaks Quinoa's
 production static serving — the reason qits-artifacts mounts its git host on plain Vert.x routes

@@ -60,10 +60,18 @@ Beneath the segment sits the kind of surface: `/ci/api/…` for the JSON API
 `/ci/` itself is the **Angular client**: the
 [qits-spa-ci](https://github.com/QuicklyIterateTheSoftware/qits-spa-ci) submodule at
 `service/src/main/webui`, built by Quinoa into the packaged artifact and served from it, with deep
-links under `/ci/` falling back to `index.html` so the client's own router handles them. The API and
-`/ci/q` are excluded from that fallback automatically — Quinoa derives the exclusions from the two
-keys above rather than from a list. Note `/ci` without the trailing slash is a 404: the SPA is
-mounted at `/ci/`, and nothing here redirects to it.
+links under `/ci/` falling back to `index.html` so the client's own router handles them. Note `/ci`
+without the trailing slash is a 404: the SPA is mounted at `/ci/`, and nothing here redirects to it.
+
+That fallback is a catch-all, and what it must **not** swallow is named in
+`quarkus.quinoa.ignored-path-prefixes=/api,/q,/daemon` — relative to the UI root, and repeating
+`/api` and `/q` because setting the key *replaces* Quinoa's own derivation (which reads
+`quarkus.rest.path` and `quarkus.http.non-application-root-path`, and nothing else) rather than
+extending it. The third entry is why the key is set at all: `ws://…/ci/daemon` is a `@WebSocket`
+literal outside that derivation, and websockets-next claims only the upgrade — so before this key
+existed a plain `GET /ci/daemon` answered `200 text/html` with `index.html`, which the machine
+client on the far side parses as data. With it, a mistyped machine path answers 404 and the upgrade
+is untouched. Add a literal route, add its prefix.
 
 Nothing under `/ci/api` repeats `ci` again: the segment already said it. That is the one shape
 change here beyond the prefix, along with runs becoming their own entity (below).
