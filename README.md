@@ -5,7 +5,8 @@ The **in-repo CI pipeline**: a repository opts in by committing
 commit, runs each step's script in a fresh container of the step's declared image, and records a
 per-step pass/fail for the push — advisory, queryable over REST.
 
-    mvn verify        # a clone of this repo alone builds and tests green — no monorepo, no docker
+    git submodule update --init   # the Angular client at service/src/main/webui
+    mvn verify                    # green from a clone alone — no monorepo, no docker, no credentials
 
 ## Layout
 
@@ -55,6 +56,22 @@ Beneath the segment sits the kind of surface: `/ci/api/…` for the JSON API
 (`quarkus.rest.path`), `/ci/q/…` for what Quarkus itself serves —
 `/ci/q/openapi`, `/ci/q/swagger-ui` (`quarkus.http.non-application-root-path`, which is outside
 `quarkus.rest.path` and so has to carry the segment separately).
+
+`/ci/` itself is the **Angular client**: the
+[qits-spa-ci](https://github.com/QuicklyIterateTheSoftware/qits-spa-ci) submodule at
+`service/src/main/webui`, built by Quinoa into the packaged artifact and served from it, with deep
+links under `/ci/` falling back to `index.html` so the client's own router handles them. Note `/ci`
+without the trailing slash is a 404: the SPA is mounted at `/ci/`, and nothing here redirects to it.
+
+That fallback is a catch-all, and what it must **not** swallow is named in
+`quarkus.quinoa.ignored-path-prefixes=/api,/q,/daemon` — relative to the UI root, and repeating
+`/api` and `/q` because setting the key *replaces* Quinoa's own derivation (which reads
+`quarkus.rest.path` and `quarkus.http.non-application-root-path`, and nothing else) rather than
+extending it. The third entry is why the key is set at all: `ws://…/ci/daemon` is a `@WebSocket`
+literal outside that derivation, and websockets-next claims only the upgrade — so before this key
+existed a plain `GET /ci/daemon` answered `200 text/html` with `index.html`, which the machine
+client on the far side parses as data. With it, a mistyped machine path answers 404 and the upgrade
+is untouched. Add a literal route, add its prefix.
 
 Nothing under `/ci/api` repeats `ci` again: the segment already said it. That is the one shape
 change here beyond the prefix, along with runs becoming their own entity (below).

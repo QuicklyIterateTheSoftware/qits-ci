@@ -121,8 +121,22 @@ COPY . .
 # here proves the same thing more slowly. Note the profile also flips `skipITs` to false — stopping
 # at `package` rather than `verify` is what keeps `CiPackagedSurfaceIT` out of the image build; it
 # wants a free port and a writable home, neither of which this stage is the right place to arrange.
+#
+# The two `package-manager-install` flags are how the Angular client gets built HERE. Quinoa shells
+# out to npm, and a Mandrel builder image has no node — so without them this stage fails the moment
+# the webui submodule is present, and the flags are on the command line rather than in
+# application.properties precisely because a developer machine already has node and should keep using
+# its own. The version is pinned so the image build is reproducible, not "whatever nodejs.org calls
+# current".
+#
+# A build context whose webui submodule is NOT initialised fails this stage with `No package.json
+# found in Web UI directory: 'src/main/webui'` — git leaves the gitlink as an empty directory, and an
+# empty directory is the one case Quinoa treats as a misconfiguration rather than as "no client".
+# Loud is the right failure here, but it is a failure: see AGENTS.md, "The Angular client".
 RUN ./mvnw -B -ntp -pl service -am package -Dnative -DskipTests \
-      -Dquarkus.native.native-image-xmx=4g
+      -Dquarkus.native.native-image-xmx=4g \
+      -Dquarkus.quinoa.package-manager-install=true \
+      -Dquarkus.quinoa.package-manager-install.node-version=22.22.0
 
 # --- runtime --------------------------------------------------------------------------------------
 FROM registry.access.redhat.com/ubi9/ubi-minimal:9.6

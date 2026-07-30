@@ -2,6 +2,11 @@
 target/
 target-ide/
 
+# Where Quinoa unpacks its own node when the image build asks it to (docker/Dockerfile passes
+# -Dquarkus.quinoa.package-manager-install=true). Never present on a machine that has node of its
+# own, which is exactly why it is easy to commit by accident from one that does not.
+.quinoa/
+
 # IDE
 .vscode/
 .idea/

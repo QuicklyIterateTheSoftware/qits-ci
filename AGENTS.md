@@ -14,6 +14,13 @@ bare git repos instead of using fixture submodules, the git host is a `file://` 
 as `<base>/git/<repoId>`, and the one seam that needs real docker is faked (`FakeCiStepRunner`)
 rather than skipped.
 
+**The one clause that has been bought back is "alone":** the Angular client is a submodule, so the
+gate is now `git submodule update --init && ./mvnw verify`. Everything else about the rule holds —
+still no monorepo, still no credentials, still no prior install — and the cost is one public clone,
+paid once. It is called out here rather than folded quietly into the sentence above because the
+failure it introduces looks like a broken build rather than a missing checkout; see "The Angular
+client".
+
 **`service/` compiles to a GraalVM native image**, the same rule qits-gateway and
 qits-workspace-daemon carry. `.sdkmanrc` names `25.0.2-graalce`, so `sdk env` gives you a
 `native-image` and `./mvnw verify -Dnative` produces `service/target/qits-ci` in about two minutes
@@ -155,6 +162,73 @@ matching — and it fails *open*, because a request the filter does not recognis
 checked. `CiTokenGuardTest` is what stands between that and shipping: it POSTs the intake's real
 address with no token and demands a 401, so a filter that quietly stopped guarding shows up as a
 202. Change the two together and keep that test on the absolute path.
+
+## The Angular client
+
+`service/src/main/webui` is the [qits-spa-ci](https://github.com/QuicklyIterateTheSoftware/qits-spa-ci)
+submodule, built and served by Quinoa. The path is Quinoa's default `web-ui-dir`, so it is a
+convention rather than a setting, and the four config keys that are settings live in
+`application.properties` under "the Angular client" with their reasoning beside them.
+
+**The `/ci` segment is spelled three times and they move together**: `quarkus.quinoa.ui-root-path`
+here, `quarkus.rest.path` beside it, and the client's own Angular `baseHref` in its `angular.json`.
+The third one is not redundant — the browser resolves the client's asset urls against the document,
+so a baseHref that disagrees with where the app is mounted yields a page that loads and then fetches
+its own javascript from the wrong place.
+
+**What SPA routing must not swallow is listed here, not derived — and `/ci/daemon` is why.** Quinoa's
+fallback is a catch-all under `/ci` and the skip list it *derives* holds exactly two things,
+`quarkus.rest.path` and `quarkus.http.non-application-root-path`. The daemon control socket is
+outside it: `@WebSocket(path = "/ci/daemon")` is a literal that follows neither key.
+
+This file used to argue that made no difference, because websockets-next registers its route at the
+default order while Quinoa's SPA route is near-last, so an upgrade never reaches the SPA handler.
+That is true of the **upgrade** and of nothing else. **Measured on the packaged fast-jar before
+`quarkus.quinoa.ignored-path-prefixes` was set**, a plain `GET /ci/daemon` — no `Upgrade` header —
+and `GET /ci/daemon/nope` each answered **200 `text/html`** with the SPA's `index.html`; the socket
+route claims only the handshake and the fallback took the rest. `/ci/daemon` is a cross-repo machine
+contract (`qits.ci.container-daemon-url`, dialled verbatim by every step container's daemon), and a
+machine client handed a web page parses it as data. The correct answer to a mistyped machine path is
+a 404, which is what it is now.
+
+So the key is set: `quarkus.quinoa.ignored-path-prefixes=/api,/q,/daemon`. Setting it **replaces**
+the derivation instead of extending it, which is why `/api` and `/q` are spelled out again by hand —
+drop either and the API answers mistyped paths with `index.html`. The values are **relative** to
+`ui-root-path` (`/api`, never `/ci/api`); an absolute value matches nothing and fails exactly like an
+unset key, which is the failure that hides. The list moves when any of its three sources moves —
+`quarkus.rest.path`, `quarkus.http.non-application-root-path`, or `CiDaemonSocket`'s `@WebSocket`
+literal — so add a literal route and add its prefix in the same commit.
+
+Ignoring a prefix stops the SPA **reroute**; it does not unregister the real route. The upgrade on
+`/ci/daemon` still works, and `CiPackagedSurfaceIT` asserts it on the packaged artifact, which is
+what keeps that from being a belief. The platform rule this follows in the general case: leave the
+key unset when `quarkus.rest.path` and `quarkus.http.non-application-root-path` name the service's
+whole machine surface, set it the moment a literal exists outside them.
+
+**quarkus-undertow must never join this module's dependencies.** Its presence breaks Quinoa's
+production static serving — the reason qits-artifacts mounts its git host on plain Vert.x routes
+rather than as a servlet (that repo's README). Nothing pulls it in today; `./mvnw -pl service -am
+dependency:tree -Dincludes=io.quarkus:quarkus-undertow` is empty and quarkus-vertx-http is the only
+web stack present. Check that before adding any extension that sounds like a web framework.
+
+**Three places assume the submodule is checked out, and each fails differently:**
+
+- **A build.** An uninitialised gitlink is an *empty directory*, and that is the one case Quinoa
+  treats as a misconfiguration rather than as "no client": `./mvnw verify` stops at `No package.json
+  found in Web UI directory: 'src/main/webui'`. Loud, and it names the cause — but it is why the
+  clone-alone rule at the top of this file now reads "clone **and** `git submodule update --init`".
+- **The image build.** `docker/Dockerfile` does `COPY . .`, so the build context carries whatever the
+  working tree has. The Mandrel builder stage has no node either, which is why that `mvnw` line
+  passes `-Dquarkus.quinoa.package-manager-install=true` and a pinned `node-version` — on the command
+  line rather than in `application.properties`, so a developer machine keeps using its own node.
+- **This repo's own CI.** The step container's clone is `--depth 50` and does not recurse, so
+  `.config/qits/ci-post-receive.yml` initialises the submodule itself before `docker build`. Without
+  that line the publish step fails on the empty directory, and the repo's CI is red for a reason that
+  has nothing to do with the push.
+
+Note Quinoa is **disabled by default in test mode**, so no `@QuarkusTest` builds the client and the
+suite's runtime is unchanged. What the SPA is actually served as is proven by `package` plus the
+packaged artifact, not by surefire.
 
 ## Adding a dependency on another context
 
