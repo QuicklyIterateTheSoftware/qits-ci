@@ -145,6 +145,22 @@ public class CiDaemonLauncher {
   String artifactsImageRepository;
 
   /**
+   * qits-artifacts' npm registry roots — the hosted repository {@code @qits/*} is published to, and
+   * the pull-through cache of npmjs every install resolves through. Same receiver-naming rule as the
+   * two above, and injected into every step container for the same reason: a repository's pipeline
+   * writes its {@code ~/.npmrc} from these and spells no address of its own.
+   *
+   * <p><b>Who dials them is the opposite of {@code registry-host}'s answer</b> — the step container
+   * itself, over qits-net, with no docker socket and no host daemon in the path. See {@link
+   * #buildArgv}.
+   */
+  @ConfigProperty(name = "qits.artifacts.npm.hosted-url")
+  String artifactsNpmHostedUrl;
+
+  @ConfigProperty(name = "qits.artifacts.npm.proxy-url")
+  String artifactsNpmProxyUrl;
+
+  /**
    * Everything one step container is started with. Ids and names only — never entities.
    *
    * <p>{@code docker} is the step's own declaration, arriving from the repository's config by way of
@@ -327,6 +343,15 @@ public class CiDaemonLauncher {
    * daemon</b>, on the far side of the mounted socket. So resolvability and TLS trust are the
    * daemon's — a deployment must make the host reach it, and list it in {@code insecure-registries}
    * while the registry speaks plain HTTP.
+   *
+   * <p><b>The npm roots go into every container too, and their caveat is the exact inverse.</b>
+   * {@code QITS_NPM_REGISTRY_URL} and {@code QITS_NPM_PROXY_URL} are dialled by the <b>step
+   * container itself</b> — an npm CLI speaking plain HTTP to a service alias on the shared network,
+   * needing no socket, no privilege and no {@code docker: true}. So the value that is right here is
+   * the in-network one, and a host-published mapping substituted for {@code QITS_REGISTRY} (the
+   * local stack's {@code localhost:8081}) must <b>not</b> be substituted for these: a step container
+   * has no such address. Two variables, two opposite readings of "reachable from where" — which is
+   * why both are commented where they are shipped.
    */
   List<String> buildArgv(LaunchSpec spec) {
     List<String> argv = new ArrayList<>();
@@ -379,6 +404,10 @@ public class CiDaemonLauncher {
     // <registry>/<repository>/<application>:<sha>.
     env(argv, "QITS_REGISTRY", artifactsRegistryHost);
     env(argv, "QITS_IMAGE_REPOSITORY", artifactsImageRepository);
+    // And where npm packages come from and go to. Unlike the two above, these are dialled by this
+    // container, on this network — a publish here is an ordinary HTTP step needing no socket.
+    env(argv, "QITS_NPM_REGISTRY_URL", artifactsNpmHostedUrl);
+    env(argv, "QITS_NPM_PROXY_URL", artifactsNpmProxyUrl);
     argv.add("--entrypoint");
     argv.add("/bin/sh");
     argv.add(spec.image());

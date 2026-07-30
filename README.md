@@ -76,6 +76,7 @@ rest of qits it reaches over a URL it is configured with:
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + `qits.ci.daemon-version` |
 | out | `POST /cd/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.cd.intake-url`; no token — cd's intake is not gateway-allowlisted, the call stays on qits-net |
 | out | the registry a publishing step pushes to, as `$QITS_REGISTRY` and `$QITS_IMAGE_REPOSITORY` in **every** step container — dialled by the *host's docker daemon*, never by this process | `qits.artifacts.registry-host`, `qits.artifacts.image-repository` |
+| out | the npm registry roots, as `$QITS_NPM_REGISTRY_URL` (hosted, `@qits/*` publishes) and `$QITS_NPM_PROXY_URL` (the npmjs pull-through cache) in **every** step container — dialled by the *step container itself* on the shared network | `qits.artifacts.npm.hosted-url`, `qits.artifacts.npm.proxy-url` |
 
 The run listing takes the repository as a **query filter, not a path segment**. ci does not own
 repositories, so `/repositories/{repoId}/runs` asserted a containment this context does not have —
@@ -147,6 +148,32 @@ the convention plus cd's `IMAGE_MISSING` telling on a mismatch.
 The build and the push both happen in the *host's* daemon — the step's CLI is only a client — so the
 registry address must resolve and be trusted **from the docker host**, not from this process. The
 step image supplies the docker CLI; the platform supplies the socket and the two coordinates.
+
+**Publishing an npm package needs none of that.** `$QITS_NPM_REGISTRY_URL` (hosted — where `@qits/*`
+is published) and `$QITS_NPM_PROXY_URL` (the pull-through cache of npmjs every install resolves
+through) are injected into every step container alongside the two above, and the caveat on them is
+the **opposite** one: they are dialled by the *step container itself* over the shared network, so an
+npm publish is an ordinary HTTP step with no socket, no `docker: true` and no root-equivalence. The
+consequence for a deployment is that the value which is right for these is the in-network alias — a
+host-published mapping substituted for `$QITS_REGISTRY` (the local stack's `localhost:8081`) must
+**not** be substituted for these, because a step container has no such address.
+
+A step writes its own `~/.npmrc` from the two, so no repository ever spells a registry address:
+
+```sh
+cat > ~/.npmrc <<EOF
+registry=${QITS_NPM_PROXY_URL}
+@qits:registry=${QITS_NPM_REGISTRY_URL}
+${QITS_NPM_REGISTRY_URL#http:}:_authToken=qits-ci   # npm-CLI ceremony only — server reads nothing
+EOF
+```
+
+Two lines there are worth reading twice. The `#http:` strip is parameter expansion, not a comment:
+it turns the url into the `//host/path/` form npm keys credentials by, which is the one non-obvious
+line in the whole preamble. And the token is **npm-CLI ceremony only** — the npm client refuses to
+`publish` against a registry it holds no credential for, a pre-flight that never reaches the wire;
+qits-artifacts requires no credential in either direction on `qits-net` and reads nothing from that
+line. It is not an auth scheme and the day npm accepts an anonymous publish it simply goes away.
 
 ## How a step runs — qits-ci starts containers, and that is all
 
@@ -252,6 +279,11 @@ this by design — the launch table is memory, and that is what makes the restar
   registry speaks plain HTTP the daemon also needs it in `insecure-registries`. Same class of fact as
   the socket mount, and now the same socket serves both. qits-cd ships the same two keys and derives
   its pull references from them, so the two services must agree.
+- Leave `qits.artifacts.npm.hosted-url` / `qits.artifacts.npm.proxy-url` alone on a deployment where
+  qits-artifacts answers to its usual alias: they are reached **from a step container**, on
+  `qits.ci.network`, so the shipped defaults are already the right values and the host-published
+  address used for `registry-host` is exactly the wrong one to copy here. Override them only when
+  qits-artifacts moves off the alias.
 - Give the process a persistent `~/.qits/data/ci` (or override `quarkus.datasource.ci.jdbc.url` and
   `qits.ci.data-dir`). The H2 there is a plain **single-writer file** — no `AUTO_SERVER`, so nothing
   else may open it while ci runs, and nothing listens on a database port.

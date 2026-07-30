@@ -33,6 +33,8 @@ public class CiDaemonLauncherTest {
     launcher.dockerSocketPath = "/var/run/docker.sock";
     launcher.artifactsRegistryHost = "qits-artifacts:8080";
     launcher.artifactsImageRepository = "qits";
+    launcher.artifactsNpmHostedUrl = "http://qits-artifacts:8080/artifacts/npm/npm/";
+    launcher.artifactsNpmProxyUrl = "http://qits-artifacts:8080/artifacts/npm/npmjs/";
     return launcher;
   }
 
@@ -112,6 +114,10 @@ public class CiDaemonLauncherTest {
             "QITS_REGISTRY=qits-artifacts:8080",
             "--env",
             "QITS_IMAGE_REPOSITORY=qits",
+            "--env",
+            "QITS_NPM_REGISTRY_URL=http://qits-artifacts:8080/artifacts/npm/npm/",
+            "--env",
+            "QITS_NPM_PROXY_URL=http://qits-artifacts:8080/artifacts/npm/npmjs/",
             "--entrypoint",
             "/bin/sh",
             "maven:3.9",
@@ -164,6 +170,23 @@ public class CiDaemonLauncherTest {
       assertTrue(argv.contains("QITS_REGISTRY=qits-artifacts:8080"), argv.toString());
       assertTrue(argv.contains("QITS_IMAGE_REPOSITORY=qits"), argv.toString());
       assertTrue(argv.contains("QITS_CI_SHA=cafebabe"), argv.toString());
+    }
+  }
+
+  @Test
+  public void everyStepIsToldWhereNpmPackagesComeFromAndGoTo() {
+    // Also unconditional, and for the same reason — but note what changes about the reasoning: these
+    // two are dialled by the step container itself over the shared network, so a publish to them is
+    // an ordinary HTTP step that never declares `docker: true`, and the in-network alias is the
+    // value that is CORRECT here rather than the one a host-published mapping replaces.
+    for (LaunchSpec each : List.of(spec, publishing())) {
+      List<String> argv = launcher().buildArgv(each);
+      assertTrue(
+          argv.contains("QITS_NPM_REGISTRY_URL=http://qits-artifacts:8080/artifacts/npm/npm/"),
+          argv.toString());
+      assertTrue(
+          argv.contains("QITS_NPM_PROXY_URL=http://qits-artifacts:8080/artifacts/npm/npmjs/"),
+          argv.toString());
     }
   }
 
