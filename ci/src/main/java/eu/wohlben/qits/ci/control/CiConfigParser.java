@@ -14,9 +14,10 @@ import org.yaml.snakeyaml.constructor.SafeConstructor;
  * pattern: SnakeYAML {@link SafeConstructor}, plain maps/lists only — never instantiating classes
  * from repository content). Parsing is deliberately <b>lenient</b>: unknown keys, top-level or
  * per-step, are simply never read, so a repo can carry config for a newer qits-ci without breaking
- * on an older one. Only unparseable YAML, a structurally wrong {@code steps}, or a step missing
- * {@code script}/{@code image} is a config error ({@link CiConfigException} — recorded as a {@code
- * CONFIG_ERROR} run so a broken gate is visible rather than silently green).
+ * on an older one. Only unparseable YAML, a structurally wrong {@code steps}, a step missing {@code
+ * script}/{@code image}, or a key this parser <em>does</em> know carrying a value it cannot read
+ * ({@code timeout-seconds}, {@code docker}) is a config error ({@link CiConfigException} — recorded
+ * as a {@code CONFIG_ERROR} run so a broken gate is visible rather than silently green).
  */
 @ApplicationScoped
 public class CiConfigParser {
@@ -74,13 +75,14 @@ public class CiConfigParser {
           new CiStepDecl(
               requireString(step, "image", i),
               requireString(step, "script", i),
-              optionalTimeoutSeconds(step, i)));
+              optionalTimeoutSeconds(step, i),
+              optionalDocker(step, i)));
     }
     return new CiPipeline(List.copyOf(steps));
   }
 
   /**
-   * The one optional per-step key: {@code timeout-seconds}. Absent means the deployment's {@code
+   * The optional per-step {@code timeout-seconds}. Absent means the deployment's {@code
    * qits.ci.step-timeout-seconds}, i.e. exactly the behaviour before this key existed — the
    * leniency above is about keys this parser does not <em>know</em>, and this one it knows, so a
    * value that cannot be a deadline is a config error rather than something quietly ignored. A repo
@@ -96,6 +98,31 @@ public class CiConfigParser {
           "Step " + index + ": 'timeout-seconds' must be a positive whole number of seconds");
     }
     return seconds;
+  }
+
+  /**
+   * The optional per-step {@code docker} flag: whether the host mounts its docker socket into this
+   * step's container, which is how a pipeline's last step runs {@code docker build && docker push}.
+   * Absent means false, and false is the sandbox every step has had until now.
+   *
+   * <p>It is held to the same standard as {@code timeout-seconds} and for a sharper reason: a value
+   * this parser knows and cannot read is a config error, never a quiet default. Declaring the flag
+   * makes a step <b>root-equivalent on the host</b>, so {@code docker: yes-please} silently parsing
+   * as "no socket" would leave a repository believing it opted in — and {@code docker: "false"}
+   * silently parsing as truthy would be the far worse direction. Only a YAML boolean is accepted;
+   * SnakeYAML already resolves {@code true}/{@code false}/{@code yes}/{@code no} to one, so a repo
+   * pays nothing for the strictness except finding out about its typos.
+   */
+  private static boolean optionalDocker(Map<?, ?> step, int index) {
+    Object value = step.get("docker");
+    if (value == null) {
+      return false;
+    }
+    if (!(value instanceof Boolean docker)) {
+      throw new CiConfigException(
+          "Step " + index + ": 'docker' must be a boolean, got: " + typeOf(value));
+    }
+    return docker;
   }
 
   private static String requireString(Map<?, ?> step, String key, int index) {

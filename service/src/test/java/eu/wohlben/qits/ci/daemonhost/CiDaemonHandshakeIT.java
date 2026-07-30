@@ -108,7 +108,8 @@ public class CiDaemonHandshakeIT {
                       IMAGE,
                       credentials.daemonId(),
                       credentials.secret(),
-                      binaryUrl));
+                      binaryUrl,
+                      false));
           try {
             assertTrue(launched.started(), "docker refused the launch: " + launched.error());
 
@@ -167,7 +168,8 @@ public class CiDaemonHandshakeIT {
                       credentials.daemonId(),
                       // The one thing changed: this container holds a secret the host did not mint.
                       credentials.secret().substring(1) + "x",
-                      binaryUrl));
+                      binaryUrl,
+                      false));
           try {
             assertTrue(launched.started(), launched.error());
             assertFalse(
@@ -204,7 +206,8 @@ public class CiDaemonHandshakeIT {
                       IMAGE,
                       credentials.daemonId(),
                       credentials.secret(),
-                      servedBinaryUrl + "-does-not-exist"));
+                      servedBinaryUrl + "-does-not-exist",
+                      false));
           try {
             assertTrue(launched.started(), launched.error());
             assertFalse(

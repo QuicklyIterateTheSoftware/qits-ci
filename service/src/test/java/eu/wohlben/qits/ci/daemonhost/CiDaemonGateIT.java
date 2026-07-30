@@ -42,7 +42,7 @@ import org.junit.jupiter.api.Test;
  * subject, and it is the only place a step's script is really executed at all — no fake anywhere in
  * this repo runs one.
  *
- * <p>Four cases, one per thing the phase is finished when it does:
+ * <p>Five cases, one per thing the phase is finished when it does:
  *
  * <ol>
  *   <li>a two-step pipeline through the intake, followed live mid-run and read back as terminal
@@ -51,7 +51,9 @@ import org.junit.jupiter.api.Test;
  *   <li>a cancellation honored mid-step;
  *   <li>a per-step {@code timeout-seconds} recorded as timed out rather than as a failure;
  *   <li>an image that cannot satisfy the contract, so the never-registered state is the container's
- *       own log rather than a generic step failure.
+ *       own log rather than a generic step failure;
+ *   <li>a step declaring {@code docker: true} really reaching the host's daemon through the mounted
+ *       socket, beside a step that declared nothing and really has none.
  * </ol>
  *
  * <p>Run it with {@code -DskipITs=false}. It is tagged {@code extended} and the {@code native}
@@ -348,6 +350,57 @@ public class CiDaemonGateIT {
     assertTrue(
         finishedAt.isBefore(startedAt.plusSeconds(120)),
         "the per-step timeout must be what ended it, not the global one");
+    assertEquals(0, containersLabelled(runId));
+  }
+
+  /**
+   * The socket mount, proven from both sides in one run: step 0 declares nothing and must find no
+   * socket, step 1 declares {@code docker: true} and must reach the host's daemon through it. Argv
+   * assembly is {@code CiDaemonLauncherTest}'s subject; what only a real container can show is that
+   * the mount is a live socket the step really talks to, and that the step next to it really has none.
+   *
+   * <p>It asks the daemon's own {@code /version} with {@code curl --unix-socket} rather than with
+   * {@code docker version}, because the docker CLI is not part of the image contract (git, bash, a
+   * downloader) and a publishing repository supplies it in its own step image. The endpoint is the one
+   * {@code docker version} itself calls, and the property under test is the mount rather than the
+   * presence of a CLI.
+   */
+  @Test
+  public void aStepDeclaringDockerReachesTheHostDaemonAndOneWithoutHasNoSocket() throws Exception {
+    String repoId = seedOrigin();
+    String sha =
+        pushBranchWithConfig(
+            repoId,
+            "gate-docker",
+            """
+            steps:
+              - image: %s
+                script: |
+                  test ! -e /var/run/docker.sock
+                  echo no-socket-without-the-flag
+              - image: %s
+                docker: true
+                script: |
+                  curl -fsS --unix-socket /var/run/docker.sock http://localhost/version
+                  echo the-socket-answered
+            """
+                .formatted(IMAGE, IMAGE));
+    postReceive(repoId, "gate-docker", sha);
+
+    String runId = awaitRunId(repoId);
+    JsonPath detail = awaitTerminalRun(runId);
+    assertEquals("SUCCESS", detail.getString("status"), detail.prettify());
+
+    List<Map<String, Object>> steps = detail.getList("steps");
+    assertEquals(2, steps.size());
+    // The absence, against a real container: a step that declared nothing has no socket to find.
+    assertTrue(
+        steps.get(0).get("output").toString().contains("no-socket-without-the-flag"),
+        steps.get(0).toString());
+    // And the presence: the mounted socket is the host's docker daemon, answering its own API.
+    String published = steps.get(1).get("output").toString();
+    assertTrue(published.contains("the-socket-answered"), published);
+    assertTrue(published.contains("ApiVersion"), "the daemon's own /version must be what answered: " + published);
     assertEquals(0, containersLabelled(runId));
   }
 

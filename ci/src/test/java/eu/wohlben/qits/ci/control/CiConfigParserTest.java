@@ -1,6 +1,7 @@
 package eu.wohlben.qits.ci.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -103,6 +104,54 @@ public class CiConfigParserTest {
     assertThrows(
         CiConfigException.class,
         () -> parser.parse("steps:\n  - image: alpine:3\n    script: \"true\"\n    timeout-seconds: -5\n"));
+  }
+
+  @Test
+  public void anAbsentDockerFlagMeansNoSocket() {
+    // False is not a default this parser chose — it is the sandbox every step has always had, and an
+    // absent key has to keep meaning exactly that.
+    CiPipeline pipeline = parser.parse("steps:\n  - image: alpine:3\n    script: \"true\"\n");
+    assertFalse(pipeline.steps().get(0).docker());
+  }
+
+  @Test
+  public void aDeclaredDockerFlagIsReadPerStep() {
+    // The publishing shape: build steps as they always were, then one final step that gets the host's
+    // docker socket and pushes. The flag is per step, so opting one in leaves the others alone.
+    CiPipeline pipeline =
+        parser.parse(
+            """
+            steps:
+              - image: alpine:3
+                script: ./mvnw -B -ntp verify
+              - image: alpine:3
+                docker: true
+                script: |
+                  docker build -t "$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/app:$QITS_CI_SHA" .
+                  docker push "$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/app:$QITS_CI_SHA"
+            """);
+    assertFalse(pipeline.steps().get(0).docker());
+    assertTrue(pipeline.steps().get(1).docker());
+  }
+
+  @Test
+  public void anUnusableDockerFlagIsAConfigErrorRatherThanIgnored() {
+    // Known key, same standard as timeout-seconds, and a sharper reason for it: the flag is the one
+    // privilege a repository can ask for, so a repo that mistyped it must not be left believing it
+    // opted in — nor, worse, get a socket out of a string that merely looks true.
+    assertThrows(
+        CiConfigException.class,
+        () -> parser.parse("steps:\n  - image: alpine:3\n    script: \"true\"\n    docker: yes-please\n"));
+    assertThrows(
+        CiConfigException.class,
+        () -> parser.parse("steps:\n  - image: alpine:3\n    script: \"true\"\n    docker: 1\n"));
+    // YAML's own boolean spellings are booleans, so the strictness costs a repo nothing it wanted.
+    assertTrue(
+        parser
+            .parse("steps:\n  - image: alpine:3\n    script: \"true\"\n    docker: yes\n")
+            .steps()
+            .get(0)
+            .docker());
   }
 
   @Test

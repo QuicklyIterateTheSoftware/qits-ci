@@ -123,7 +123,34 @@ public class CiDaemonLauncher {
   @ConfigProperty(name = "qits.ci.cpus")
   String cpus;
 
-  /** Everything one step container is started with. Ids and names only — never entities. */
+  /**
+   * The host socket a {@code docker: true} step is handed, mounted at the same path inside the
+   * container so the CLI in the step image finds it where it looks by default. Configurable because
+   * a nonstandard daemon (a rootless one under {@code $XDG_RUNTIME_DIR}, a socket-activated proxy)
+   * is a deployment fact and not something this class should assume.
+   */
+  @ConfigProperty(name = "qits.ci.docker-socket-path")
+  String dockerSocketPath;
+
+  /**
+   * qits-artifacts' registry coordinates, injected into every step container so a publish script
+   * names no deployment fact of its own. Receiver-named on purpose: they are the artifacts service's
+   * address and image namespace, one spelling shared with qits-cd, which derives its pull references
+   * from the same two values. Neither is dialled by <em>this</em> process — see {@link #buildArgv}.
+   */
+  @ConfigProperty(name = "qits.artifacts.registry-host")
+  String artifactsRegistryHost;
+
+  @ConfigProperty(name = "qits.artifacts.image-repository")
+  String artifactsImageRepository;
+
+  /**
+   * Everything one step container is started with. Ids and names only — never entities.
+   *
+   * <p>{@code docker} is the step's own declaration, arriving from the repository's config by way of
+   * the step seam. It is the single input that changes the sandbox, and it changes it in exactly one
+   * way: one more bind mount. See {@link #buildArgv}.
+   */
   public record LaunchSpec(
       String runId,
       int stepIndex,
@@ -133,7 +160,8 @@ public class CiDaemonLauncher {
       String image,
       String daemonId,
       String secret,
-      String daemonBinaryUrl) {}
+      String daemonBinaryUrl,
+      boolean docker) {}
 
   /**
    * Whether the container started, under what name, and what docker said if it did not. A failed
@@ -275,7 +303,31 @@ public class CiDaemonLauncher {
     return ids.size();
   }
 
-  /** Package-private for argv assembly tests. */
+  /**
+   * The whole {@code docker run} command line. Two paragraphs of it are load-bearing enough that a
+   * flag lost in a refactor is a security regression, so {@code CiDaemonLauncherTest} asserts the
+   * list literally — including the <b>absence</b> of the docker-socket mount for a step that did not
+   * ask for one.
+   *
+   * <p><b>The socket mount is the one privilege a repository can ask for.</b> A step declaring
+   * {@code docker: true} gets the host's docker socket bind-mounted at its own path, which is how
+   * publishing works: the step's CLI streams its build context to the <em>host's</em> daemon, which
+   * builds, tags and pushes. The sandbox flags below stay exactly as they are for such a step —
+   * {@code --cap-drop=ALL} and {@code no-new-privileges} cost a socket <em>client</em> nothing, and
+   * keeping them unconditional keeps them meaning what they mean for every step that does not opt in.
+   * They also do not make the opt-in safe: a step holding this socket is <b>root-equivalent on the
+   * host</b>, because those caps fence the step's own process tree and not what the daemon will do on
+   * its behalf. That is accepted for the POC and it is per step, declared in the repository's config
+   * where a diff shows it — see {@code AGENTS.md}'s untrusted-input section.
+   *
+   * <p><b>The registry coordinates are injected into every container, opted in or not.</b> They are
+   * two strings a publish script would otherwise have to hard-code, and a script that hard-codes a
+   * deployment's registry address is a script that breaks on the next deployment. Note what dials
+   * that address: not this process, and not the step's CLI either, but the <b>host's docker
+   * daemon</b>, on the far side of the mounted socket. So resolvability and TLS trust are the
+   * daemon's — a deployment must make the host reach it, and list it in {@code insecure-registries}
+   * while the registry speaks plain HTTP.
+   */
   List<String> buildArgv(LaunchSpec spec) {
     List<String> argv = new ArrayList<>();
     argv.add(runtime);
@@ -301,6 +353,12 @@ public class CiDaemonLauncher {
     argv.add(pidsLimit);
     argv.add("--cpus");
     argv.add(cpus);
+    // The declared opt-in, and the only thing that ever adds to this argv. Same path on both sides so
+    // the step image's CLI finds it where it looks; nothing else about the step changes.
+    if (spec.docker()) {
+      argv.add("-v");
+      argv.add(dockerSocketPath + ":" + dockerSocketPath);
+    }
     // The contract, as environment. The daemon needs all of it before a socket exists, which is why
     // none of it is a message.
     env(argv, "QITS_CI_DAEMON_ID", spec.daemonId());
@@ -315,6 +373,12 @@ public class CiDaemonLauncher {
     // non-interactive mode, and one that says which CI this is.
     env(argv, "CI", "true");
     env(argv, "QITS_CI", "true");
+    // Also for the script: where a published image goes. Every container gets them, because "which
+    // registry" must never be a literal in a repository's pipeline. Together with $QITS_CI_SHA above
+    // they are the whole of the tag convention qits-cd pulls by,
+    // <registry>/<repository>/<application>:<sha>.
+    env(argv, "QITS_REGISTRY", artifactsRegistryHost);
+    env(argv, "QITS_IMAGE_REPOSITORY", artifactsImageRepository);
     argv.add("--entrypoint");
     argv.add("/bin/sh");
     argv.add(spec.image());

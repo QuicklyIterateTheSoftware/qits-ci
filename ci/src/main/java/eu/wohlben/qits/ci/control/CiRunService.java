@@ -231,7 +231,8 @@ public class CiRunService {
                     decl.image(),
                     decl.script(),
                     pin.binaryUrl(),
-                    decl.timeoutSeconds() == null ? stepTimeoutSeconds : decl.timeoutSeconds()),
+                    decl.timeoutSeconds() == null ? stepTimeoutSeconds : decl.timeoutSeconds(),
+                    decl.docker()),
                 stamps);
 
         // A cancellation completes the await NORMALLY — the daemon answers a Cancel with a terminal

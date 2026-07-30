@@ -27,6 +27,12 @@ public interface CiStepRunner {
    * per-step {@code timeout-seconds} from the pipeline config, or the {@code
    * qits.ci.step-timeout-seconds} default — enforced by the daemon inside the container, with the
    * host holding a longer backstop behind it.
+   *
+   * <p>{@code docker} is the step's own {@code docker: true} declaration, carried across the seam
+   * untouched: this side neither interprets it nor defaults it, and the implementation turns it into
+   * a bind mount of the host's docker socket. It travels here rather than being read from config
+   * because it is a <em>property of the step</em> — one step of a run may have it and the next may
+   * not, and the run row records each of them the same way.
    */
   record StepSpec(
       String runId,
@@ -37,7 +43,8 @@ public interface CiStepRunner {
       String image,
       String script,
       String daemonBinaryUrl,
-      int timeoutSeconds) {}
+      int timeoutSeconds,
+      boolean docker) {}
 
   /**
    * How the step ended, in the vocabulary the orchestrator branches on. Every value here is a

@@ -154,6 +154,36 @@ public class CiRunServiceTest extends CiTestSupport {
   }
 
   @Test
+  public void aDeclaredDockerFlagTravelsFromTheYamlToTheStepItWasDeclaredOn() {
+    // The seam-level half of the docker-socket feature: everything from the parsed key to the argv is
+    // covered elsewhere, and what this asserts is the wiring in between — that the flag arrives at the
+    // runner attached to the step that declared it and to no other. The mount itself is
+    // CiDaemonLauncherTest's subject; that a step which declared nothing keeps its sandbox is asserted
+    // there as an absence, and here as a plain false.
+    seedConfig(
+        """
+        steps:
+          - image: alpine:3
+            script: ./mvnw -B -ntp verify
+          - image: alpine:3
+            docker: true
+            script: |
+              docker build -t "$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/app:$QITS_CI_SHA" .
+              docker push "$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/app:$QITS_CI_SHA"
+        """);
+    service.execute(repoId, "main", sha);
+
+    assertEquals(CiRunStatus.SUCCESS, soleRun().status);
+    assertEquals(2, fakeRunner.executed().size());
+    assertFalse(fakeRunner.executed().get(0).docker(), "a step declaring nothing asks for no socket");
+    assertTrue(fakeRunner.executed().get(1).docker(), "the publish step's declaration must arrive");
+    // And a publish step is an ordinary step in every other respect — same image handling, same
+    // recorded row, same deployment-default deadline unless it said otherwise.
+    assertEquals(900, fakeRunner.executed().get(1).timeoutSeconds());
+    assertEquals(CiStepStatus.SUCCESS, service.stepsFor(soleRun().id).get(1).status);
+  }
+
+  @Test
   public void brokenConfigRecordsAConfigErrorRunWithNoSteps() {
     seedConfig("steps:\n  - image: alpine:3\n"); // missing script
     service.execute(repoId, "main", sha);

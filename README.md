@@ -75,6 +75,7 @@ rest of qits it reaches over a URL it is configured with:
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + `qits.ci.daemon-version` |
 | out | `POST /cd/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.cd.intake-url`; no token — cd's intake is not gateway-allowlisted, the call stays on qits-net |
+| out | the registry a publishing step pushes to, as `$QITS_REGISTRY` and `$QITS_IMAGE_REPOSITORY` in **every** step container — dialled by the *host's docker daemon*, never by this process | `qits.artifacts.registry-host`, `qits.artifacts.image-repository` |
 
 The run listing takes the repository as a **query filter, not a path segment**. ci does not own
 repositories, so `/repositories/{repoId}/runs` asserted a containment this context does not have —
@@ -103,6 +104,49 @@ The fetch asks for the **branch ref**, not the bare sha — an unadvertised-obje
 relaxing the git host's want policy for every unauthenticated client. ci then verifies the pushed
 sha is still an ancestor of the fetched tip: a racing push still runs, a force-pushed-away commit
 records nothing rather than a spurious red run.
+
+## The file a repository commits
+
+`.config/qits/ci-post-receive.yml` is a list of steps and nothing else. Everything additive since
+has stayed additive over that core:
+
+```yaml
+steps:
+  - image: qits/build-images/ci-base:latest    # required — the container this step runs in
+    script: ./mvnw -B -ntp verify              # required — bash, run in the checkout
+  - image: qits/build-images/ci-base:latest
+    docker: true                               # optional, default false — see the warning below
+    timeout-seconds: 3600                      # optional — else qits.ci.step-timeout-seconds
+    script: |
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-gateway:$QITS_CI_SHA"
+      docker build -t "$ref" -f docker/Dockerfile .
+      docker push "$ref"
+      docker rmi "$ref" || true
+```
+
+Unknown keys — top level or per step — are never read, so a repo may carry config for a newer
+qits-ci. Keys that *are* known and unreadable (`timeout-seconds: soon`, `docker: yes-please`) are a
+`CONFIG_ERROR` run instead: a repo that meant to bound a step or to ask for a socket must find out.
+
+**Publishing an image is not a feature here, it is a step.** Steps are sequential, so a push runs
+only after the build steps went green; a failed push is a failed step is a **failed run**, so the CD
+announcement (`SUCCESS` only) keeps implying the image exists. The tag is the whole contract with
+qits-cd, which pulls `<registry>/<repository>/<application>:<sha>` where `<application>` is by
+convention the repository's name — the script must spell exactly that, and the only enforcement is
+the convention plus cd's `IMAGE_MISSING` telling on a mismatch.
+
+> **`docker: true` makes that step root-equivalent on the host.** It bind-mounts the host's docker
+> socket (`qits.ci.docker-socket-path`) into the step's container, and the socket *is* the daemon
+> and the daemon is root: such a step can mount host paths, start privileged containers and leave
+> the sandbox at will. The `--cap-drop=ALL` / `no-new-privileges` flags stay on and still fence the
+> step's own process tree, but they do not bound what the daemon will do on its behalf. It is
+> accepted for the POC under the standing posture (the sources are trusted), and it is **opt-in per
+> step**: a repository declares it, a config diff shows it, and every step that does not declare it
+> keeps exactly the sandbox described below.
+
+The build and the push both happen in the *host's* daemon — the step's CLI is only a client — so the
+registry address must resolve and be trusted **from the docker host**, not from this process. The
+step image supplies the docker CLI; the platform supplies the socket and the two coordinates.
 
 ## How a step runs — qits-ci starts containers, and that is all
 
@@ -135,13 +179,19 @@ completion starts the next one, and no state crosses steps. Per step:
 7. **Teardown.** The container is `docker rm -f`'d on every path, its secret is forgotten, and the
    next step starts — or the run closes and the remaining steps are recorded `SKIPPED`.
 
+The same seven steps as a diagram, plus the one thing prose keeps having to disambiguate — the
+control WebSocket every step dials versus the host's docker socket only a `docker: true` step gets
+mounted — are in [`docs/step-execution-flow.md`](docs/step-execution-flow.md). The prose above stays
+the contract; the diagram illustrates it.
+
 `GitConfigFetcher` shells ci's own host `git` against its own bare cache, and that plus the docker
 CLI is the entire set of processes qits-ci spawns. Its docker vocabulary is container lifecycle:
 `run`, `logs`, `rm`, `ps`, `network inspect`/`create`. `exec` is not in it, not even to deliver the
 daemon binary.
 
 A step's script is **repo-controlled code**, so the step container is a hostile-code sandbox:
-`--cap-drop=ALL`, `no-new-privileges`, no docker socket, and memory/pids/cpu caps
+`--cap-drop=ALL`, `no-new-privileges`, no docker socket unless the step declared `docker: true`
+above, and memory/pids/cpu caps
 (`qits.ci.memory-limit`, `…pids-limit`, `…cpus`). The daemon lives *inside* that sandbox and the
 script is its child, so everything arriving over the socket is attacker-influenced data about the
 run: recorded, never trusted. The residual gap — a push is itself unauthenticated, and running
@@ -196,6 +246,12 @@ this by design — the launch table is memory, and that is what makes the restar
   different process with no user session. That allowlist is qits-gateway's `PublicPaths`.
 - Keep the run **read** surface behind the deployment's auth policy. It is not token-guarded, and it
   returns build logs.
+- Set `qits.artifacts.registry-host` / `qits.artifacts.image-repository` to qits-artifacts' registry
+  as reachable **from the docker host** — the daemon on the far side of the mounted socket is what
+  resolves that name and performs the push, not this process and not the step's CLI. While the
+  registry speaks plain HTTP the daemon also needs it in `insecure-registries`. Same class of fact as
+  the socket mount, and now the same socket serves both. qits-cd ships the same two keys and derives
+  its pull references from them, so the two services must agree.
 - Give the process a persistent `~/.qits/data/ci` (or override `quarkus.datasource.ci.jdbc.url` and
   `qits.ci.data-dir`). The H2 there is a plain **single-writer file** — no `AUTO_SERVER`, so nothing
   else may open it while ci runs, and nothing listens on a database port.

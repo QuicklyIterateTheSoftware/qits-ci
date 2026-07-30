@@ -122,7 +122,10 @@ public class CiDaemonStepRunner implements CiStepRunner {
                 spec.image(),
                 daemonId,
                 credentials.secret(),
-                spec.daemonBinaryUrl()));
+                spec.daemonBinaryUrl(),
+                // Carried through unchanged: the repository declared it, the launcher turns it into a
+                // mount, and nothing in between gets an opinion about it.
+                spec.docker()));
     if (!launched.started()) {
       // Docker refused. No container exists, so there is no log to capture — what docker said is the
       // whole account, and "the step failed" would be a lie about a step that never ran.
