@@ -38,12 +38,19 @@
     <name>qits-ci</name>
 
     <modules>
-        <!-- Listed first: `service` depends on all four. `eventsourcing` and `ci-events` come
+        <!-- Listed first: `service` depends on all four. `eventstream` and `ci-events` come
              before `ci` because that is the direction of the dependency arrow — ci-events depends
-             on eventsourcing and on nothing else, eventsourcing depends on nothing of ours at all.
-             (Maven computes the reactor order itself; the listing is documentation.) -->
+             on eventstream and on nothing else, eventstream depends on nothing of ours at all.
+             (Maven computes the reactor order itself; the listing is documentation.)
+
+             `eventstream` is a SUBMODULE — the qits-eventstream repository, checked out here so
+             the reactor can build it in place. Its pom is parentless and carries its own groupId
+             and version; the reactor resolves it as a module all the same. A clone that has not
+             initialised its submodules has no such directory and the build fails at once, which is
+             the intended signal. (An XML comment may not contain two consecutive dashes, so the
+             git command that fixes it is spelled out in AGENTS.md rather than here.) -->
         <module>ci-daemon-protocol</module>
-        <module>eventsourcing</module>
+        <module>eventstream</module>
         <module>ci-events</module>
         <module>ci</module>
         <module>service</module>
@@ -125,7 +132,7 @@
             </dependency>
             <dependency>
                 <groupId>${project.groupId}</groupId>
-                <artifactId>qits-eventsourcing</artifactId>
+                <artifactId>qits-eventstream</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

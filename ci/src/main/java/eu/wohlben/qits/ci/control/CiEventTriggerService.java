@@ -21,7 +21,7 @@ import org.jboss.logging.Logger;
  *
  * <p>It sits behind the bus rather than in it. The raw-listener bean that receives frames is {@code
  * service/…/bus/CiEventTriggerListener}, and it hands one over as an {@link Arrival} — a record of
- * four strings — so this module keeps knowing nothing about {@code eu.wohlben.qits.eventsourcing},
+ * four strings — so this module keeps knowing nothing about {@code eu.wohlben.qits.eventstream},
  * exactly as {@link RunAnnouncer} keeps it from knowing about the publishing half.
  *
  * <h2>The executor, and why it is not the dispatch thread and not the run worker</h2>

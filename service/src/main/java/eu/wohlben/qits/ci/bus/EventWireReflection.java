@@ -1,8 +1,8 @@
 package eu.wohlben.qits.ci.bus;
 
 import eu.wohlben.qits.ci.events.BuildSuccessful;
-import eu.wohlben.qits.eventsourcing.control.EventEnvelope;
-import eu.wohlben.qits.eventsourcing.control.EventFrame;
+import eu.wohlben.qits.eventstream.control.EventEnvelope;
+import eu.wohlben.qits.eventstream.control.EventFrame;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
@@ -66,13 +66,13 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * on {@code CiRunDto} are ordinary REST serialization through the CDI mapper, which Quarkus scans.
  *
  * <p>All of this is in {@code service/} because {@code service/} is where every native concession in
- * this repo lives. {@code eventsourcing/} is a library on its way out of this repo and {@code
- * ci-events/} is this repo's vocabulary; the deployable is what gets built into an image, so the
- * deployable is what tells the builder about itself.
+ * this repo lives. {@code eventstream/} is another repository entirely — a submodule now, no longer
+ * a library waiting to leave — and {@code ci-events/} is this repo's vocabulary; the deployable is
+ * what gets built into an image, so the deployable is what tells the builder about itself.
  */
 @RegisterForReflection(
     targets = {BuildSuccessful.class, EventEnvelope.class, EventFrame.class},
-    classNames = "eu.wohlben.qits.eventsourcing.control.CanonicalJson$QitsEventMixin")
+    classNames = "eu.wohlben.qits.eventstream.control.CanonicalJson$QitsEventMixin")
 public final class EventWireReflection {
 
   private EventWireReflection() {}

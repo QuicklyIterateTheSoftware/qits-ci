@@ -1,8 +1,8 @@
 package eu.wohlben.qits.ci.bus;
 
 import eu.wohlben.qits.ci.control.CiEventTriggerService;
-import eu.wohlben.qits.eventsourcing.QitsRawEventListener;
-import eu.wohlben.qits.eventsourcing.control.EventFrame;
+import eu.wohlben.qits.eventstream.QitsRawEventListener;
+import eu.wohlben.qits.eventstream.control.EventFrame;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.util.Set;
@@ -13,7 +13,7 @@ import java.util.Set;
  *
  * <p>It is the third bean in this package and the same shape as the other two — {@code
  * BuildSuccessfulAnnouncer} adapts a {@code ci/control} port outward, this adapts the bus inward, and
- * both exist so the {@code ci} module never imports {@code eu.wohlben.qits.eventsourcing}. Registration
+ * both exist so the {@code ci} module never imports {@code eu.wohlben.qits.eventstream}. Registration
  * is "be a bean": {@code EventDispatcher} injects {@code Instance<QitsRawEventListener>}, which is
  * what ArC counts as a use, so no {@code @Unremovable} and no annotation beyond the scope.
  *

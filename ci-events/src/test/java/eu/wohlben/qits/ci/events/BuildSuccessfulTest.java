@@ -6,8 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import eu.wohlben.qits.eventsourcing.control.CanonicalJson;
-import eu.wohlben.qits.eventsourcing.control.EventEnvelope;
+import eu.wohlben.qits.eventstream.control.CanonicalJson;
+import eu.wohlben.qits.eventstream.control.EventEnvelope;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;

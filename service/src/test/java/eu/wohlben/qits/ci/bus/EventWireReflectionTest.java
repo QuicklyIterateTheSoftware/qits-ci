@@ -8,10 +8,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.JsonNode;
 import eu.wohlben.qits.ci.events.BuildSuccessful;
-import eu.wohlben.qits.eventsourcing.QitsEventListener;
-import eu.wohlben.qits.eventsourcing.control.CanonicalJson;
-import eu.wohlben.qits.eventsourcing.control.EventEnvelope;
-import eu.wohlben.qits.eventsourcing.control.EventFrame;
+import eu.wohlben.qits.eventstream.QitsEventListener;
+import eu.wohlben.qits.eventstream.control.CanonicalJson;
+import eu.wohlben.qits.eventstream.control.EventEnvelope;
+import eu.wohlben.qits.eventstream.control.EventFrame;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.enterprise.inject.Any;
@@ -44,7 +44,7 @@ import org.junit.jupiter.api.Test;
 public class EventWireReflectionTest {
 
   /** The private nested mix-in {@link EventWireReflection} can only name as a string. */
-  private static final String MIXIN = "eu.wohlben.qits.eventsourcing.control.CanonicalJson$QitsEventMixin";
+  private static final String MIXIN = "eu.wohlben.qits.eventstream.control.CanonicalJson$QitsEventMixin";
 
   @Inject @Any Instance<QitsEventListener<?>> listeners;
 

@@ -33,12 +33,17 @@ steps:
       # exist and never will.
       set -eu
 
-      # The daemon's clone is `--depth 50` and does not recurse, so the qits-spa-ci submodule at
-      # service/src/main/webui arrives as an empty directory — and Quinoa fails the image build on
-      # exactly that (`No package.json found in Web UI directory`). Initialising it here rather than
-      # asking the daemon to clone differently keeps the submodule this repo's business: it is a
-      # public GitHub repo needing no credentials, and one shallow fetch.
+      # The daemon's clone is `--depth 50` and does not recurse, so BOTH submodules arrive as empty
+      # directories, and each fails the image build in its own way: Quinoa refuses an empty
+      # service/src/main/webui (`No package.json found in Web UI directory`), and the maven reactor
+      # refuses an empty eventstream/ (`Child module … does not exist`). Initialising them here
+      # rather than asking the daemon to clone differently keeps the submodules this repo's
+      # business: both are public GitHub repos needing no credentials, and one shallow fetch each.
+      #
+      # Named one per line rather than left to a bare `--init`: a third submodule should be a diff
+      # here, not something that starts being fetched silently.
       git submodule update --init --depth 1 service/src/main/webui
+      git submodule update --init --depth 1 eventstream
 
       # THE LOCKFILE is the one file this step edits, and npm leaves no alternative. Same problem
       # and same fix as qits-gateway's pipeline; the recipe is maintained in qits-spa-home's own

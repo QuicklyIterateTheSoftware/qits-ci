@@ -31,7 +31,7 @@ import org.junit.jupiter.api.Test;
  * a {@code BuildSuccessful} lands on qits-events as one idempotent PUT.
  *
  * <p><b>This is the only test in the repo that runs with the event bus switched on</b>, which is
- * half of what it is for. `%test.qits.eventsourcing.enabled=false` in the shipped
+ * half of what it is for. `%test.qits.eventstream.enabled=false` in the shipped
  * application.properties is the posture every other suite inherits — no dials, no outbox, no stream
  * — and the profile below turns it back on for this class alone, against {@link StubEventsServer}
  * rather than anything real. A test that needed a running qits-events would break the clone-alone
@@ -41,11 +41,11 @@ import org.junit.jupiter.api.Test;
  * <p>What is asserted is the contract the other side was built against, not this side's internals:
  * one PUT per green run, at a v4 UUID of the publisher's choosing, carrying the envelope's {@code
  * name} as the signature and the run's own coordinates in the canonical payload. The three-way PUT
- * semantics, the outbox and the retry schedule belong to the eventsourcing suite; the round trip
+ * semantics, the outbox and the retry schedule belong to the eventstream suite; the round trip
  * through a real qits-events belongs to the platform.
  */
 @QuarkusTest
-@TestProfile(BuildSuccessfulPublishTest.EventsourcingOn.class)
+@TestProfile(BuildSuccessfulPublishTest.EventstreamOn.class)
 @WithTestResource(StubEventsServer.class)
 public class BuildSuccessfulPublishTest {
 
@@ -60,10 +60,10 @@ public class BuildSuccessfulPublishTest {
       """;
 
   /** Undoes the shipped `%test` darkness for this class only. */
-  public static class EventsourcingOn implements QuarkusTestProfile {
+  public static class EventstreamOn implements QuarkusTestProfile {
     @Override
     public Map<String, String> getConfigOverrides() {
-      return Map.of("qits.eventsourcing.enabled", "true");
+      return Map.of("qits.eventstream.enabled", "true");
     }
   }
 

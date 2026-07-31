@@ -1,6 +1,6 @@
 package eu.wohlben.qits.ci.events;
 
-import eu.wohlben.qits.eventsourcing.QitsEvent;
+import eu.wohlben.qits.eventstream.QitsEvent;
 import java.time.Instant;
 import java.util.UUID;
 

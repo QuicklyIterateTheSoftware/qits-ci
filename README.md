@@ -11,7 +11,7 @@ runs that file's pipeline against the head of `main`. That is the release train 
 releases, the repositories that declared an interest build themselves — and every hop of it is
 recorded, with the event that caused it, on the run and in the event log.
 
-    git submodule update --init   # the Angular client at service/src/main/webui
+    git submodule update --init   # the Angular client at service/src/main/webui, the bus at eventstream/
     mvn verify                    # green from a clone alone — no monorepo, no docker, no credentials
 
 ## Layout
@@ -21,8 +21,8 @@ recorded, with the event that caused it, on the run and in the event log.
 | `ci/` | `eu.wohlben.qits.ci.*` — entity, persistence, dto, mapper, control, error. The pipeline itself. No web, no JAX-RS. |
 | `service/` | `eu.wohlben.qits.ci.api` — the JAX-RS event intake, the run read surface, the token filter and the exception mapper — plus `…ci.daemonhost`, the step-container control plane (below). |
 | `ci-daemon-protocol/` | `eu.wohlben.qits.cidaemon.protocol` — the ci-daemon wire contract, **vendored** from [qits-ci-daemon](https://github.com/QuicklyIterateTheSoftware/qits-ci-daemon) and never edited here. Framework-free; `diff -r` is the drift detector. |
-| `eventsourcing/` | `eu.wohlben.qits.eventsourcing` — the platform's **event bus client** (publish to qits-events, listen for what it broadcasts). A library that has not moved out yet: it knows nothing about CI and may not import `eu.wohlben.qits.ci.*` at all. |
-| `ci-events/` | `eu.wohlben.qits.ci.events` — the events this service announces, today just `BuildSuccessful`. Depends on `eventsourcing/` and nothing else, so a future consumer takes the vocabulary without taking qits-ci. |
+| `eventstream/` | A **submodule** — [qits-eventstream](https://github.com/QuicklyIterateTheSoftware/qits-eventstream), `eu.wohlben.qits.eventstream`, the platform's **event bus client** (publish to qits-events, listen for what it broadcasts). Its own repository now; checked out here so the reactor builds it in place. It knows nothing about CI, and nothing in it is edited from this side. |
+| `ci-events/` | `eu.wohlben.qits.ci.events` — the events this service announces, today just `BuildSuccessful`. Depends on `eventstream/` and nothing else, so a future consumer takes the vocabulary without taking qits-ci. |
 
 `ci/` is a library jar. **`service/` is the application** — it carries
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary:
@@ -104,7 +104,7 @@ rest of qits it reaches over a URL it is configured with:
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + `qits.ci.daemon-version` |
 | out | `POST /cd/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.cd.intake-url`; no token — cd's intake is not gateway-allowlisted, the call stays on qits-net |
-| out | `PUT /events/api/events/{uuid}` — one `BuildSuccessful` per **green** run, idempotent (the `RunAnnouncer` seam) | `qits.events.url`, `qits.eventsourcing.enabled` |
+| out | `PUT /events/api/events/{uuid}` — one `BuildSuccessful` per **green** run, idempotent (the `RunAnnouncer` seam) | `qits.events.url`, `qits.eventstream.enabled` |
 | out | `ws://…/events/stream` — dialled out and held open, carrying what qits-events broadcasts back | the same two keys; the address is derived, never configured twice |
 | out | the registry a publishing step pushes to, as `$QITS_REGISTRY` and `$QITS_IMAGE_REPOSITORY` in **every** step container — dialled by the *host's docker daemon*, never by this process | `qits.artifacts.registry-host`, `qits.artifacts.image-repository` |
 | out | the npm registry roots, as `$QITS_NPM_REGISTRY_URL` (hosted, `@qits/*` publishes) and `$QITS_NPM_PROXY_URL` (the npmjs pull-through cache) in **every** step container — dialled by the *step container itself* on the shared network | `qits.artifacts.npm.hosted-url`, `qits.artifacts.npm.proxy-url` |
@@ -195,9 +195,10 @@ timestamps. It is envelope data, stamped by `QitsEventBus.publish` and never dec
 class, and it is filled in from an explicit argument or from `CausationScope`, the ambient
 thread-local the dispatcher establishes around each listener call. A `BuildSuccessful` from a push
 is a root and carries null; when the trigger engine lands, an event-triggered run's will carry the
-event that triggered it. The rules that bite are in AGENTS.md under "The eventsourcing module".
+event that triggered it. The rules that bite are in AGENTS.md under "The event bus" and, for the library itself, in
+qits-eventstream's own AGENTS.md.
 
-Both halves are **dark in `%dev` and `%test`** (`qits.eventsourcing.enabled`), the same posture the
+Both halves are **dark in `%dev` and `%test`** (`qits.eventstream.enabled`), the same posture the
 OTLP exporter takes, and a deployment without a qits-events is a supported configuration in exactly
 the way a deployment without a qits-cd is.
 
@@ -555,18 +556,18 @@ a repository's own listing will show.
   the client appends `/events/api/events/{id}` and `/events/stream` itself, and a path here yields a
   doubled one and a 404 nothing retries out of. The shipped default is the qits-net alias
   `http://qits-events:8080`, which is already right for a deployment on that network and wrong for a
-  host-run process. `qits.eventsourcing.enabled=false` turns the whole thing off, which is what a
-  deployment with no qits-events wants — the keys and their defaults are the qits-eventsourcing
+  host-run process. `qits.eventstream.enabled=false` turns the whole thing off, which is what a
+  deployment with no qits-events wants — the keys and their defaults are the qits-eventstream
   jar's, not this module's.
-- **Set `QUARKUS_DATASOURCE_EVENTSOURCING_JDBC_URL` — this one is not optional in a container**, and
+- **Set `QUARKUS_DATASOURCE_EVENTSTREAM_JDBC_URL` — this one is not optional in a container**, and
   it is the exact counterpart of the `QUARKUS_DATASOURCE_CI_JDBC_URL` a deployment already sets:
-  `jdbc:h2:file:/data/eventsourcing/h2/eventsourcing`, on the same data volume. The shipped default
+  `jdbc:h2:file:/data/eventstream/h2/eventstream`, on the same data volume. The shipped default
   is `${user.home}/.qits/…`, and in a container with no `HOME` the native binary resolves
   `user.home` to `?`, which H2 refuses outright — *"A file path that is implicitly relative to the
   current working directory is not allowed"* — so the process **fails to boot**, at Flyway, before
   anything serves. Measured, on the first rollout of this change: loud rather than silent, and cd
-  keeps the previous container while the new one restarts, but a deployment that adds the eventsourcing
-  module without adding this variable does not come up. The outbox itself is a second single-writer
+  keeps the previous container while the new one restarts, but a deployment that adds the event bus
+  without adding this variable does not come up. The outbox itself is a second single-writer
   H2 beside ci's own with its own Flyway lineage, holding exactly the events a publish could not
   deliver — empty in a healthy process, so losing the *file* is survivable in a way that omitting the
   *variable* is not.

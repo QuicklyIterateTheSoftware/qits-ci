@@ -12,17 +12,17 @@
     <!-- qits-ci's event vocabulary: the things this service announces to the platform. Today
          exactly one, `BuildSuccessful`.
 
-         A module of its own, between `eventsourcing` and everything else, for one reason: a
+         A module of its own, between `eventstream` and everything else, for one reason: a
          vocabulary is what a *consumer* needs, and nothing else in this repo is. The day a second
          service wants to listen for BuildSuccessful it depends on this jar and gets the class plus
          the bus and no part of qits-ci's domain — which is why the split is here rather than a
          package inside `ci`.
 
-         It depends on `eventsourcing` and on nothing else, not even quarkus-arc: these are plain
+         It depends on `eventstream` and on nothing else, not even quarkus-arc: these are plain
          records, and a data module that cannot boot a container cannot grow a service.
 
          THE EXTRACTION RULE DOES NOT APPLY HERE, and the package says so — `eu.wohlben.qits.ci.events`
-         is under qits-ci's own namespace because this IS qits-ci's vocabulary. Only `eventsourcing`
+         is under qits-ci's own namespace because this IS qits-ci's vocabulary. Only `eventstream`
          carries the no-ci-imports rule; this module is on the other side of that arrow.
 
          Separately *publishable* one day, separately *published* explicitly out of scope now. -->
@@ -32,7 +32,7 @@
     <dependencies>
         <dependency>
             <groupId>${project.groupId}</groupId>
-            <artifactId>qits-eventsourcing</artifactId>
+            <artifactId>qits-eventstream</artifactId>
         </dependency>
         <dependency>
             <!-- Plain JUnit 5, not quarkus-junit5: nothing here is a @QuarkusTest. The suite drives

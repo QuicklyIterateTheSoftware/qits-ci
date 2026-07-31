@@ -14,12 +14,16 @@ bare git repos instead of using fixture submodules, the git host is a `file://` 
 as `<base>/git/<repoId>`, and the one seam that needs real docker is faked (`FakeCiStepRunner`)
 rather than skipped.
 
-**The one clause that has been bought back is "alone":** the Angular client is a submodule, so the
-gate is now `git submodule update --init && ./mvnw verify`. Everything else about the rule holds —
-still no monorepo, still no credentials, still no prior install — and the cost is one public clone,
-paid once. It is called out here rather than folded quietly into the sentence above because the
-failure it introduces looks like a broken build rather than a missing checkout; see "The Angular
-client".
+**The one clause that has been bought back is "alone":** there are **two** submodules now — the
+Angular client at `service/src/main/webui` and the event bus at `eventstream/` — so the gate is
+`git submodule update --init && ./mvnw verify`. One command covers both, and it always will; what
+grows with each submodule is the number of ways a forgotten init fails. Everything else about the
+rule holds — still no monorepo, still no credentials, still no prior install — and the cost is two
+public clones, paid once. It is called out here rather than folded quietly into the sentence above
+because the failures it introduces look like broken builds rather than missing checkouts: an
+uninitialised client is Quinoa's `No package.json found in Web UI directory`, an uninitialised
+`eventstream/` is maven's `Child module … does not exist` before a line compiles. See "The Angular
+client" and "The event bus".
 
 **`service/` compiles to a GraalVM native image**, the same rule qits-gateway and
 qits-workspace-daemon carry. `.sdkmanrc` names `25.0.2-graalce`, so `sdk env` gives you a
@@ -41,7 +45,7 @@ second rule of the same kind, and three things follow:
   part of the change. The repo's one explicit registration is `EventWireReflection` in
   `service/…/bus/`, and it is worth reading as the worked example of this bullet: the types are
   ordinary records nobody had to think about until a hand-built `ObjectMapper` put them outside
-  everything Quarkus scans. See "The eventsourcing module".
+  everything Quarkus scans. See "The event bus".
 - **So is every config default the app boots with.** `quarkus.datasource.ci.jdbc.url` carried
   `AUTO_SERVER=TRUE` out of the monorepo; it asks H2 to start its own TCP server, whose classes are
   not in the image, and the binary died at boot on a default no JVM test ever used. It was dropped
@@ -70,18 +74,22 @@ package:
 - `ci-daemon-protocol/` — the vendored wire contract (below). Its package is
   `eu.wohlben.qits.cidaemon.protocol`, deliberately not under `eu.wohlben.qits.ci`: it is a copy of
   another repo's module and its package must stay byte-identical with the original.
-- `eventsourcing/` — the event bus client (below). Its package is `eu.wohlben.qits.eventsourcing`,
-  and it may not import `eu.wohlben.qits.ci.*` at all.
+- `eventstream/` — the event bus client (below), and a **submodule**: it is the qits-eventstream
+  repository, not a directory of this one. Its package is `eu.wohlben.qits.eventstream`, and it
+  knows nothing about `eu.wohlben.qits.ci.*`.
 - `ci-events/` — the event classes qits-ci emits, `eu.wohlben.qits.ci.events`. Under this repo's own
-  namespace because it *is* this repo's vocabulary; depends on `eventsourcing` and nothing else.
+  namespace because it *is* this repo's vocabulary; depends on `eventstream` and nothing else.
 
-The **directories** are `ci/`, `service/`, `ci-daemon-protocol/`, `eventsourcing/` and `ci-events/`;
+The **directories** are `ci/`, `service/`, `ci-daemon-protocol/`, `eventstream/` and `ci-events/`;
 the artifactIds are `qits-ci-domain`, `qits-ci-service`, `qits-ci-daemon-protocol`,
-`qits-eventsourcing` and `qits-ci-events`. The first two mismatch deliberately — the extracted git
+`qits-eventstream` and `qits-ci-events`. The first two mismatch deliberately — the extracted git
 history is anchored to the directory names, and generic coordinates like `eu.wohlben:ci` would
-collide in the shared `~/.m2` that every workspace container mounts. `eventsourcing/` mismatches for
-the same collision reason in the other direction: the directory keeps the generic name because that
-is the name it will carry into its own repository.
+collide in the shared `~/.m2` that every workspace container mounts. `eventstream/` no longer
+mismatches at all: the directory took the artifact's name when the module left, which is the whole
+of what "eventsourcing" ever bought and it bought it badly — the module is an event *bus client*,
+not an event-sourcing implementation, and nothing here or anywhere else has an event-sourced
+aggregate. The old name is kept alive only by `eventsourcing-plan.md`, which is a historical
+document and is not renamed.
 
 ## The vendored protocol module
 
@@ -99,6 +107,17 @@ because that module is published to no registry and the clone-alone rule is not 
 must be silent. `CiDaemonCodecTest` travels with the copy and runs on both sides, so a drift fails a
 build rather than a socket. A "small fix" applied here instead is how the workspace pair drifted once
 already (`migration-plan.md` §9 item 19), and this is knowingly the third such mirrored pair.
+
+**`eventstream/` is the sibling that shows what this module is not, and the contrast is the whole
+justification for vendoring.** Both are another repository's code sitting in this tree, and both are
+read-only from here — but that one is a **submodule**, so git owns the copy, a drift is impossible
+by construction and an update is one `git submodule update --remote`. This one is a hand-made copy
+kept honest by a `diff -r` and a shared test. The difference is not taste: `qits-eventstream` is a
+maven module a reactor can build, and `qits-ci-daemon`'s protocol module is one module of a **go**
+repository whose build this reactor cannot enter. Vendoring is what is left when a submodule would
+give you the files but not a jar. If that ever stops being true — the day the protocol module is
+published, or the day its repo grows a maven build — vendoring stops being the answer, and the
+sibling directory is the template for what replaces it.
 
 ## The ci-daemon control plane
 
@@ -310,126 +329,39 @@ packaged artifact, not by surefire — concretely, by `CiPackagedSurfaceIT`'s fi
 segment, a deep link, the bare-segment redirect, and the two paths that must answer 404 rather than
 the client). Every claim in this section is a measurement that test now repeats.
 
-## The eventsourcing module
+## The event bus
 
-`eventsourcing/` is a **library that has not moved out yet**. It is the platform's event bus client
-— `QitsEvent`, `QitsEventBus.publish`, `QitsEventListener`, `QitsRawEventListener`, `CausationScope`
-— and it lives here because qits-ci is its first consumer and for no other reason. The design is the
-superproject's `eventsourcing-plan.md`; what follows is what biting it feels like.
+`eventstream/` is the [qits-eventstream](https://github.com/QuicklyIterateTheSoftware/qits-eventstream)
+repository, a **submodule** — the platform's event bus client (`QitsEvent`, `QitsEventBus.publish`,
+`QitsEventListener`, `QitsRawEventListener`, `CausationScope`). It used to be a directory here, a
+library waiting to move out; it has moved, and qits-ci is now an ordinary consumer that happens to
+build it in the same reactor. The design is the superproject's `eventsourcing-plan.md` and
+`event-causation-plan.md`.
 
-**THE EXTRACTION RULE: no `eu.wohlben.qits.ci.*` may be imported anywhere in that module, main or
-test.** The whole value of the arrangement is that lifting it out is a `git mv` plus a pom, and one
-import taken in the moment because the class was right there turns that into a refactor.
-`ExtractionRuleTest` greps the module's own sources, so it fails a build rather than a review. The
-event classes go the other way round: `ci-events/` depends on `eventsourcing/`, never the reverse,
-and it is allowed the `ci` namespace precisely because it is qits-ci's vocabulary rather than the
+**Its rules are in its own repository and are not restated here.** Read `eventstream/AGENTS.md`
+before changing anything about how this service publishes or listens; the six that bite are the
+canonical form as a wire contract, `eventId` fixed at construction, the HTTP/1.1 pin, an outbox that
+is empty in a healthy process, causation stamped in the envelope by the bus alone, and the typed vs
+raw consuming seams with their subscribe-frame union. A second copy of any of that in this file is a
+copy that will drift.
+
+**The extraction rule is now a repository boundary rather than a test.** It read "no
+`eu.wohlben.qits.ci.*` may be imported in that module"; the module is a different repo with a
+different clone-alone gate, so the rule enforces itself and `ExtractionRuleTest` travels with it.
+What is left on this side is the arrow: `ci-events/` depends on `eventstream/`, never the reverse,
+and it keeps the `ci` namespace precisely because it is qits-ci's vocabulary rather than the
 library's.
 
-Six things are easy to get wrong here:
+**Editing the submodule from here is the mistake to avoid**, for the same reason as
+`ci-daemon-protocol/` though by a different mechanism: this checkout is a real branch and a commit
+made in it is a commit in *that* repository, pushed to *that* remote. Land the change there, push
+it, and let the sync move this checkout. A version bump is not part of it — the pom is
+`1.0.0-SNAPSHOT` and parentless, and the reactor resolves it as a module in place.
 
-- **The canonical form is a wire contract, not a formatting preference.** qits-events stores the
-  `payload` string verbatim and compares it byte-for-byte to tell an idempotent replay (200) from a
-  reused UUID (400), so two serializations of one event that differ by a space are a contradiction
-  to the other side. `CanonicalJson` therefore builds its **own** `ObjectMapper` rather than
-  injecting the CDI one — the consuming application's `ObjectMapperCustomizer`s must not be able to
-  reach it — and sets every knob that could vary explicitly. Its class javadoc names each and why.
-- **`eventId` is fixed at construction and never regenerated.** It is the `{id}` of the PUT, which
-  is the only reason a retry is safe: a request whose response was lost replays as a 200 instead of
-  writing the event twice. An event class may hold it as an ordinary record component; the library
-  keeps everything `QitsEvent` declares out of the payload, so identity travels in the envelope.
-- **The publisher's `HttpClient` is pinned to HTTP/1.1.** The JDK default is HTTP/2 with an `h2c`
-  upgrade, and an upgrade carrying a request body **delivers that body twice** — measured against
-  the test stub, once through the server's upgrade handler and again as an HTTP/2 data frame ninety
-  milliseconds later. Idempotency made it harmless and therefore invisible; it was a doubled request
-  on every publish. Do not drop the `version(...)` line.
-- **The outbox is failure-path-only, and empty in a healthy process.** A publish that lands writes
-  nothing; a row that is delivered on retry is deleted. So the row count is a health signal rather
-  than a log, and the log is qits-events. The known hole — a crash between the inline attempt
-  failing and the row committing — is named in `OutboxEvent`'s javadoc and deliberately left open.
-- **Causation is stamped by the bus, in the envelope, and it never touches an event class.**
-  `EventEnvelope` carries a nullable `parentId` — the event that caused this one — and
-  `QitsEventBus.publish` is the only place it is resolved. The precedence is the whole rule: **an
-  explicit non-null argument wins; a null or absent one falls back to `CausationScope.current()`;
-  outside any scope the event is a root.** So `publish(e)` *is* `publish(e, null)` — one
-  implementation, one call shape — and the deliberate detach is spelled `CausationScope.with(null,
-  …)`, which is a statement about a region rather than about one call. That asymmetry is settled, not
-  an oversight.
-
-  `QitsEvent` gained **no** fifth method and no event class gained a component, which is the
-  decision rather than an omission. A record is immutable and its parent is known later than it is;
-  a default method reading a thread-local would answer differently on the sweeper's thread an hour
-  later, which is exactly what `eventId`'s stability argument forbids; and a fifth accessor would
-  need a fifth `@JsonIgnore` in `CanonicalJson`'s mix-in — the one place this repo has already been
-  bitten silently. `CanonicalJson` and its mix-in are therefore **unchanged**, and a payload is
-  byte-identical whether the event was published under a parent or not. That last property has a
-  test, because it is the same lesson the mix-in taught.
-
-  `EventDispatcher` runs the listener loop inside `CausationScope` of the arriving frame's `id`, so
-  a listener that publishes while consuming records the edge with nobody passing an argument. **That
-  is why `CausationScope` is public API**: this library tells listeners that "anything slow belongs
-  on the listener's own executor", and a hand-off to an executor is precisely what drops the ambient
-  value — a plain `ThreadLocal` does not follow work, deliberately (inheritance copies at thread
-  *creation*, which pooled executors do long before any consumption). The bridge is capture
-  `current()` on the dispatch thread and re-establish it with `with(...)` inside the task, or pass
-  the id to `publish` explicitly. Both are in `QitsEventListener`'s javadoc, which is where a
-  listener author will look.
-
-  **The outbox's `parent_id` column is the load-bearing line of the whole feature.** qits-events
-  compares `name` + `occurredAt` + `payload` + `parentId` to tell an idempotent replay (200) from a
-  reused UUID (400) — `description` stays outside it — so a sweeper that rebuilt the envelope
-  without the parent would send a *different* request than the attempt it is retrying: a 400 against
-  its own landed first attempt, or a caused event quietly republished as a chain root. The parent is
-  fixed when the envelope is built and stored with it, exactly as the payload is, and the sweep
-  re-reads nothing ambient. `CausationStampingTest` sweeps inside a *different* scope to prove it.
-
-  **The rollout order is one-directional and it is not a preference.** Quarkus does not fail on
-  unknown JSON properties, so a qits-ci that stamps against a qits-events that has not yet learned
-  the field has its parents silently dropped — every chain of that window recorded as roots, and
-  causation cannot be backfilled from anything. qits-events ships first; the other direction (a
-  server that knows the field, a publisher that never sends it) is the compatibility clause, since an
-  absent `parentId` binds to null. The design is the superproject's `event-causation-plan.md`.
-
-  No cycle guard and no self-parent repair, here or anywhere on this side. A guard that catches only
-  `A → A` cannot see `A → B → A` and its presence would tell a reader that cycles are handled;
-  detection belongs where the graph is visible. qits-events does reject a self-edge, because that one
-  is decidable from a single row.
-- **There are two consuming seams, and the typed one is the one to reach for.** `QitsEventListener<E>`
-  names an event *class* at compile time; `QitsRawEventListener` names a `Set<String>` of event
-  *names* at runtime and receives the `EventFrame` itself. The raw one exists for consumers whose
-  interest is genuinely unknowable at startup — the trigger engine, whose selections live in
-  `.config/qits/ci-event-*.yml` files inside *other* repositories and change with every push. A raw
-  listener that could have named its event type is a typed listener with extra steps.
-
-  **The subscribe frame is the union of both, and `"*"` collapses it.** `EventDispatcher.signatures()`
-  unions every typed listener's signature with every raw listener's current set, sorted; the literal
-  `"*"` anywhere in that union makes the whole frame `["*"]`, because once one consumer wants
-  everything, narrowing the wire buys nothing and the surplus frames are dropped in dispatch at no
-  cost to anyone else. `SubscriptionUnionTest` exhausts the arithmetic; `EventStreamSubscriberTest`
-  asserts once, on the wire, that this is the function actually used.
-
-  **The bean set is resolved once; a raw listener's signature set is asked per subscribe and per
-  frame.** That is what makes it dynamic, and it has one edge worth knowing: a *widened* set takes
-  effect for dispatch immediately but reaches qits-events only at the next reconnect, since the
-  subscription lives on the connection and nothing re-dials on a listener changing its mind. So a
-  consumer whose interest can grow should return `Set.of(ALL)` once and filter for itself — which is
-  exactly what the trigger engine does — and the subscriber's "no signatures, no stream" rule then
-  never surprises anyone.
-
-  **Dispatch order is typed first, raw second, and it is a contract rather than an accident.** Typed
-  dispatch is the path that already existed and its listeners are the handlers for a specific event;
-  the raw seam is open-ended and, in its motivating case, does real work per frame. Both run for a
-  frame both want, each listener gets it once, and containment is symmetric — a throw out of
-  `onFrame`, or out of `signatures()`, costs that listener and nobody else, exactly as a throw out of
-  `onEvent` does, because the caller is still a socket callback. **Causation is identical too**: both
-  paths run inside the *same single* `CausationScope` of the arriving frame's id. What a raw listener
-  must not forget is that enqueueing work for another thread is past any thread-local's reach by
-  construction — carry `frame.id()` on whatever is enqueued and pass it to `publish(event, parent)` at
-  the far end, which is what `CiRun.triggerEventId` is for. That consumer exists now; see "The
-  trigger engine".
-
-Its own datasource, persistence unit and Flyway lineage (`eventsourcing`, `db/eventsourcing/migration`)
-follow the platform convention, for the ordinary reason plus one more: the split out of this repo
-should move files, not data.
+What remains qits-ci's, and is documented below: `service/…/bus/` (both ends of the wiring), the
+`RunAnnouncer` seam that keeps `ci/` free of every eventstream type, `EventWireReflection` (the
+native-image registration, which lives with the deployable rather than with the library), and the
+`%dev`/`%test` darkness. The trigger engine's half is under "The trigger engine".
 
 ### How the deployable uses it
 
@@ -438,10 +370,10 @@ should move files, not data.
 itself on `StartupEvent` because a listener bean exists. Registering a listener really is "add a
 bean" — no channel name, no annotation — and no `@Unremovable` is needed, because
 `EventDispatcher`'s `Instance<QitsEventListener<?>>` is what ArC counts as a use.
-`EventsourcingDarknessTest` asserts that rather than trusting it, since a removed listener
+`EventstreamDarknessTest` asserts that rather than trusting it, since a removed listener
 subscribes to nothing and says nothing about it. **A `QitsRawEventListener` is registered the same
 way and survives removal for the same reason** — `Instance<QitsRawEventListener>` is a second
-injection point of the same kind — and the eventsourcing suite proves it the same way too, with a
+injection point of the same kind — and the eventstream suite proves it the same way too, with a
 raw listener that is injected nowhere and whose signature (a name no `eventType()` produces) has to
 turn up in the subscribe frame.
 
@@ -457,14 +389,14 @@ the timestamp rather than only the coordinates.
 
 The call sits on the single-threaded run worker and it blocks. That was the trade, and it is bounded
 rather than free: `publish()` never throws, attempts the PUT inline, and gives up after
-`qits.eventsourcing.publish-timeout` (~5s), after which the outbox owns delivery. So an unreachable
+`qits.eventstream.publish-timeout` (~5s), after which the outbox owns delivery. So an unreachable
 qits-events costs each green build a few seconds and nothing else. Anything slower than that does
 not belong behind that port.
 
 Two configuration facts about this module that are easy to get backwards:
 
 - **The darkness belongs to `service/`, not to the library.** The jar ships
-  `qits.eventsourcing.enabled=true` — a library that shipped dark is one whose first deployment
+  `qits.eventstream.enabled=true` — a library that shipped dark is one whose first deployment
   discovers it was never wired up — and `service/src/main/resources/application.properties` carries
   the `%dev`/`%test` `false`, exactly as it does for the OTel keys. Nothing else about the bus is
   restated there: `qits.events.url`, the outbox datasource, the timeouts and the retry budget are
@@ -473,12 +405,12 @@ Two configuration facts about this module that are easy to get backwards:
   not stop the datasource. Quarkus opens the connection and runs Flyway at boot regardless, so
   `service/src/test/resources/application.properties` points that datasource at in-memory H2 for the
   same reason it does for `ci` — measured, not assumed: without those lines the suite creates and
-  migrates a real `~/.qits/data/eventsourcing`, and two builds on one host race for its
+  migrates a real `~/.qits/data/eventstream`, and two builds on one host race for its
   single-writer file.
 
   **The deployment side of that same sentence cost a rollout, so it is worth stating plainly: adding
   this module to the deployable adds a MANDATORY deployment variable.**
-  `QUARKUS_DATASOURCE_EVENTSOURCING_JDBC_URL` must point at the data volume, exactly as
+  `QUARKUS_DATASOURCE_EVENTSTREAM_JDBC_URL` must point at the data volume, exactly as
   `QUARKUS_DATASOURCE_CI_JDBC_URL` already does. The shipped default interpolates `${user.home}`,
   which is the platform's convention and right for a host-run process — but in a container with no
   `HOME` the native binary resolves it to `?`, and H2 rejects a path implicitly relative to the
@@ -508,8 +440,14 @@ Two configuration facts about this module that are easy to get backwards:
   that throws. Register; do not "fix" a recurrence by injecting the CDI mapper.
 
   It lives in `service/` rather than beside the code it describes for the reason everything native
-  does: the deployable is what gets built into an image, and `eventsourcing/` is a library on its
-  way to its own repository. `EventWireReflectionTest` guards the list's **completeness** — every
+  does: the deployable is what gets built into an image, and `eventstream/` is another repository
+  entirely.
+
+  **The mix-in is named as a STRING, and that is the one line in this repo a rename of the library
+  cannot break loudly.** `classNames = "eu.wohlben.qits.eventstream.control.CanonicalJson$QitsEventMixin"`
+  compiles whatever it says; a stale package there costs the payload its `@JsonIgnore`s in the
+  binary and nothing else. `EventWireReflectionTest`'s `MIXIN` constant is the guard — it resolves
+  the same string with `Class.forName` — so the two move together or the suite goes red. `EventWireReflectionTest` guards the list's **completeness** — every
   listener bean's event type is in it, the mix-in's name still resolves — and says in its own javadoc
   that completeness is all a JVM test can guard, because on a JVM these classes reflect whether
   anyone registered them or not. The correctness proof is the binary, running: the round trip through
@@ -517,7 +455,7 @@ Two configuration facts about this module that are easy to get backwards:
 
   **That proof is cheap enough to repeat before a rollout, and it is how both facts above were
   established.** `sdk env` then `./mvnw package -Dnative -DskipTests`, run `service/target/qits-ci`
-  with `QITS_EVENTSOURCING_ENABLED=true`, `QITS_EVENTS_URL` pointed at any process that answers a PUT
+  with `QITS_EVENTSTREAM_ENABLED=true`, `QITS_EVENTS_URL` pointed at any process that answers a PUT
   with a 201, and push `steps: []` through the intake — a zero-step pipeline reaches SUCCESS with no
   docker and no daemon, which is the shortest path there is from a fresh binary to a published event.
   Read the PUT body. Anything about this module that only the binary can be wrong about is one minute
@@ -547,7 +485,7 @@ follows is what biting it feels like.
   `QitsRawEventListener` bean; it turns an `EventFrame` into `CiEventTriggerService.Arrival`, four
   plain strings, and hands it over. That is the same seam shape `RunAnnouncer` is on the publishing
   side, pointed the other way, and it is why `CiEventTriggerService` — which does the real work —
-  imports no `eu.wohlben.qits.eventsourcing` type. Keep it that way; the extraction rule protects
+  imports no `eu.wohlben.qits.eventstream` type. Keep it that way; the extraction rule protects
   the library, and this one protects the domain.
 - **`signatures()` is `Set.of(ALL)` permanently, and it is not laziness.** The wire set is derived
   only when the connection is opened and **the subscriber does not dial at all when the union is
@@ -699,7 +637,7 @@ anonymous constraint. Three things came out of that and none of them should be u
   part. A database whose V1 check landed under a different generated name would take the drop as a
   no-op, add the named constraint beside the surviving one, and reject **every** accepted run at
   insert — silently in every JVM test, loudly only in the deployment. That is precisely this repo's
-  worst failure family (the `AUTO_SERVER=TRUE` that killed the binary, the eventsourcing datasource
+  worst failure family (the `AUTO_SERVER=TRUE` that killed the binary, the eventstream datasource
   url). The probe turns it into a Flyway failure at boot with the offending constraint named in the
   error, and cd's health gate keeps the previous container. Verified by renaming the constraint in a
   scratch database and watching V4 refuse to apply.
@@ -773,28 +711,16 @@ mechanism at all — which is what every service here was before the header land
   (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first.
   `CiPackagedSurfaceIT` is deliberately outside that race: failsafe passes it
   `quarkus.http.test-port=0`, so the packaged app it launches takes a free port instead of queueing
-  behind whatever surefire has not finished releasing. `eventsourcing/`'s suite sets the same key in
+  behind whatever surefire has not finished releasing. `eventstream/`'s suite sets the same key in
   its own `src/test/resources/application.properties`, for a version of the same reason it can
   actually fix: that module registers no route at all — quarkus-websockets-next is there for its
   *client* — so the server a `@QuarkusTest` starts is incidental, and three test classes asking for
   three configurations means three restarts racing one port.
-- **The eventsourcing suite talks to a real socket and a fake clock.** `StubEventsServer` is a
-  `QuarkusTestResourceLifecycleManager` — a Vert.x server answering the real PUT and the real
-  upgrade on an ephemeral port, handed to Quarkus as `qits.events.url` *before it boots*, which is
-  the only way a port that cannot be known earlier reaches the application's config (qits-gateway's
-  `StubUpstream`, same shape). It is deliberately dumb: it scripts status codes and records what
-  arrived, and holds no idempotency table, because a second implementation of qits-events whose
-  agreement with the first nobody checks is worse than no coverage. `TestClock` is a plain
-  `Clock` bean that outranks the module's `@DefaultBean` producer, so the retry schedule's
-  eighty-odd seconds are walked in milliseconds and `OutboxSweeper#sweep` is called rather than
-  waited for. The scheduled tick is configured to 24h in the same file so it never lands in the
-  middle of one.
-  **Every listener bean in `TestEvents` is shared by every `@QuarkusTest` in that module**, and one
-  of them asserts the subscribe frame *literally* — so the recording raw listeners want nothing by
-  default and are disarmed in an `@AfterEach` as well as a `@BeforeEach`. An arming that outlived its
-  class would change what the whole suite subscribes to. Routing claims are made by calling
-  `EventDispatcher#dispatch` directly; the socket is used only where the claim is about the wire,
-  which for the raw seam is the two resubscribe cases.
+- **The eventstream suite is the submodule's, and its conventions are documented there.** It runs in
+  this reactor and its failures land in this build, which is the only reason it is mentioned here:
+  when it goes red, read `eventstream/AGENTS.md` under "The suite" rather than debugging it from
+  this side, and fix it in that repository. The one fact worth carrying across is that its
+  `StubEventsServer` is where this module's trimmed copy came from — see the bus test bullet below.
 - `CiPackagedSurfaceIT` is the only test that runs the **packaged artifact** — the fast-jar under
   `-DskipITs=false`, the binary under `-Dnative`. It is not a second boundary test and behaviour
   does not belong in it: it asserts the handful of things a `@QuarkusTest` structurally cannot see,
@@ -886,12 +812,12 @@ mechanism at all — which is what every service here was before the header land
   where the stub's recorded **subscribe frame** is asserted to be `["*"]`; subscribes are not cleared
   by `reset()`, because there is one per connection and the connection outlives every test method.
 
-  The stub they share is a trimmed second copy of the eventsourcing module's, duplicated for the
+  The stub they share is a trimmed second copy of the eventstream module's, duplicated for the
   reason both `FakeCiStepRunner`s are (the modules do not share a test classpath, and a test-jar to
   bridge forty lines is worse). `BuildSuccessfulPublishTest` drives a real run to `SUCCESS` through
   the real intake and asserts the *wire* contract the other side was built against: one PUT per green
   run, a v4 UUID in the path, `name` as the signature, and the run's coordinates in the canonical
-  payload. Retries, the outbox and the three-way PUT semantics belong to the eventsourcing suite; the
+  payload. Retries, the outbox and the three-way PUT semantics belong to the eventstream suite; the
   round trip through a real qits-events belongs to the platform.
 
   **One thing bites in both, and it is the shared candidate list.** Every repository either class has

@@ -1,7 +1,7 @@
 package eu.wohlben.qits.ci.bus;
 
 import eu.wohlben.qits.ci.events.BuildSuccessful;
-import eu.wohlben.qits.eventsourcing.QitsEventListener;
+import eu.wohlben.qits.eventstream.QitsEventListener;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 

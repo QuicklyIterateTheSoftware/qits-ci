@@ -15,15 +15,15 @@ import java.util.Map;
  * only way a port that cannot be known earlier reaches the application's config. Same arrangement
  * (and same reason) as qits-gateway's {@code StubUpstream}.
  *
- * <p><b>A second, smaller copy of the eventsourcing module's stub, and deliberately so.</b> The two
+ * <p><b>A second, smaller copy of the eventstream module's stub, and deliberately so.</b> The two
  * modules do not share a test classpath — the same reason {@code FakeCiStepRunner} exists twice in
  * this repo — and publishing a test-jar to bridge them would couple this suite to that module's
  * fixtures for the sake of forty lines. This copy is trimmed to what an integration test needs: it
  * scripts nothing, always answers 201, and records what arrived. Failure handling, backoff and the
- * three-way PUT semantics are the eventsourcing suite's subject, not this one's.
+ * three-way PUT semantics are the eventstream suite's subject, not this one's.
  *
  * <p>The two literals below are the wire contract's, spelled out rather than imported: the
- * constants in the eventsourcing module are package-private, and a stub standing in for another
+ * constants in the eventstream module are package-private, and a stub standing in for another
  * <em>service</em> should be written against the contract anyway. If they ever disagree, this
  * suite's PUT never arrives — which is exactly the failure a wrong path would cause in a
  * deployment.
@@ -107,7 +107,7 @@ public class StubEventsServer implements QuarkusTestResourceLifecycleManager {
                     return;
                   }
                   // The subscribe frame is recorded and nothing is ever broadcast back: what a
-                  // broadcast does on arrival is the eventsourcing suite's dispatch test and the live
+                  // broadcast does on arrival is the eventstream suite's dispatch test and the live
                   // platform's end-to-end proof, and a test here that needs a frame delivers it
                   // through EventDispatcher directly. Accepting the upgrade is what keeps the
                   // subscriber from redialling through the whole test.

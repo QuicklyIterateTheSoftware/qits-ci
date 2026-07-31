@@ -2,7 +2,7 @@ package eu.wohlben.qits.ci.bus;
 
 import eu.wohlben.qits.ci.control.RunAnnouncer;
 import eu.wohlben.qits.ci.events.BuildSuccessful;
-import eu.wohlben.qits.eventsourcing.QitsEventBus;
+import eu.wohlben.qits.eventstream.QitsEventBus;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;

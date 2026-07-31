@@ -9,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.ci.control.FakeCiStepRunner;
-import eu.wohlben.qits.eventsourcing.control.EventDispatcher;
+import eu.wohlben.qits.eventstream.control.EventDispatcher;
 import io.quarkus.test.common.WithTestResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -38,12 +38,12 @@ import org.junit.jupiter.api.Test;
  * automatic causation edge.
  *
  * <p>Frames are handed to {@link EventDispatcher} directly rather than broadcast by the stub, the
- * same choice the eventsourcing suite makes: a routing claim is about dispatch, and only a claim
+ * same choice the eventstream suite makes: a routing claim is about dispatch, and only a claim
  * about the wire needs a socket. The one wire claim here — that the subscribe frame is {@code ["*"]}
  * — reads what the stub recorded when the application dialled it at startup.
  */
 @QuarkusTest
-@TestProfile(BuildSuccessfulPublishTest.EventsourcingOn.class)
+@TestProfile(BuildSuccessfulPublishTest.EventstreamOn.class)
 @WithTestResource(StubEventsServer.class)
 public class CiEventTriggerCausationTest {
 

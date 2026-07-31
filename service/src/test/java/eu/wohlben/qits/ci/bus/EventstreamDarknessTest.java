@@ -5,8 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.ci.events.BuildSuccessful;
-import eu.wohlben.qits.eventsourcing.QitsEventListener;
-import eu.wohlben.qits.eventsourcing.control.EventStreamSubscriber;
+import eu.wohlben.qits.eventstream.QitsEventListener;
+import eu.wohlben.qits.eventstream.control.EventStreamSubscriber;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.enterprise.inject.Any;
 import jakarta.enterprise.inject.Instance;
@@ -33,9 +33,9 @@ import org.junit.jupiter.api.Test;
  * needed; this is the assertion that keeps that true rather than believed.
  */
 @QuarkusTest
-public class EventsourcingDarknessTest {
+public class EventstreamDarknessTest {
 
-  @ConfigProperty(name = "qits.eventsourcing.enabled")
+  @ConfigProperty(name = "qits.eventstream.enabled")
   boolean enabled;
 
   @Inject EventStreamSubscriber subscriber;
@@ -44,7 +44,7 @@ public class EventsourcingDarknessTest {
 
   @Test
   public void theBusIsDarkOutsideADeployment() {
-    assertFalse(enabled, "%test must ship qits.eventsourcing.enabled=false");
+    assertFalse(enabled, "%test must ship qits.eventstream.enabled=false");
     assertFalse(subscriber.connected(), "a dark module dials nothing");
   }
 

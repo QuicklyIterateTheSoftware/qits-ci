@@ -39,7 +39,7 @@ public interface RunAnnouncer {
    *
    * <p><b>A plain {@code String}, and that is the whole reason this parameter is here rather than an
    * ambient value.</b> It is a foreign id, which is exactly how this module names foreign things, and
-   * it keeps {@code ci/} free of every eventsourcing type — the dependency this seam exists to
+   * it keeps {@code ci/} free of every eventstream type — the dependency this seam exists to
    * prevent. The bus stamps causation from a thread-local that the implementation could have read
    * instead; it would read null, because the engine consumed the frame on the socket's dispatch
    * thread and this call happens later on {@code ci-run-worker}. A thread-local does not follow work,

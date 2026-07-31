@@ -61,11 +61,11 @@
                  `./mvnw -pl service -am dependency:tree -Dincludes=io.quarkus:quarkus-undertow`
                  is still empty. -->
             <groupId>${project.groupId}</groupId>
-            <artifactId>qits-eventsourcing</artifactId>
+            <artifactId>qits-eventstream</artifactId>
         </dependency>
         <dependency>
             <!-- qits-ci's event vocabulary — today just BuildSuccessful. Declared explicitly rather
-                 than taken transitively through qits-eventsourcing above, because this module uses
+                 than taken transitively through qits-eventstream above, because this module uses
                  the class by name in both directions (bus/BuildSuccessfulAnnouncer constructs it,
                  bus/BuildSuccessfulListener consumes it) and a compile-time use belongs in the pom
                  that makes it. -->

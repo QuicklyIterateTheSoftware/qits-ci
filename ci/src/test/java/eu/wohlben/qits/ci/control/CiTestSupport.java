@@ -44,7 +44,7 @@ public abstract class CiTestSupport {
     fakeRunner.reset();
     fakeConfig.reset();
     // Empty by default, so no suite evaluates a trigger it did not ask for — the same reason the
-    // eventsourcing module's recording raw listeners want nothing until a test arms them.
+    // eventstream module's recording raw listeners want nothing until a test arms them.
     fakeCandidates.reset();
   }
 }
