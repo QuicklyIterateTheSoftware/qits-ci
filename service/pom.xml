@@ -47,6 +47,32 @@
             <artifactId>qits-ci-daemon-protocol</artifactId>
         </dependency>
         <dependency>
+            <!-- The platform event bus client. Joining it here is what turns three library modules
+                 into one deployable that publishes and listens: the outbox's datasource, its Flyway
+                 lineage, the sweeper's @Scheduled job and the stream subscriber all arrive with
+                 this jar, configured by the defaults it ships (its own
+                 META-INF/microprofile-config.properties). The only thing this module says about it
+                 is where it is dark — see application.properties.
+
+                 It brings quarkus-scheduler, which is NEW to this deployable and the only extension
+                 this dependency adds that was not already here (quarkus-websockets-next has been
+                 present since the ci-daemon control plane, and this module's client half rides it).
+                 quarkus-undertow stays absent, as Quinoa requires:
+                 `./mvnw -pl service -am dependency:tree -Dincludes=io.quarkus:quarkus-undertow`
+                 is still empty. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-eventsourcing</artifactId>
+        </dependency>
+        <dependency>
+            <!-- qits-ci's event vocabulary — today just BuildSuccessful. Declared explicitly rather
+                 than taken transitively through qits-eventsourcing above, because this module uses
+                 the class by name in both directions (bus/BuildSuccessfulAnnouncer constructs it,
+                 bus/BuildSuccessfulListener consumes it) and a compile-time use belongs in the pom
+                 that makes it. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-ci-events</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-arc</artifactId>
         </dependency>

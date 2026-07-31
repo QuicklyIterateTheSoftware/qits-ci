@@ -1,0 +1,108 @@
+package eu.wohlben.qits.ci.bus;
+
+import io.quarkus.test.common.QuarkusTestResourceLifecycleManager;
+import io.vertx.core.Vertx;
+import io.vertx.core.http.HttpServer;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * A qits-events that never leaves this JVM: a real Vert.x server answering the real {@code PUT
+ * /events/api/events/{id}} with a 201 and accepting a real upgrade on {@code /events/stream}, on an
+ * ephemeral port handed to Quarkus as {@code qits.events.url} <b>before it boots</b> — which is the
+ * only way a port that cannot be known earlier reaches the application's config. Same arrangement
+ * (and same reason) as qits-gateway's {@code StubUpstream}.
+ *
+ * <p><b>A second, smaller copy of the eventsourcing module's stub, and deliberately so.</b> The two
+ * modules do not share a test classpath — the same reason {@code FakeCiStepRunner} exists twice in
+ * this repo — and publishing a test-jar to bridge them would couple this suite to that module's
+ * fixtures for the sake of forty lines. This copy is trimmed to what an integration test needs: it
+ * scripts nothing, always answers 201, and records what arrived. Failure handling, backoff and the
+ * three-way PUT semantics are the eventsourcing suite's subject, not this one's.
+ *
+ * <p>The two literals below are the wire contract's, spelled out rather than imported: the
+ * constants in the eventsourcing module are package-private, and a stub standing in for another
+ * <em>service</em> should be written against the contract anyway. If they ever disagree, this
+ * suite's PUT never arrives — which is exactly the failure a wrong path would cause in a
+ * deployment.
+ */
+public class StubEventsServer implements QuarkusTestResourceLifecycleManager {
+
+  /** qits-events' idempotent publish endpoint, up to and including the trailing slash. */
+  private static final String EVENTS_PATH = "/events/api/events/";
+
+  /** qits-events' broadcast stream. Accepted so the subscriber settles instead of redialling. */
+  private static final String STREAM_PATH = "/events/stream";
+
+  /** One request that arrived: the id from the path, and the body verbatim. */
+  public record Put(String id, String body) {}
+
+  private static final List<Put> PUTS = Collections.synchronizedList(new ArrayList<>());
+
+  private static Vertx vertx;
+  private static HttpServer server;
+
+  /** Every PUT that arrived, in order. */
+  public static List<Put> puts() {
+    synchronized (PUTS) {
+      return List.copyOf(PUTS);
+    }
+  }
+
+  /** Forget what arrived. Called between tests; the server itself is one per JVM. */
+  public static void reset() {
+    PUTS.clear();
+  }
+
+  @Override
+  public Map<String, String> start() {
+    vertx = Vertx.vertx();
+    server =
+        vertx
+            .createHttpServer()
+            // A Vert.x server carrying only a webSocketHandler NPEs on any plain request, and this
+            // one has to answer both — the PUT and the upgrade are the same service.
+            .requestHandler(
+                request -> {
+                  String path = request.path();
+                  if (request.method().name().equals("PUT") && path.startsWith(EVENTS_PATH)) {
+                    String id = path.substring(EVENTS_PATH.length());
+                    request
+                        .body()
+                        .onSuccess(
+                            body -> {
+                              PUTS.add(new Put(id, body.toString()));
+                              request.response().setStatusCode(201).end();
+                            });
+                    return;
+                  }
+                  request.response().setStatusCode(404).end();
+                })
+            .webSocketHandler(
+                socket -> {
+                  if (!STREAM_PATH.equals(socket.path())) {
+                    socket.reject();
+                    return;
+                  }
+                  // The subscribe frame is read and dropped: this stub broadcasts nothing, because
+                  // what a broadcast does on arrival is the eventsourcing suite's dispatch test and
+                  // the live platform's end-to-end proof. Accepting the upgrade is what keeps the
+                  // subscriber from redialling through the whole test.
+                  socket.textMessageHandler(frame -> {});
+                });
+    server.listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().join();
+    return Map.of("qits.events.url", "http://127.0.0.1:" + server.actualPort());
+  }
+
+  @Override
+  public void stop() {
+    if (server != null) {
+      server.close().toCompletionStage().toCompletableFuture().join();
+    }
+    if (vertx != null) {
+      vertx.close().toCompletionStage().toCompletableFuture().join();
+    }
+  }
+}

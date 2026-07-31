@@ -82,6 +82,9 @@ public class CiRunService {
   /** The green-run announcement port (see {@link CdNotifier}); zero implementations is fine. */
   @Inject Instance<CdNotifier> cdNotifiers;
 
+  /** The green-run event port (see {@link RunAnnouncer}); zero implementations is fine. */
+  @Inject Instance<RunAnnouncer> runAnnouncers;
+
   @ConfigProperty(name = "qits.ci.output-max-chars")
   int outputMaxChars;
 
@@ -310,9 +313,10 @@ public class CiRunService {
           null);
     }
     boolean red = failed || cancelled.contains(run.id);
-    finishRun(run.id, red ? CiRunStatus.FAILED : CiRunStatus.SUCCESS);
+    Instant finishedAt = finishRun(run.id, red ? CiRunStatus.FAILED : CiRunStatus.SUCCESS);
     if (!red) {
       notifyCd(run);
+      announceRun(run, finishedAt);
     }
   }
 
@@ -328,6 +332,30 @@ public class CiRunService {
         notifier.onRunSucceeded(run.id, run.repoId, run.branch, run.commitSha);
       } catch (RuntimeException e) {
         LOG.warnf(e, "CD notification for run %s failed", run.id);
+      }
+    }
+  }
+
+  /**
+   * Announces a green run through the {@link RunAnnouncer} port — after the terminal row is
+   * committed, for the same reason {@link #notifyCd} is, and carrying the {@code finishedAt} that
+   * was just written rather than a fresh {@code Instant.now()}: the two are minutes apart in a slow
+   * transition and the event log wants the one on the row.
+   *
+   * <p>{@code finishedAt} comes back from {@link #finishRun} instead of being read off {@code run}
+   * because it is not there — {@link #finishRun} mutates a freshly loaded entity in its own
+   * transaction, so this detached instance never sees the value. Reading it back would be a second
+   * query for something this method already knows.
+   *
+   * <p>Failures are the port's, not the run's: a green run stays green whatever an announcement
+   * does.
+   */
+  private void announceRun(CiRun run, Instant finishedAt) {
+    for (RunAnnouncer announcer : runAnnouncers) {
+      try {
+        announcer.onRunSucceeded(run.id, run.repoId, run.branch, run.commitSha, finishedAt);
+      } catch (RuntimeException e) {
+        LOG.warnf(e, "Announcing run %s failed", run.id);
       }
     }
   }
@@ -427,14 +455,22 @@ public class CiRunService {
     }
   }
 
-  private void finishRun(String runId, CiRunStatus status) {
+  /**
+   * Writes the run's terminal row and hands back the instant it stamped, which is the one thing
+   * about a finished run that is not already in the caller's hand — {@link RunAnnouncer} needs it,
+   * and taking it from the transaction that wrote it is what keeps the row and the event agreeing
+   * on when the run ended.
+   */
+  private Instant finishRun(String runId, CiRunStatus status) {
+    Instant finishedAt = Instant.now();
     QuarkusTransaction.requiringNew()
         .run(
             () -> {
               CiRun run = runs.findById(runId);
               run.status = status;
-              run.finishedAt = Instant.now();
+              run.finishedAt = finishedAt;
             });
+    return finishedAt;
   }
 
   /** Removes a run that turned out to describe a commit that no longer exists. */

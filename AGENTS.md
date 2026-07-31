@@ -61,7 +61,9 @@ package:
   it needs a web stack, which is the same line that put `api` here rather than in `ci/`, and it is
   where qits-workspaces keeps its own `daemonhost` for the same reason. `ci/` keeps the
   `CiStepRunner` seam and the orchestrator and gains no web dependency — the step runner is in
-  `service/` because it *is* the transport.
+  `service/` because it *is* the transport. Two more packages of the same kind: `notify`, the cd
+  announcement, and `bus`, both ends of the event bus (below). Every one of them is an *adapter* for
+  a seam that lives in `ci/control`; that is what the package split says.
 - `ci-daemon-protocol/` — the vendored wire contract (below). Its package is
   `eu.wohlben.qits.cidaemon.protocol`, deliberately not under `eu.wohlben.qits.ci`: it is a copy of
   another repo's module and its package must stay byte-identical with the original.
@@ -278,6 +280,52 @@ Its own datasource, persistence unit and Flyway lineage (`eventsourcing`, `db/ev
 follow the platform convention, for the ordinary reason plus one more: the split out of this repo
 should move files, not data.
 
+### How the deployable uses it
+
+`service/…/bus/` is the whole of qits-ci's wiring, and it is two beans and no configuration:
+`BuildSuccessfulAnnouncer` publishes, `BuildSuccessfulListener` consumes, and the subscriber dials
+itself on `StartupEvent` because a listener bean exists. Registering a listener really is "add a
+bean" — no channel name, no annotation — and no `@Unremovable` is needed, because
+`EventDispatcher`'s `Instance<QitsEventListener<?>>` is what ArC counts as a use.
+`EventsourcingDarknessTest` asserts that rather than trusting it, since a removed listener
+subscribes to nothing and says nothing about it.
+
+**The publish hook hangs off a seam, and it is a *second* seam beside `CdNotifier` rather than a
+widening of it.** `RunAnnouncer` (in `ci/control`, implemented in `service/`) is what keeps the `ci`
+module free of the bus — the same reason the cd notifier is arranged that way — but the two ports
+stay separate because they mean different things: cd is asked to deploy, the bus is told a build
+passed. The one difference in the signature is `finishedAt`, which the event needs and cd does not,
+and it comes back out of `finishRun` rather than off the `CiRun` instance: that method mutates a
+freshly loaded entity in its own transaction, so the caller's copy never sees the value. **A null
+`occurredAt` is a 400 from qits-events on every green build**, which is why the seam test asserts
+the timestamp rather than only the coordinates.
+
+The call sits on the single-threaded run worker and it blocks. That was the trade, and it is bounded
+rather than free: `publish()` never throws, attempts the PUT inline, and gives up after
+`qits.eventsourcing.publish-timeout` (~5s), after which the outbox owns delivery. So an unreachable
+qits-events costs each green build a few seconds and nothing else. Anything slower than that does
+not belong behind that port.
+
+Two configuration facts about this module that are easy to get backwards:
+
+- **The darkness belongs to `service/`, not to the library.** The jar ships
+  `qits.eventsourcing.enabled=true` — a library that shipped dark is one whose first deployment
+  discovers it was never wired up — and `service/src/main/resources/application.properties` carries
+  the `%dev`/`%test` `false`, exactly as it does for the OTel keys. Nothing else about the bus is
+  restated there: `qits.events.url`, the outbox datasource, the timeouts and the retry budget are
+  ordinal-100 defaults in the jar, and a copy in the app's file would be a second place to change.
+- **Dark does not mean absent.** `enabled=false` stops publishing, sweeping and dialling; it does
+  not stop the datasource. Quarkus opens the connection and runs Flyway at boot regardless, so
+  `service/src/test/resources/application.properties` points that datasource at in-memory H2 for the
+  same reason it does for `ci` — measured, not assumed: without those lines the suite creates and
+  migrates a real `~/.qits/data/eventsourcing`, and two builds on one host race for its
+  single-writer file.
+
+`quarkus-scheduler` (the outbox sweeper's) arrives transitively with the jar and is new to this
+deployable; `quarkus-websockets-next` was already here for the ci-daemon control plane, so the
+client half costs the image nothing. `quarkus-undertow` stays absent — check it with the
+`dependency:tree` line under "The Angular client" after touching this pom.
+
 ## Adding a dependency on another context
 
 Don't. This context has no compile-time dependency on any other qits module and should not grow
@@ -485,6 +533,16 @@ mechanism at all — which is what every service here was before the header land
   The ci module's copy also carries a `during(stepIndex, …)` hook: it runs something on the worker
   thread *while* a step is executing, which is how a cancellation arriving mid-step is staged with no
   sleep and no race about when "mid-step" is.
+- **`BuildSuccessfulPublishTest` is the only class in this repo that runs with the event bus on.**
+  Everything else inherits the shipped `%test` darkness, so "the suite dials nothing" is the default
+  rather than an arrangement each test makes; that class turns it back on through a
+  `QuarkusTestProfile` and points it at its own `StubEventsServer` — a trimmed second copy of the
+  eventsourcing module's, duplicated for the reason both `FakeCiStepRunner`s are (the modules do not
+  share a test classpath, and a test-jar to bridge forty lines is worse). It drives a real run to
+  `SUCCESS` through the real intake and asserts the *wire* contract the other side was built
+  against: one PUT per green run, a v4 UUID in the path, `name` as the signature, and the run's
+  coordinates in the canonical payload. Retries, the outbox and the three-way PUT semantics belong
+  to the eventsourcing suite; the round trip through a real qits-events belongs to the platform.
 - `CiPipelineBoundaryTest` starts at the intake POST, not at a `git push`, because the git host is
   in qits-artifacts. Assertions about what the git host's hook does or does not send belong there.
 - `CiDaemonGateIT` is **the** gate: the outline's whole lifecycle through the real intake path, on

@@ -15,6 +15,8 @@ per-step pass/fail for the push — advisory, queryable over REST.
 | `ci/` | `eu.wohlben.qits.ci.*` — entity, persistence, dto, mapper, control, error. The pipeline itself. No web, no JAX-RS. |
 | `service/` | `eu.wohlben.qits.ci.api` — the JAX-RS event intake, the run read surface, the token filter and the exception mapper — plus `…ci.daemonhost`, the step-container control plane (below). |
 | `ci-daemon-protocol/` | `eu.wohlben.qits.cidaemon.protocol` — the ci-daemon wire contract, **vendored** from [qits-ci-daemon](https://github.com/QuicklyIterateTheSoftware/qits-ci-daemon) and never edited here. Framework-free; `diff -r` is the drift detector. |
+| `eventsourcing/` | `eu.wohlben.qits.eventsourcing` — the platform's **event bus client** (publish to qits-events, listen for what it broadcasts). A library that has not moved out yet: it knows nothing about CI and may not import `eu.wohlben.qits.ci.*` at all. |
+| `ci-events/` | `eu.wohlben.qits.ci.events` — the events this service announces, today just `BuildSuccessful`. Depends on `eventsourcing/` and nothing else, so a future consumer takes the vocabulary without taking qits-ci. |
 
 `ci/` is a library jar. **`service/` is the application** — it carries
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary:
@@ -93,6 +95,8 @@ rest of qits it reaches over a URL it is configured with:
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + `qits.ci.daemon-version` |
 | out | `POST /cd/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.cd.intake-url`; no token — cd's intake is not gateway-allowlisted, the call stays on qits-net |
+| out | `PUT /events/api/events/{uuid}` — one `BuildSuccessful` per **green** run, idempotent (the `RunAnnouncer` seam) | `qits.events.url`, `qits.eventsourcing.enabled` |
+| out | `ws://…/events/stream` — dialled out and held open, carrying what qits-events broadcasts back | the same two keys; the address is derived, never configured twice |
 | out | the registry a publishing step pushes to, as `$QITS_REGISTRY` and `$QITS_IMAGE_REPOSITORY` in **every** step container — dialled by the *host's docker daemon*, never by this process | `qits.artifacts.registry-host`, `qits.artifacts.image-repository` |
 | out | the npm registry roots, as `$QITS_NPM_REGISTRY_URL` (hosted, `@qits/*` publishes) and `$QITS_NPM_PROXY_URL` (the npmjs pull-through cache) in **every** step container — dialled by the *step container itself* on the shared network | `qits.artifacts.npm.hosted-url`, `qits.artifacts.npm.proxy-url` |
 
@@ -114,6 +118,24 @@ The same arrangement repeats one hop down: a green run is announced to
 in `ci/control` — fire-and-forget with the same silence hazard, so both ends pin that literal too.
 Only `SUCCESS` announces (a red run, a `CONFIG_ERROR` and a discarded run deploy nothing), and a
 deployment without a qits-cd is a supported configuration that costs one debug line per green run.
+
+**A green run is also announced to nobody in particular.** The same transition publishes a
+`BuildSuccessful` event to [qits-events](https://github.com/QuicklyIterateTheSoftware/qits-events),
+through a second seam in `ci/control` — `RunAnnouncer`, implemented by `service/…/bus/BuildSuccessfulAnnouncer`
+— and the two are separate ports on purpose: the cd call is a *request* addressed to one service
+that is about to act, this is a *statement* anything on the platform may subscribe to. It is a
+`PUT` at a UUID the publisher picks, so a retry is a replay rather than a duplicate; a delivery that
+does not land goes to an outbox in this process and is retried on a schedule; and it carries the
+run's own `finishedAt` as the event's `occurredAt`, plus `imageDigest` — which qits-ci never has,
+since a step publishes an image from inside its own container and answers with an exit code.
+
+qits-ci is also the **first consumer** of the same bus: `service/…/bus/BuildSuccessfulListener`
+receives its own announcement back off `/events/stream` and logs it. Nothing hangs off that yet; it
+is there because a producer nobody has ever seen consume is a bus with an untested second half.
+
+Both halves are **dark in `%dev` and `%test`** (`qits.eventsourcing.enabled`), the same posture the
+OTLP exporter takes, and a deployment without a qits-events is a supported configuration in exactly
+the way a deployment without a qits-cd is.
 
 ci never touches the bare origins on disk: it keeps its **own** bare cache per repository under
 `<qits.ci.data-dir>/repos/<repoId>.git` and fetches into it over the git host's URL. That is what
@@ -319,6 +341,19 @@ this by design — the launch table is memory, and that is what makes the restar
 - Give the process a persistent `~/.qits/data/ci` (or override `quarkus.datasource.ci.jdbc.url` and
   `qits.ci.data-dir`). The H2 there is a plain **single-writer file** — no `AUTO_SERVER`, so nothing
   else may open it while ci runs, and nothing listens on a database port.
+- Point `QITS_EVENTS_URL` (`qits.events.url`) at qits-events — scheme, host and port, **no path**:
+  the client appends `/events/api/events/{id}` and `/events/stream` itself, and a path here yields a
+  doubled one and a 404 nothing retries out of. The shipped default is the qits-net alias
+  `http://qits-events:8080`, which is already right for a deployment on that network and wrong for a
+  host-run process. `qits.eventsourcing.enabled=false` turns the whole thing off, which is what a
+  deployment with no qits-events wants — the keys and their defaults are the qits-eventsourcing
+  jar's, not this module's.
+- Give the **outbox** its own persistent file too:
+  `QUARKUS_DATASOURCE_EVENTSOURCING_JDBC_URL=jdbc:h2:file:/data/eventsourcing/h2/eventsourcing` (or
+  wherever the data volume is). It is a second single-writer H2 beside ci's own, with its own Flyway
+  lineage, and it holds exactly the events a publish could not deliver — empty in a healthy process,
+  which is why losing it is survivable and *not* mounting it is not: the file is created under the
+  container's `~/.qits` and every restart drops whatever had not been retried yet.
 
 ## What is deliberately *not* here
 
