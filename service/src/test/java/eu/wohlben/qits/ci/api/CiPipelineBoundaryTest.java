@@ -2,6 +2,7 @@ package eu.wohlben.qits.ci.api;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -222,6 +223,99 @@ public class CiPipelineBoundaryTest {
     given().when().get("/ci/api/runs").then().statusCode(400);
   }
 
+  @Test
+  public void theLimitTakesTheNewestNAndItsBoundariesAreTotal() throws Exception {
+    String repoId = seedOrigin();
+    // Three runs on one repository, pushed in order, so "newest" is a fact rather than a tie.
+    String first = pushBranchWithConfig(repoId, "ci-limit-1", CONFIG_GREEN);
+    postReceive(repoId, "ci-limit-1", ZERO_SHA, first);
+    awaitRunCount(repoId, 1);
+    String second = pushBranchWithConfig(repoId, "ci-limit-2", CONFIG_GREEN);
+    postReceive(repoId, "ci-limit-2", ZERO_SHA, second);
+    awaitRunCount(repoId, 2);
+    String third = pushBranchWithConfig(repoId, "ci-limit-3", CONFIG_GREEN);
+    postReceive(repoId, "ci-limit-3", ZERO_SHA, third);
+    List<Map<String, Object>> all = awaitRunCount(repoId, 3);
+
+    // A limit smaller than the row count takes the head of the same ordering, not a sample.
+    List<Map<String, Object>> newest = listRuns(repoId, "1");
+    assertEquals(1, newest.size());
+    assertEquals(all.get(0).get("id"), newest.get(0).get("id"), "limit=1 must be the newest run");
+
+    // The two boundaries the parameter can get wrong in opposite directions.
+    assertEquals(3, listRuns(repoId, "3").size(), "limit exactly the row count returns them all");
+    assertEquals(3, listRuns(repoId, "50").size(), "limit above the row count is not an error");
+    // Absent still means unbounded, which is what keeps every existing caller unchanged.
+    assertEquals(3, listRuns(repoId).size());
+    assertEquals(3, listRuns(repoId, "").size(), "an empty value reads as absent");
+
+    // Order survives the bound.
+    assertEquals(
+        all.stream().map(r -> r.get("id")).toList(),
+        listRuns(repoId, "3").stream().map(r -> r.get("id")).toList());
+  }
+
+  @Test
+  public void aNonPositiveOrNonNumericLimitIsRejectedWithTheMessageEnvelope() throws Exception {
+    String repoId = seedOrigin();
+
+    // Zero rows is a question nobody asks and a negative bound is a caller bug — both are 400s
+    // rather than empty lists. "abc" is the one that would be a 404 if the parameter were bound to
+    // an Integer: JAX-RS answers a query-param conversion failure with NotFoundException.
+    for (String bad : List.of("0", "-1", "abc", "1.5", "9999999999999999999")) {
+      given()
+          .when()
+          .get("/ci/api/runs?repositoryId=" + repoId + "&limit=" + bad)
+          .then()
+          .statusCode(400)
+          .body("message", org.hamcrest.Matchers.equalTo("Invalid limit"));
+    }
+
+    // The repository filter is still checked first and keeps its own message.
+    given()
+        .when()
+        .get("/ci/api/runs?repositoryId=&limit=5")
+        .then()
+        .statusCode(400)
+        .body("message", org.hamcrest.Matchers.equalTo("Invalid repository id"));
+  }
+
+  @Test
+  public void theRepositoryListingIsTheDistinctRecordedIdsAscending() throws Exception {
+    String busy = seedOrigin();
+    String quiet = seedOrigin();
+    String neverPushed = seedOrigin();
+
+    postReceive(busy, "ci-repos-a", ZERO_SHA, pushBranchWithConfig(busy, "ci-repos-a", CONFIG_GREEN));
+    awaitRunCount(busy, 1);
+    postReceive(busy, "ci-repos-b", ZERO_SHA, pushBranchWithConfig(busy, "ci-repos-b", CONFIG_GREEN));
+    awaitRunCount(busy, 2);
+    postReceive(
+        quiet, "ci-repos-c", ZERO_SHA, pushBranchWithConfig(quiet, "ci-repos-c", CONFIG_GREEN));
+    awaitRunCount(quiet, 1);
+
+    List<String> ids =
+        given()
+            .when()
+            .get("/ci/api/repositories")
+            .then()
+            .statusCode(200)
+            .contentType(ContentType.JSON)
+            .extract()
+            .jsonPath()
+            .getList("repositoryIds");
+
+    // Distinct: two runs on one repository is one entry, not two.
+    assertEquals(1, ids.stream().filter(busy::equals).count(), "ids must be distinct");
+    assertTrue(ids.contains(quiet));
+    // Observed, not known: a bare origin ci has never recorded a run against has no history to
+    // explore, and this listing must not promise one. (CiCandidateRepos is the wider question.)
+    assertFalse(ids.contains(neverPushed), "a repository with no run must not be listed");
+    // Ascending, so a client can diff it against another service's list without re-sorting. The
+    // suite shares one instance, so the assertion is about the whole answer rather than these ids.
+    assertEquals(ids.stream().sorted().toList(), ids, "the listing must be sorted ascending");
+  }
+
   // --- the wire contract the git host speaks (CiPostReceiveNotifier's payload) ---
 
   private void postReceive(String repoId, String branch, String oldSha, String newSha) {
@@ -285,14 +379,32 @@ public class CiPipelineBoundaryTest {
   }
 
   private List<Map<String, Object>> listRuns(String repoId) {
+    return listRuns(repoId, null);
+  }
+
+  /** {@code limit} null omits the parameter entirely; {@code ""} sends it with no value. */
+  private List<Map<String, Object>> listRuns(String repoId, String limit) {
     return given()
         .when()
-        .get("/ci/api/runs?repositoryId=" + repoId)
+        .get("/ci/api/runs?repositoryId=" + repoId + (limit == null ? "" : "&limit=" + limit))
         .then()
         .statusCode(200)
         .extract()
         .jsonPath()
         .getList("runs");
+  }
+
+  /** Deadline-polls the run list until it holds exactly {@code expected} rows; returns them. */
+  private List<Map<String, Object>> awaitRunCount(String repoId, int expected) throws Exception {
+    long deadline = System.currentTimeMillis() + 30_000;
+    while (System.currentTimeMillis() < deadline) {
+      List<Map<String, Object>> runs = listRuns(repoId);
+      if (runs.size() == expected) {
+        return runs;
+      }
+      Thread.sleep(100);
+    }
+    return fail("no " + expected + " CI runs for " + repoId + " within the deadline");
   }
 
   /** Deadline-polls the run list until the (single) run reaches a terminal status. */

@@ -8,6 +8,7 @@ import eu.wohlben.qits.ci.dto.CiRunDto;
 import eu.wohlben.qits.ci.entity.CiRun;
 import eu.wohlben.qits.ci.entity.CiRunStatus;
 import eu.wohlben.qits.ci.entity.CiStep;
+import eu.wohlben.qits.ci.error.BadRequestException;
 import eu.wohlben.qits.ci.mapper.CiRunMapper;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
@@ -20,6 +21,9 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.util.List;
 import org.eclipse.microprofile.openapi.annotations.Operation;
+import org.eclipse.microprofile.openapi.annotations.enums.SchemaType;
+import org.eclipse.microprofile.openapi.annotations.media.Schema;
+import org.eclipse.microprofile.openapi.annotations.parameters.Parameter;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 
 /**
@@ -34,10 +38,15 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * not exist, and put three services under one gateway prefix. {@code {runId}} stays in the path:
  * there it is identity, not scope.
  *
- * <p>The two reads stay hidden from the OpenAPI document like the rest of the machine surface.
- * <b>Cancellation does not</b> — it is the one operation here a human invokes on purpose, so it
- * belongs in the document a client is generated from, and it is why {@code docs/openapi.yml} carries
- * a path at all.
+ * <p><b>Nothing here is hidden from the OpenAPI document any more.</b> The two reads used to carry
+ * {@code @Operation(hidden = true)} on the criterion "does a client consume it, does a person invoke
+ * it" — machine surfaces stay out, the cancel button goes in. The criterion was right and its answer
+ * changed: qits-spa-ci reads both of these on every page it draws, so they are the JSON API a
+ * first-party client consumes. Leaving them hidden would mean {@code docs/openapi.yml} — a file this
+ * repo commits precisely so that a surface change shows up as a diff — omitted the entire contract
+ * that client depends on, and a breaking change to {@link CiRunDto} would have landed with an empty
+ * diff. The intake in {@code CiEventController} stays hidden: it really is machine-only,
+ * token-guarded, and has a cross-repo wire contract with qits-artifacts.
  */
 @Path("/runs")
 @Produces(MediaType.APPLICATION_JSON)
@@ -55,13 +64,52 @@ public class CiRunController {
    * A repository's runs, newest-first — without step output (fetch a single run for that). The
    * filter is required and validated: an unscoped listing would return every run on the instance,
    * and a missing one must say so rather than answer with an empty list.
+   *
+   * <p>{@code ?limit=} is optional and bounds the answer to the newest {@code n}; absent, the
+   * listing is unbounded, so nothing that predates the parameter changes. The ordering is what makes
+   * that a total answer rather than an arbitrary sample. There is deliberately <b>no {@code
+   * ?offset=} and no cursor</b>: an offset over a list that grows at the head re-shows rows under
+   * concurrent inserts, and the two things anyone actually wants — the newest n, then one specific
+   * run — are both already covered. A real history walk wants {@code before=<createdAt>}, and that
+   * waits for a requirement.
+   *
+   * <p>The parameter is taken as a {@code String} and parsed here rather than bound to an {@code
+   * Integer}, because JAX-RS answers a query-parameter conversion failure with a <b>404</b>. A
+   * mistyped limit is a bad request, and it must arrive as one through {@link CiExceptionMapper}'s
+   * {@code {"message": …}} envelope like every other rejected input on this surface. A present but
+   * empty value is read as absent: {@code ?limit=} is what an unfilled template produces, and
+   * refusing it buys nothing.
    */
   @GET
-  @Operation(hidden = true)
-  public ListRunsResponse listRuns(@QueryParam("repositoryId") String repositoryId) {
+  @Operation(summary = "List a repository's CI runs, newest first")
+  @APIResponse(responseCode = "200", description = "The repository's runs, without step output")
+  @APIResponse(responseCode = "400", description = "The repository id is missing or invalid, or the limit is not a positive integer")
+  public ListRunsResponse listRuns(
+      @Parameter(description = "The repository whose runs to list — required", required = true)
+          @QueryParam("repositoryId")
+          String repositoryId,
+      // Declared as the integer it is, though it binds as a String: the document describes the
+      // contract, and taking it as a String is how a bad value becomes a 400 instead of a 404.
+      @Parameter(
+              description = "Return only the newest n runs; omit for all of them",
+              schema = @Schema(type = SchemaType.INTEGER, minimum = "1"))
+          @QueryParam("limit")
+          String limit) {
     CiIdentifiers.requireRepoId(repositoryId);
     return new ListRunsResponse(
-        runService.runsFor(repositoryId).stream().map(mapper::toDto).toList());
+        runService.runsFor(repositoryId, parseLimit(limit)).stream().map(mapper::toDto).toList());
+  }
+
+  /** {@code null} for absent or blank; a positive int; otherwise a 400. */
+  private static Integer parseLimit(String limit) {
+    if (limit == null || limit.isBlank()) {
+      return null;
+    }
+    try {
+      return Integer.valueOf(limit.trim());
+    } catch (NumberFormatException notANumber) {
+      throw new BadRequestException("Invalid limit");
+    }
   }
 
   /**
@@ -76,7 +124,9 @@ public class CiRunController {
    */
   @GET
   @Path("/{runId}")
-  @Operation(hidden = true)
+  @Operation(summary = "One CI run with its steps, output and — while it runs — its live step")
+  @APIResponse(responseCode = "200", description = "The run")
+  @APIResponse(responseCode = "404", description = "No such run")
   public CiRunDto getRun(@PathParam("runId") String runId) {
     CiRun run = runService.requireRun(runId);
     List<CiStep> steps = runService.stepsFor(runId);

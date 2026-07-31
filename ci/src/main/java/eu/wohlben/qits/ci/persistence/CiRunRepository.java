@@ -9,14 +9,34 @@ import java.util.List;
 @ApplicationScoped
 public class CiRunRepository implements PanacheRepositoryBase<CiRun, String> {
 
+  private static final String NEWEST_FIRST = "repoId = ?1 order by createdAt desc, id desc";
+
   /** All runs recorded for a repository, newest-first. */
   public List<CiRun> listByRepoIdNewestFirst(String repoId) {
-    return list("repoId = ?1 order by createdAt desc, id desc", repoId);
+    return list(NEWEST_FIRST, repoId);
+  }
+
+  /**
+   * The newest {@code limit} runs recorded for a repository.
+   *
+   * <p>The bound is applied in SQL rather than to a materialised list, because the point of asking
+   * for the newest hundred is not fetching the other nine thousand. It is a total answer only
+   * because the ordering is: {@code createdAt desc, id desc} is a strict total order over the rows,
+   * so "the newest n" names the same n rows on every call. Deliberately <b>no offset</b> — a list
+   * that grows at the head cannot be walked by skipping from the front without re-showing rows.
+   */
+  public List<CiRun> listByRepoIdNewestFirst(String repoId, int limit) {
+    return find(NEWEST_FIRST, repoId).range(0, limit - 1).list();
   }
 
   /**
    * Every repository this instance has ever recorded a run for — half of what {@code KnownCiRepos}
-   * offers the trigger engine as candidates.
+   * offers the trigger engine as candidates, and the whole of what {@code GET /ci/api/repositories}
+   * answers.
+   *
+   * <p>Unsorted here on purpose: the trigger engine drops the result into a {@code TreeSet} and the
+   * read surface sorts for its own reasons, so a database-side {@code order by} would be a third
+   * opinion about an ordering neither caller takes from here.
    */
   public List<String> distinctRepoIds() {
     return getEntityManager()

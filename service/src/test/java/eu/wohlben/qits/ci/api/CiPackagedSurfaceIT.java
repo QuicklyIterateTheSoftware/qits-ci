@@ -2,6 +2,7 @@ package eu.wohlben.qits.ci.api;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -46,8 +47,19 @@ import org.junit.jupiter.api.Test;
  *   <li>the ci-daemon control socket is on the artifact's router at {@code /ci/daemon} — a
  *       {@code @WebSocket} endpoint is registered by an extension at augmentation, so "websockets-next
  *       is native-image supported" is a claim this repo's rule says the binary has to prove rather
- *       than the documentation.
+ *       than the documentation;
+ *   <li>and, for the same reason, <b>how the Angular client and the machine surface divide {@code
+ *       /ci}</b>. Quinoa is disabled by default in test mode, so no {@code @QuarkusTest} in this repo
+ *       has ever seen the client at all — the SPA fallback, the {@code <base href>} another
+ *       repository's {@code angular.json} sets, and every path {@code
+ *       quarkus.quinoa.ignored-path-prefixes} must keep out of it are provable here or nowhere.
  * </ul>
+ *
+ * <p>That last group is qits-events' probe list ({@code docs/project-setup-quinoa-angular.md}),
+ * adopted here because the asymmetry was the risk: this repo asserted the document, the intake, the
+ * socket and a whole push-to-run round trip, and never that {@code /ci/} serves a page. Shipping the
+ * client's first real pages behind that gap is how the fallback trap gets discovered in production —
+ * a mistyped machine path answered 200 {@code index.html}, which a machine client parses as data.
  *
  * <p>The pipeline it pushes declares <b>no steps</b> — a config-less push records nothing at all, so
  * an empty {@code steps} list is the smallest config that still records a run, and it takes the path
@@ -61,6 +73,13 @@ public class CiPackagedSurfaceIT {
 
   /** The all-zero sha git reports as the old id of a newly created branch. */
   private static final String ZERO_SHA = "0".repeat(40);
+
+  /**
+   * The client's own spelling of the segment, from qits-spa-ci's {@code angular.json}. It is the
+   * fingerprint every SPA probe here uses: "did this response come from the client" is a question
+   * about the page, and the status code alone cannot answer it.
+   */
+  private static final String BASE_HREF = "<base href=\"/ci/\">";
 
   /**
    * Relocates the launched artifact's state under {@code target/} by moving {@code user.home}, not
@@ -109,6 +128,82 @@ public class CiPackagedSurfaceIT {
         .post("/ci/api/events/post-receive")
         .then()
         .statusCode(400);
+  }
+
+  @Test
+  public void theClientIsServedAtTheSegmentWithItsOwnBaseHref() {
+    // The baseHref is set in qits-spa-ci's angular.json — another repository, where no build here
+    // can check it. Disagree with quarkus.quinoa.ui-root-path and the page loads and then fetches
+    // its own JavaScript from the wrong place, which is a failure with no error in it.
+    String html =
+        given()
+            .when()
+            .get("/ci/")
+            .then()
+            .statusCode(200)
+            .contentType(ContentType.HTML)
+            .extract()
+            .asString();
+    assertTrue(
+        html.contains(BASE_HREF),
+        "the client's baseHref must be the segment it is mounted at; got: "
+            + html.substring(0, Math.min(400, html.length())));
+  }
+
+  @Test
+  public void aDeepLinkFallsBackToTheClientSoItsRouterOwnsIt() {
+    // /ci/runs/<runId> is a real route in the client and must survive a hard reload — that is what
+    // quarkus.quinoa.enable-spa-routing buys, and it only exists in the packaged process.
+    String deepLink =
+        given()
+            .when()
+            .get("/ci/runs/anything")
+            .then()
+            .statusCode(200)
+            .contentType(ContentType.HTML)
+            .extract()
+            .asString();
+    assertTrue(
+        deepLink.contains(BASE_HREF),
+        "a deep link must answer with index.html, not with a differently-shaped page");
+  }
+
+  @Test
+  public void theBareSegmentRedirectsRatherThanFourOhFouring() {
+    // Quinoa mounts at /ci/*, which does not match the bare segment — WebUiRedirect is this
+    // service's answer, and a raw Vert.x route only exists on the artifact's real router.
+    given()
+        .redirects()
+        .follow(false)
+        .when()
+        .get("/ci")
+        .then()
+        .statusCode(301)
+        .header("Location", "/ci/");
+  }
+
+  @Test
+  public void aMistypedMachinePathIsNeverAnsweredWithTheClient() {
+    // The whole reason quarkus.quinoa.ignored-path-prefixes carries /api: without it this answers
+    // 200 with index.html and a machine client parses the client's not-found page as data.
+    //
+    // "404, and not the CLIENT" rather than "404, never HTML": what comes back is Vert.x' own stock
+    // `<h1>Resource not found</h1>`, which is text/html and correct. Nothing on this platform
+    // installs a JSON 404 for unrouted paths, so asserting the content type alone would fail
+    // against the right behaviour while still passing against the wrong one.
+    String body = given().when().get("/ci/api/nope").then().statusCode(404).extract().asString();
+    assertFalse(
+        body.contains(BASE_HREF),
+        "a mistyped machine path must not be answered with the client; got: " + body);
+
+    // And the same for the daemon socket's own prefix. Two probes on /ci/daemon rather than one,
+    // because they fail for opposite reasons: websockets-next claims only the HANDSHAKE, so a plain
+    // GET is the Quinoa question and the upgrade below is the augmentation question. This repo
+    // learned that by measuring it — before the prefix was ignored, this answered 200 index.html.
+    String daemon = given().when().get("/ci/daemon").then().statusCode(404).extract().asString();
+    assertFalse(
+        daemon.contains(BASE_HREF),
+        "a plain GET on the daemon socket must not be answered with the client; got: " + daemon);
   }
 
   @Test

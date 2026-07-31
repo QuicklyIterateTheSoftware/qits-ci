@@ -94,7 +94,8 @@ rest of qits it reaches over a URL it is configured with:
 | Direction | Surface | Config |
 |---|---|---|
 | in | `POST /ci/api/events/post-receive` — `{repoId, branch, oldSha, newSha}`, one per updated branch ref | guarded by `qits.ci.token` (`X-CI-Token`) |
-| in | `GET /ci/api/runs?repositoryId={repoId}`, `GET /ci/api/runs/{runId}` | not token-guarded; they carry build logs, so a deployment must keep them behind its auth policy |
+| in | `GET /ci/api/runs?repositoryId={repoId}[&limit={n}]`, `GET /ci/api/runs/{runId}` | not token-guarded; they carry build logs, so a deployment must keep them behind its auth policy |
+| in | `GET /ci/api/repositories` → `{"repositoryIds": [...]}` — the distinct repo ids this instance has runs for, ascending | same; it is the one read here that is not scoped to a repository, because it answers *which* |
 | in | `POST /ci/api/runs/{runId}/cancel` → 202, 409 on a run that is not running | same: no token, behind the deployment's auth policy |
 | in | `ws://…/ci/daemon` — the socket each step container's daemon dials **out** to | authenticated by a host-minted per-container secret, not by any token |
 | out | where the git host answers, for ci's **own** `git fetch` of the pushed ref — ci appends `/git/<repoId>` | `qits.ci.git-host-url` |
@@ -110,6 +111,23 @@ The run listing takes the repository as a **query filter, not a path segment**. 
 repositories, so `/repositories/{repoId}/runs` asserted a containment this context does not have —
 and put three services under one gateway prefix. `runs` is the entity; `{runId}` stays in the path
 because there it is identity rather than scope.
+
+That filter is mandatory, which makes `GET /ci/api/repositories` the answer to the question it
+raises: *which* repositories are there to filter by. It returns `repositoryIds` and not
+`repositories` because ci holds no repository object — `ci_run.repo_id` is a plain string with no
+relation to anything, and these are ids this instance **observed**. It is deliberately narrower than
+the trigger engine's candidate list, which also counts the bare caches on disk: a repository ci has
+merely fetched from has no run history to read. Without this endpoint, CI activity that no other
+service claims is invisible to a client rather than merely unattributed — and on this platform, where
+`qits-local-up.sh` seeds the platform's own repositories straight onto the git host with no
+qits-projects row, that is the whole run history.
+
+`?limit={n}` is optional and takes the newest `n`; absent, the listing is unbounded, so nothing that
+predates it changes. The ordering (`createdAt desc, id desc`) is what makes "the newest n" a total
+answer rather than an arbitrary sample. There is deliberately **no `?offset=` and no cursor** — an
+offset over a list that grows at the head re-shows rows under concurrent inserts, and the two things
+anyone wants (the newest n, then one specific run) are both already covered. A real history walk
+wants `before=<createdAt>`, and that waits for a requirement.
 
 The event sender is the git host's post-receive hook, which lives in
 [qits-artifacts](https://github.com/QuicklyIterateTheSoftware/qits-artifacts) (`CiPostReceiveNotifier`).

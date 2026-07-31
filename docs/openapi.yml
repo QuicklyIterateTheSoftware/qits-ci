@@ -2,7 +2,168 @@
 # Run `./mvnw -pl service -am test -Dtest=OpenApiSchemaExportTest -Dsurefire.failIfNoSpecifiedTests=false` to regenerate.
 ---
 openapi: 3.1.0
+components:
+  schemas:
+    CiLiveStepDto:
+      type: object
+      properties:
+        stepIndex:
+          type: integer
+          format: int32
+        output:
+          type: string
+    CiRunDto:
+      type: object
+      properties:
+        id:
+          type: string
+        repoId:
+          type: string
+        branch:
+          type: string
+        commitSha:
+          type: string
+        status:
+          $ref: "#/components/schemas/CiRunStatus"
+        createdAt:
+          $ref: "#/components/schemas/Instant"
+        finishedAt:
+          $ref: "#/components/schemas/Instant"
+        daemonVersion:
+          type: string
+        triggerType:
+          $ref: "#/components/schemas/CiTriggerType"
+        triggerEventId:
+          type: string
+        triggerEventName:
+          type: string
+        configPath:
+          type: string
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/CiStepDto"
+        live:
+          $ref: "#/components/schemas/CiLiveStepDto"
+    CiRunStatus:
+      type: string
+      enum:
+      - RUNNING
+      - SUCCESS
+      - FAILED
+      - CONFIG_ERROR
+    CiStepDto:
+      type: object
+      properties:
+        stepIndex:
+          type: integer
+          format: int32
+        image:
+          type: string
+        status:
+          $ref: "#/components/schemas/CiStepStatus"
+        exitCode:
+          type: integer
+          format: int32
+        startedAt:
+          $ref: "#/components/schemas/Instant"
+        finishedAt:
+          $ref: "#/components/schemas/Instant"
+        output:
+          type: string
+    CiStepStatus:
+      type: string
+      enum:
+      - PENDING
+      - RUNNING
+      - SUCCESS
+      - FAILED
+      - SKIPPED
+    CiTriggerType:
+      type: string
+      enum:
+      - POST_RECEIVE
+      - EVENT
+    Instant:
+      type: string
+      format: date-time
+      examples:
+      - 2022-03-10T16:15:50Z
+    ListRepositoryIdsResponse:
+      type: object
+      properties:
+        repositoryIds:
+          type: array
+          items:
+            type: string
+    ListRunsResponse:
+      type: object
+      properties:
+        runs:
+          type: array
+          items:
+            $ref: "#/components/schemas/CiRunDto"
 paths:
+  /ci/api/repositories:
+    get:
+      summary: The repository ids qits-ci has recorded runs for
+      responses:
+        "200":
+          description: "Distinct repository ids, ascending"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListRepositoryIdsResponse"
+      tags:
+      - Ci Repository Controller
+  /ci/api/runs:
+    get:
+      summary: "List a repository's CI runs, newest first"
+      parameters:
+      - description: Return only the newest n runs; omit for all of them
+        schema:
+          type: integer
+          minimum: 1
+        name: limit
+        in: query
+      - description: The repository whose runs to list — required
+        required: true
+        name: repositoryId
+        in: query
+        schema:
+          type: string
+      responses:
+        "200":
+          description: "The repository's runs, without step output"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListRunsResponse"
+        "400":
+          description: "The repository id is missing or invalid, or the limit is not\
+            \ a positive integer"
+      tags:
+      - Ci Run Controller
+  /ci/api/runs/{runId}:
+    get:
+      summary: "One CI run with its steps, output and — while it runs — its live step"
+      parameters:
+      - name: runId
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: The run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CiRunDto"
+        "404":
+          description: No such run
+      tags:
+      - Ci Run Controller
   /ci/api/runs/{runId}/cancel:
     post:
       summary: Cancel a running CI run

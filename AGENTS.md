@@ -240,7 +240,9 @@ web stack present. Check that before adding any extension that sounds like a web
 
 Note Quinoa is **disabled by default in test mode**, so no `@QuarkusTest` builds the client and the
 suite's runtime is unchanged. What the SPA is actually served as is proven by `package` plus the
-packaged artifact, not by surefire.
+packaged artifact, not by surefire — concretely, by `CiPackagedSurfaceIT`'s five probes (the
+segment, a deep link, the bare-segment redirect, and the two paths that must answer 404 rather than
+the client). Every claim in this section is a measurement that test now repeats.
 
 ## The eventsourcing module
 
@@ -647,13 +649,26 @@ mechanism at all — which is what every service here was before the header land
   reactor's own modules are not installed anywhere, so `-pl service` alone cannot resolve them, and
   `failIfNoSpecifiedTests=false` because `-am` then walks the sibling modules, which have no test by
   that name.
-  **The document holds exactly one path, and that is correct.** The intake and the two run reads
-  carry `@Operation(hidden = true)` because they are machine surfaces rather than part of the JSON
-  API the Angular client consumes, and the monorepo's own document omits them for the same reason —
-  so for a long time this file was `paths: {}` and *that* was the right output. `POST
-  /ci/api/runs/{runId}/cancel` is deliberately **not** hidden: it is the one operation here a person
-  invokes on purpose, so it belongs in the document a client is generated from. The file is committed
-  precisely so that hiding or unhiding an operation shows up as a diff.
+  **The document holds the read surface and the one write, and exactly one operation is hidden.**
+  The criterion has always been "does a first-party client consume it, does a person invoke it" —
+  machine surfaces stay out. For a long time that left `paths: {}`, then one path (`POST
+  /ci/api/runs/{runId}/cancel`, the one operation here a person invokes on purpose), because no
+  client read anything. **qits-spa-ci changed the answer, not the criterion**: it reads `GET
+  /ci/api/repositories`, `GET /ci/api/runs` and `GET /ci/api/runs/{runId}` on every page it draws, so
+  those are the JSON API a first-party client consumes and their `@Operation(hidden = true)` is gone.
+  Keeping them hidden would have meant this file omitted the entire contract that client depends on,
+  and a breaking change to `CiRunDto` would have landed with an **empty diff** — which is the exact
+  opposite of why the file is committed. `POST /ci/api/events/post-receive` stays hidden and the
+  criterion is why: it is token-guarded, machine-only, and its wire contract lives in qits-artifacts.
+  The file is committed precisely so that hiding or unhiding an operation shows up as a diff.
+
+  **`?limit=` on the run listing binds as a `String` on purpose.** JAX-RS answers a *query*-parameter
+  conversion failure with a **404** (the spec says so for `@QueryParam`, `@PathParam` and
+  `@MatrixParam` alike), so an `Integer limit` would answer `?limit=abc` with "no such resource"
+  instead of "bad request". The parameter is parsed in the resource and rejected through
+  `CiExceptionMapper`'s `{"message": …}` envelope like every other bad input here; the OpenAPI
+  document still declares it `integer, minimum 1` via `@Parameter`, because the document describes
+  the contract rather than the binding.
   Note the test runs as a `@QuarkusTest` and indexes the test classpath, so a `@Path` resource under
   `src/test` would land in the document — that is why `IdentityEchoResource` is hidden too.
 - A `Failed to start quarkus` / `Port already bound: 8081` failure is the known flake
@@ -687,8 +702,18 @@ mechanism at all — which is what every service here was before the header land
   does not belong in it: it asserts the handful of things a `@QuarkusTest` structurally cannot see,
   because they only exist once the app is built (the routes' build-time prefixes, the shipped
   datasource URL, Flyway's migration surviving as a resource, SnakeYAML and Panache on a real run,
-  and that `/ci/daemon` is on the artifact's router). Its pipeline declares no steps, so it needs no
+  that `/ci/daemon` is on the artifact's router, and — the same argument, applied to Quinoa — **how
+  the client and the machine surface divide `/ci`**). Its pipeline declares no steps, so it needs no
   container; step execution stays in `CiDaemonGateIT`.
+  The SPA probes are qits-events' list (`docs/project-setup-quinoa-angular.md`), and closing that
+  asymmetry was overdue: `/ci/` serves 200 HTML carrying the client's own `<base href="/ci/">`, a
+  deep link (`/ci/runs/anything`) falls back to `index.html` so the Angular router owns it across a
+  reload, `/ci` redirects 301, and `/ci/api/nope` and a plain `GET /ci/daemon` each answer 404 and
+  **not the client**. The assertion is "not the client" rather than "never HTML" because what comes
+  back is Vert.x' own stock `<h1>Resource not found</h1>`, which is `text/html` and correct — pinning
+  the content type alone would fail against the right behaviour and still pass against the wrong one,
+  since `index.html` is `text/html` too. All five are invisible to surefire by construction (Quinoa
+  is off in test mode), which is exactly why they belong here.
   The `/ci/daemon` assertion is there because websockets-next registers that endpoint at
   *augmentation*: "the extension is native-image supported" is a claim the binary has to prove here,
   and a native build that silently dropped the route would otherwise surface as every run stuck at

@@ -10,6 +10,7 @@ import eu.wohlben.qits.ci.entity.CiRunStatus;
 import eu.wohlben.qits.ci.entity.CiStep;
 import eu.wohlben.qits.ci.entity.CiStepStatus;
 import eu.wohlben.qits.ci.entity.CiTriggerType;
+import eu.wohlben.qits.ci.error.BadRequestException;
 import eu.wohlben.qits.ci.error.ConflictException;
 import eu.wohlben.qits.ci.error.NotFoundException;
 import eu.wohlben.qits.ci.persistence.CiRunRepository;
@@ -704,6 +705,40 @@ public class CiRunService {
   /** All runs recorded for a repository, newest-first. */
   public List<CiRun> runsFor(String repoId) {
     return runs.listByRepoIdNewestFirst(repoId);
+  }
+
+  /**
+   * The newest {@code limit} runs recorded for a repository, or all of them when {@code limit} is
+   * null.
+   *
+   * @throws BadRequestException if a limit is given and is not positive — zero rows is a question
+   *     nobody asks, and a negative bound is a caller bug rather than an empty answer
+   */
+  public List<CiRun> runsFor(String repoId, Integer limit) {
+    if (limit == null) {
+      return runsFor(repoId);
+    }
+    if (limit <= 0) {
+      throw new BadRequestException("Invalid limit");
+    }
+    return runs.listByRepoIdNewestFirst(repoId, limit);
+  }
+
+  /**
+   * Every repository this instance has recorded a run for, ascending — the read surface behind
+   * {@code GET /ci/api/repositories}.
+   *
+   * <p>Sorted here rather than left to the caller so the response is stable across calls and across
+   * instances: a client diffing "which repositories have CI activity" against the projects registry
+   * must not see the set reorder because the query planner did.
+   *
+   * <p>These are ids qits-ci <b>observed</b> on its own runs, not repositories it owns. It is
+   * deliberately narrower than {@link CiCandidateRepos#candidates()}, which also counts the bare
+   * caches on disk: a repository ci once fetched for but never recorded a run against has no CI
+   * history to explore, and listing it here would promise one.
+   */
+  public List<String> repositoryIds() {
+    return runs.distinctRepoIds().stream().sorted().toList();
   }
 
   /** The run, or 404. */
