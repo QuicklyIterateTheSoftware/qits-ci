@@ -65,7 +65,7 @@ public class GitConfigFetcher implements CiConfigSource {
       return ConfigLookup.unreachable();
     }
     String localRef = "refs/qits-ci/" + branch;
-    if (!fetchBranch(cache, repoId, branch, localRef)) {
+    if (!fetchBranch(cache, repoId, branch, localRef, true)) {
       return ConfigLookup.unreachable();
     }
     if (!isReachable(cache, sha, localRef)) {
@@ -112,7 +112,7 @@ public class GitConfigFetcher implements CiConfigSource {
       return EventTriggerLookup.unreachable();
     }
     String localRef = "refs/qits-ci/" + branch;
-    if (!fetchBranch(cache, repoId, branch, localRef)) {
+    if (!fetchBranch(cache, repoId, branch, localRef, false)) {
       return EventTriggerLookup.unreachable();
     }
     CiProcess.Result head =
@@ -208,8 +208,18 @@ public class GitConfigFetcher implements CiConfigSource {
    * second-level segment for the git wire protocol and belongs here, while the configured base
    * names only which service hosts it — qits-artifacts, under its gateway segment, so the fetch
    * lands on {@code /artifacts/git/<repoId>}.
+   *
+   * <p><b>{@code expected} is the log level, and it is a parameter because the same failure means
+   * two different things.</b> On the push path a fetch that fails is a surprise worth a WARN: a
+   * post-receive event named a repository and a branch, so both existed a moment ago and something
+   * is wrong. On the trigger-listing path it is <em>routine</em> — that path asks every repository
+   * qits-ci has ever heard of, on every arriving event, and a repository that has since been deleted
+   * or renamed is simply not a candidate. Measured on the first deployment of the trigger engine: one
+   * WARN naming a long-gone repository, per green build, platform-wide, forever. A warning that
+   * cannot be acted on and never stops is how a log stops being read.
    */
-  private boolean fetchBranch(Path cache, String repoId, String branch, String localRef) {
+  private boolean fetchBranch(
+      Path cache, String repoId, String branch, String localRef, boolean expected) {
     String remote = gitHostUrl.replaceAll("/+$", "") + "/git/" + repoId;
     CiProcess.Result fetch =
         CiProcess.run(
@@ -224,7 +234,11 @@ public class GitConfigFetcher implements CiConfigSource {
             GIT_TIMEOUT,
             MAX_GIT_OUTPUT_CHARS);
     if (fetch.exitCode() != 0) {
-      LOG.warnf("ci fetch of %s from %s failed: %s", branch, remote, fetch.output());
+      if (expected) {
+        LOG.warnf("ci fetch of %s from %s failed: %s", branch, remote, fetch.output());
+      } else {
+        LOG.debugf("ci fetch of %s from %s failed: %s", branch, remote, fetch.output());
+      }
       return false;
     }
     return true;
