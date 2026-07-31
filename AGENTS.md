@@ -321,6 +321,19 @@ Two configuration facts about this module that are easy to get backwards:
   migrates a real `~/.qits/data/eventsourcing`, and two builds on one host race for its
   single-writer file.
 
+  **The deployment side of that same sentence cost a rollout, so it is worth stating plainly: adding
+  this module to the deployable adds a MANDATORY deployment variable.**
+  `QUARKUS_DATASOURCE_EVENTSOURCING_JDBC_URL` must point at the data volume, exactly as
+  `QUARKUS_DATASOURCE_CI_JDBC_URL` already does. The shipped default interpolates `${user.home}`,
+  which is the platform's convention and right for a host-run process — but in a container with no
+  `HOME` the native binary resolves it to `?`, and H2 rejects a path implicitly relative to the
+  working directory rather than falling back to one. The process then dies at Flyway before serving
+  anything: `Failed to start quarkus` / `FlywaySqlUnableToConnectToDbException`. This is the third
+  member of the family this file already names (the `AUTO_SERVER=TRUE` that killed the binary, the
+  IPv4 bind, this) — **a config default no JVM test exercises, failing only in the packaged artifact
+  in its real environment**. It fails loudly and safely, since cd's health gate keeps the previous
+  container, but it fails.
+
 `quarkus-scheduler` (the outbox sweeper's) arrives transitively with the jar and is new to this
 deployable; `quarkus-websockets-next` was already here for the ci-daemon control plane, so the
 client half costs the image nothing. `quarkus-undertow` stays absent — check it with the

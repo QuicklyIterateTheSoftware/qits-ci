@@ -348,12 +348,18 @@ this by design — the launch table is memory, and that is what makes the restar
   host-run process. `qits.eventsourcing.enabled=false` turns the whole thing off, which is what a
   deployment with no qits-events wants — the keys and their defaults are the qits-eventsourcing
   jar's, not this module's.
-- Give the **outbox** its own persistent file too:
-  `QUARKUS_DATASOURCE_EVENTSOURCING_JDBC_URL=jdbc:h2:file:/data/eventsourcing/h2/eventsourcing` (or
-  wherever the data volume is). It is a second single-writer H2 beside ci's own, with its own Flyway
-  lineage, and it holds exactly the events a publish could not deliver — empty in a healthy process,
-  which is why losing it is survivable and *not* mounting it is not: the file is created under the
-  container's `~/.qits` and every restart drops whatever had not been retried yet.
+- **Set `QUARKUS_DATASOURCE_EVENTSOURCING_JDBC_URL` — this one is not optional in a container**, and
+  it is the exact counterpart of the `QUARKUS_DATASOURCE_CI_JDBC_URL` a deployment already sets:
+  `jdbc:h2:file:/data/eventsourcing/h2/eventsourcing`, on the same data volume. The shipped default
+  is `${user.home}/.qits/…`, and in a container with no `HOME` the native binary resolves
+  `user.home` to `?`, which H2 refuses outright — *"A file path that is implicitly relative to the
+  current working directory is not allowed"* — so the process **fails to boot**, at Flyway, before
+  anything serves. Measured, on the first rollout of this change: loud rather than silent, and cd
+  keeps the previous container while the new one restarts, but a deployment that adds the eventsourcing
+  module without adding this variable does not come up. The outbox itself is a second single-writer
+  H2 beside ci's own with its own Flyway lineage, holding exactly the events a publish could not
+  deliver — empty in a healthy process, so losing the *file* is survivable in a way that omitting the
+  *variable* is not.
 
 ## What is deliberately *not* here
 
