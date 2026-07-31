@@ -40,6 +40,17 @@ class EventStreamSubscriberTest {
 
   private static final Duration PATIENCE = Duration.ofSeconds(10);
 
+  /**
+   * The union every listener bean in this suite adds up to, with the recording raw listeners
+   * disarmed (their default, and re-asserted by their own suite's teardown). Shared by the two cases
+   * below so that adding a listener is one edit rather than two.
+   */
+  static final List<String> SUBSCRIPTION =
+      List.of("OtherThingHappened", "QuietlyHappened", TestEvents.RAW_ONLY_SIGNATURE, "ThingHappened");
+
+  static final String SUBSCRIBE_FRAME =
+      "{\"subscribe\":[\"OtherThingHappened\",\"QuietlyHappened\",\"RawOnlyHappened\",\"ThingHappened\"]}";
+
   @Inject EventStreamSubscriber subscriber;
   @Inject EventDispatcher dispatcher;
   @Inject ThingListener things;
@@ -58,14 +69,14 @@ class EventStreamSubscriberTest {
     // derivation, so a listener cannot be subscribed for and then not delivered to. What goes on
     // the wire is asserted where it goes on the wire, in the reconnect case below.
     //
-    // QuietlyHappened is the load-bearing entry: its listener is injected nowhere, which is what a
-    // real consumer's listener looks like, so this line is also the assertion that ArC's
-    // unused-bean removal leaves a bean reached only through Instance<QitsEventListener<?>> alone.
-    assertEquals(
-        List.of("OtherThingHappened", "QuietlyHappened", "ThingHappened"), dispatcher.signatures());
-    assertEquals(
-        "{\"subscribe\":[\"OtherThingHappened\",\"QuietlyHappened\",\"ThingHappened\"]}",
-        CanonicalJson.subscribeFrame(dispatcher.signatures()));
+    // Two entries are load-bearing, one per seam. QuietlyHappened's typed listener and
+    // RawOnlyHappened's raw one are both injected nowhere, which is what a real consumer's listener
+    // looks like, so this line is also the assertion that ArC's unused-bean removal leaves a bean
+    // reached only through Instance<QitsEventListener<?>> — or Instance<QitsRawEventListener> —
+    // alone. And RawOnlyHappened is a name no eventType() produces, so its presence is what makes
+    // this a union rather than the typed set with a longer comment.
+    assertEquals(SUBSCRIPTION, dispatcher.signatures());
+    assertEquals(SUBSCRIBE_FRAME, CanonicalJson.subscribeFrame(dispatcher.signatures()));
   }
 
   @Test
@@ -167,8 +178,7 @@ class EventStreamSubscriberTest {
 
     String frame = StubEventsServer.awaitSubscribeFrame(PATIENCE);
     assertNotNull(frame, "expected a subscribe frame after the reconnect");
-    assertEquals(
-        "{\"subscribe\":[\"OtherThingHappened\",\"QuietlyHappened\",\"ThingHappened\"]}", frame);
+    assertEquals(SUBSCRIBE_FRAME, frame);
     await(subscriber::connected, "the stream to be back up");
 
     // And it is a working stream, not merely an open socket.

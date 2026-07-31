@@ -4,11 +4,13 @@ import eu.wohlben.qits.eventsourcing.CausationScope;
 import eu.wohlben.qits.eventsourcing.QitsEvent;
 import eu.wohlben.qits.eventsourcing.QitsEventBus;
 import eu.wohlben.qits.eventsourcing.QitsEventListener;
+import eu.wohlben.qits.eventsourcing.QitsRawEventListener;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -24,6 +26,26 @@ import java.util.concurrent.atomic.AtomicReference;
  * so a subscription set is a set, and one whose listener nothing injects.
  */
 public final class TestEvents {
+
+  /**
+   * Which path a delivery came down, in the order the dispatcher took them — {@code "typed"} or
+   * {@code "raw"}, appended by every listener below as it is called.
+   *
+   * <p>Cross-listener ordering is not observable from inside any one bean, and "typed first, raw
+   * second" is a stated contract rather than an accident, so it needs somewhere shared to be seen.
+   * Static because the beans are application-scoped and the reader is a test; cleared by {@link
+   * #clearDeliveries()}.
+   */
+  private static final List<String> DELIVERIES = new CopyOnWriteArrayList<>();
+
+  /** The paths taken, in order, since the last clear. */
+  public static List<String> deliveries() {
+    return List.copyOf(DELIVERIES);
+  }
+
+  public static void clearDeliveries() {
+    DELIVERIES.clear();
+  }
 
   /** A two-field event with a nullable member, so the absent-field rule is exercised on the wire. */
   public record ThingHappened(UUID eventId, String what, Integer count, Instant at)
@@ -102,6 +124,7 @@ public final class TestEvents {
     public void onEvent(ThingHappened event) {
       // Read INSIDE onEvent, which is the only place the answer means anything: the dispatcher's
       // scope is established for the call and unwound after it.
+      DELIVERIES.add("typed");
       causes.add(Optional.ofNullable(CausationScope.current()));
       received.add(event);
     }
@@ -152,6 +175,7 @@ public final class TestEvents {
 
     @Override
     public void onEvent(ThingHappened event) {
+      DELIVERIES.add("typed");
       causes.add(Optional.ofNullable(CausationScope.current()));
       if (publishOnEvent.get()) {
         // No parent argument anywhere: whatever lands on the wire came from the ambient scope.
@@ -230,6 +254,142 @@ public final class TestEvents {
       // Nothing. Being registered is the whole of what it is here to prove.
     }
   }
+
+  // -- the raw seam --------------------------------------------------------------------------------
+
+  /**
+   * The signature {@link QuietRawListener} wants, named by nothing else in this suite on purpose: it
+   * is the entry in the subscribe frame that can only have come from a raw listener.
+   */
+  public static final String RAW_ONLY_SIGNATURE = "RawOnlyHappened";
+
+  /**
+   * A raw listener that records what it was given and can be told to misbehave. Not a bean itself —
+   * the two concrete subclasses below are, so that "a raw listener that throws does not stop the
+   * other raw listeners" is a claim about two different objects rather than about two calls on one.
+   *
+   * <p><b>Disarmed by default</b>, meaning it wants nothing: the subscribe frame is asserted
+   * literally elsewhere in this suite, so a recording listener that permanently wanted something
+   * would make every other test's contract its business.
+   */
+  public abstract static class RawRecorder implements QitsRawEventListener {
+
+    @Inject QitsEventBus bus;
+
+    private final AtomicReference<Set<String>> wanted = new AtomicReference<>(Set.of());
+    private final List<EventFrame> frames = new CopyOnWriteArrayList<>();
+    private final List<Optional<UUID>> causes = new CopyOnWriteArrayList<>();
+    private final AtomicBoolean failWhenAsked = new AtomicBoolean();
+    private final AtomicBoolean throwOnFrame = new AtomicBoolean();
+    private final AtomicBoolean publishOnFrame = new AtomicBoolean();
+    private final AtomicReference<OtherThingHappened> published = new AtomicReference<>();
+
+    @Override
+    public Set<String> signatures() {
+      if (failWhenAsked.get()) {
+        throw new IllegalStateException("a raw listener that cannot say what it wants");
+      }
+      return wanted.get();
+    }
+
+    @Override
+    public void onFrame(EventFrame frame) {
+      DELIVERIES.add("raw");
+      causes.add(Optional.ofNullable(CausationScope.current()));
+      frames.add(frame);
+      if (publishOnFrame.get()) {
+        // No parent argument: whatever lands on the wire came from the dispatcher's ambient scope,
+        // which is the property a raw consumer inherits unchanged from the typed one.
+        OtherThingHappened followUp = new OtherThingHappened("raw saw " + frame.name(), T0);
+        published.set(followUp);
+        bus.publish(followUp);
+      }
+      if (throwOnFrame.get()) {
+        throw new IllegalStateException("a raw listener that fails mid-frame");
+      }
+    }
+
+    /** Want exactly these signatures from now on. */
+    public void wants(String... signatures) {
+      wanted.set(Set.of(signatures));
+    }
+
+    /** Want everything — the literal the union collapses on. */
+    public void wantsEverything() {
+      wanted.set(Set.of(ALL));
+    }
+
+    /** Throw out of {@code signatures()}, which is a question dispatch and the subscriber both ask. */
+    public void failWhenAsked() {
+      failWhenAsked.set(true);
+    }
+
+    public void failWhileConsuming() {
+      throwOnFrame.set(true);
+    }
+
+    public void publishWhileConsuming() {
+      publishOnFrame.set(true);
+    }
+
+    /** Every frame handed over, verbatim. */
+    public List<EventFrame> frames() {
+      return List.copyOf(frames);
+    }
+
+    /** The ambient cause seen on each arrival, empty where there was none. */
+    public List<Optional<UUID>> causes() {
+      return List.copyOf(causes);
+    }
+
+    public OtherThingHappened published() {
+      return published.get();
+    }
+
+    public void reset() {
+      wanted.set(Set.of());
+      frames.clear();
+      causes.clear();
+      failWhenAsked.set(false);
+      throwOnFrame.set(false);
+      publishOnFrame.set(false);
+      published.set(null);
+    }
+  }
+
+  /** The raw listener the tests drive. */
+  @ApplicationScoped
+  public static class RecordingRawListener extends RawRecorder {}
+
+  /** A second one, so containment is provable between two raw listeners rather than within one. */
+  @ApplicationScoped
+  public static class SecondRawListener extends RawRecorder {}
+
+  /**
+   * The raw listener <b>nobody injects</b>, wanting a signature no event class in this suite has.
+   *
+   * <p>Two things at once, and both matter. It is the raw half of what {@link QuietListener} proves
+   * for the typed one — that ArC's unused-bean removal leaves a bean reached only through {@code
+   * Instance<QitsRawEventListener>} alone, with no {@code @Unremovable} anywhere — and because its
+   * signature is one no {@code eventType()} produces, its presence in the subscribe frame is the
+   * assertion that the union is a union at all.
+   */
+  @ApplicationScoped
+  public static class QuietRawListener implements QitsRawEventListener {
+
+    @Override
+    public Set<String> signatures() {
+      return Set.of(RAW_ONLY_SIGNATURE);
+    }
+
+    @Override
+    public void onFrame(EventFrame frame) {
+      // Nothing. Being subscribed for is the whole of what it is here to prove.
+    }
+  }
+
+  /** Where the follow-up events these listeners publish are dated. Matches the suite's clock. */
+  private static final Instant T0 = Instant.parse("2026-07-31T12:00:00Z");
 
   private TestEvents() {}
 }

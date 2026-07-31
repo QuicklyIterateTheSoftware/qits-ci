@@ -133,6 +133,13 @@ qits-ci is also the **first consumer** of the same bus: `service/…/bus/BuildSu
 receives its own announcement back off `/events/stream` and logs it. Nothing hangs off that yet; it
 is there because a producer nobody has ever seen consume is a bus with an untested second half.
 
+Consuming has **two seams**. `QitsEventListener<E>` names an event class and gets it deserialized —
+the one to reach for. `QitsRawEventListener` names a set of event *names* at runtime, may say `"*"`
+for all of them, and gets the frame itself; it exists for consumers whose interest is unknowable at
+startup, which is what a trigger reading selections out of other repositories' files is. The
+subscribe frame is the union of both, `"*"` collapsing it to `["*"]`, and a frame both want reaches
+both — typed first.
+
 **Every event carries a nullable `parentId`** — the event that caused it — so a release train is a
 chain in the log rather than a set of rows distinguishable from coincidence only by their
 timestamps. It is envelope data, stamped by `QitsEventBus.publish` and never declared by an event

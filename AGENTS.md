@@ -245,9 +245,9 @@ packaged artifact, not by surefire.
 ## The eventsourcing module
 
 `eventsourcing/` is a **library that has not moved out yet**. It is the platform's event bus client
-— `QitsEvent`, `QitsEventBus.publish`, `QitsEventListener` — and it lives here because qits-ci is
-its first consumer and for no other reason. The design is the superproject's
-`eventsourcing-plan.md`; what follows is what biting it feels like.
+— `QitsEvent`, `QitsEventBus.publish`, `QitsEventListener`, `QitsRawEventListener`, `CausationScope`
+— and it lives here because qits-ci is its first consumer and for no other reason. The design is the
+superproject's `eventsourcing-plan.md`; what follows is what biting it feels like.
 
 **THE EXTRACTION RULE: no `eu.wohlben.qits.ci.*` may be imported anywhere in that module, main or
 test.** The whole value of the arrangement is that lifting it out is a `git mv` plus a pom, and one
@@ -257,7 +257,7 @@ event classes go the other way round: `ci-events/` depends on `eventsourcing/`, 
 and it is allowed the `ci` namespace precisely because it is qits-ci's vocabulary rather than the
 library's.
 
-Five things are easy to get wrong here:
+Six things are easy to get wrong here:
 
 - **The canonical form is a wire contract, not a formatting preference.** qits-events stores the
   `payload` string verbatim and compares it byte-for-byte to tell an idempotent replay (200) from a
@@ -325,6 +325,38 @@ Five things are easy to get wrong here:
   `A → A` cannot see `A → B → A` and its presence would tell a reader that cycles are handled;
   detection belongs where the graph is visible. qits-events does reject a self-edge, because that one
   is decidable from a single row.
+- **There are two consuming seams, and the typed one is the one to reach for.** `QitsEventListener<E>`
+  names an event *class* at compile time; `QitsRawEventListener` names a `Set<String>` of event
+  *names* at runtime and receives the `EventFrame` itself. The raw one exists for consumers whose
+  interest is genuinely unknowable at startup — the trigger engine, whose selections live in
+  `.config/qits/ci-event-*.yml` files inside *other* repositories and change with every push. A raw
+  listener that could have named its event type is a typed listener with extra steps.
+
+  **The subscribe frame is the union of both, and `"*"` collapses it.** `EventDispatcher.signatures()`
+  unions every typed listener's signature with every raw listener's current set, sorted; the literal
+  `"*"` anywhere in that union makes the whole frame `["*"]`, because once one consumer wants
+  everything, narrowing the wire buys nothing and the surplus frames are dropped in dispatch at no
+  cost to anyone else. `SubscriptionUnionTest` exhausts the arithmetic; `EventStreamSubscriberTest`
+  asserts once, on the wire, that this is the function actually used.
+
+  **The bean set is resolved once; a raw listener's signature set is asked per subscribe and per
+  frame.** That is what makes it dynamic, and it has one edge worth knowing: a *widened* set takes
+  effect for dispatch immediately but reaches qits-events only at the next reconnect, since the
+  subscription lives on the connection and nothing re-dials on a listener changing its mind. So a
+  consumer whose interest can grow should return `Set.of(ALL)` once and filter for itself — which is
+  exactly what the trigger engine does — and the subscriber's "no signatures, no stream" rule then
+  never surprises anyone.
+
+  **Dispatch order is typed first, raw second, and it is a contract rather than an accident.** Typed
+  dispatch is the path that already existed and its listeners are the handlers for a specific event;
+  the raw seam is open-ended and, in its motivating case, does real work per frame. Both run for a
+  frame both want, each listener gets it once, and containment is symmetric — a throw out of
+  `onFrame`, or out of `signatures()`, costs that listener and nobody else, exactly as a throw out of
+  `onEvent` does, because the caller is still a socket callback. **Causation is identical too**: both
+  paths run inside the *same single* `CausationScope` of the arriving frame's id. What a raw listener
+  must not forget is that enqueueing work for another thread is past any thread-local's reach by
+  construction — carry `frame.id()` on whatever is enqueued and pass it to `publish(event, parent)` at
+  the far end, which is what `CiRun.triggerEventId` is for.
 
 Its own datasource, persistence unit and Flyway lineage (`eventsourcing`, `db/eventsourcing/migration`)
 follow the platform convention, for the ordinary reason plus one more: the split out of this repo
@@ -338,7 +370,11 @@ itself on `StartupEvent` because a listener bean exists. Registering a listener 
 bean" — no channel name, no annotation — and no `@Unremovable` is needed, because
 `EventDispatcher`'s `Instance<QitsEventListener<?>>` is what ArC counts as a use.
 `EventsourcingDarknessTest` asserts that rather than trusting it, since a removed listener
-subscribes to nothing and says nothing about it.
+subscribes to nothing and says nothing about it. **A `QitsRawEventListener` is registered the same
+way and survives removal for the same reason** — `Instance<QitsRawEventListener>` is a second
+injection point of the same kind — and the eventsourcing suite proves it the same way too, with a
+raw listener that is injected nowhere and whose signature (a name no `eventType()` produces) has to
+turn up in the subscribe frame.
 
 **The publish hook hangs off a seam, and it is a *second* seam beside `CdNotifier` rather than a
 widening of it.** `RunAnnouncer` (in `ci/control`, implemented in `service/`) is what keeps the `ci`
@@ -572,6 +608,12 @@ mechanism at all — which is what every service here was before the header land
   eighty-odd seconds are walked in milliseconds and `OutboxSweeper#sweep` is called rather than
   waited for. The scheduled tick is configured to 24h in the same file so it never lands in the
   middle of one.
+  **Every listener bean in `TestEvents` is shared by every `@QuarkusTest` in that module**, and one
+  of them asserts the subscribe frame *literally* — so the recording raw listeners want nothing by
+  default and are disarmed in an `@AfterEach` as well as a `@BeforeEach`. An arming that outlived its
+  class would change what the whole suite subscribes to. Routing claims are made by calling
+  `EventDispatcher#dispatch` directly; the socket is used only where the claim is about the wire,
+  which for the raw seam is the two resubscribe cases.
 - `CiPackagedSurfaceIT` is the only test that runs the **packaged artifact** — the fast-jar under
   `-DskipITs=false`, the binary under `-Dnative`. It is not a second boundary test and behaviour
   does not belong in it: it asserts the handful of things a `@QuarkusTest` structurally cannot see,

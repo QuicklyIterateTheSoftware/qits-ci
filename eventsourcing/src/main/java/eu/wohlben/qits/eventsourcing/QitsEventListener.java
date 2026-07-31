@@ -10,6 +10,13 @@ package eu.wohlben.qits.eventsourcing;
  * <p>Several listeners may take the same type; each gets the event. Zero listeners in the whole
  * application means the subscriber never dials at all — there is nothing to subscribe to.
  *
+ * <p><b>This is the seam to reach for.</b> Its sibling {@link QitsRawEventListener} takes frames for
+ * a set of names chosen at runtime, and exists for consumers whose interest is genuinely unknowable
+ * at startup — a trigger engine reading selections out of other repositories' files. It gives you
+ * the wire instead of an event class, so a raw listener that could have named its type is this
+ * interface with extra steps. The two coexist: the subscription set is the union of both, and a
+ * frame both want reaches both, typed first.
+ *
  * <p>A plain {@code @ApplicationScoped} bean is enough and no {@code @Unremovable} is needed: an
  * {@code Instance<QitsEventListener<?>>} injection point is what ArC's unused-bean removal counts
  * as a use. Worth knowing rather than assuming, because a listener that <em>was</em> removed

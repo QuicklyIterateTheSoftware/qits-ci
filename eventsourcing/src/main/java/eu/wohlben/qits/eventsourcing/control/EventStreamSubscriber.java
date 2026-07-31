@@ -19,8 +19,11 @@ import org.jboss.logging.Logger;
 
 /**
  * The listening half: one outbound websocket to qits-events' {@code /events/stream}, a subscribe
- * frame naming every signature some {@link eu.wohlben.qits.eventsourcing.QitsEventListener} bean
- * asked for, and every matching broadcast handed to {@link EventDispatcher}.
+ * frame naming every signature some listener bean asked for — typed {@link
+ * eu.wohlben.qits.eventsourcing.QitsEventListener}s and {@link
+ * eu.wohlben.qits.eventsourcing.QitsRawEventListener}s alike, unioned by {@link
+ * EventDispatcher#signatures()} and collapsed to {@code ["*"]} if any of them wants everything — and
+ * every matching broadcast handed to {@link EventDispatcher}.
  *
  * <p><b>It dials out and never listens.</b> The address is derived from {@code qits.events.url} —
  * the same value the publisher's {@code PUT} uses, with {@code http}/{@code https} swapped for
@@ -37,9 +40,11 @@ import org.jboss.logging.Logger;
  * subscription set per connection, so a reconnect that did not resubscribe would be a socket that
  * is up and deaf.
  *
- * <p>Nothing is dialled when the module is disabled, and nothing is dialled when the application
- * registered no listener at all — an open stream nobody reads is a connection qits-events maintains
- * for no one.
+ * <p>Nothing is dialled when the module is disabled, and nothing is dialled when the union is empty
+ * — an open stream nobody reads is a connection qits-events maintains for no one. Note what that
+ * asks of a raw listener whose interest is dynamic: it must want <em>something</em> by the time the
+ * application starts, and the answer to "I will not know until later" is {@code "*"} rather than an
+ * empty set, because nothing re-dials on a listener changing its mind.
  */
 @ApplicationScoped
 public class EventStreamSubscriber {
@@ -79,7 +84,7 @@ public class EventStreamSubscriber {
       return;
     }
     if (dispatcher.signatures().isEmpty()) {
-      LOG.debug("no QitsEventListener beans: not dialling the event stream");
+      LOG.debug("no listener wants a signature: not dialling the event stream");
       return;
     }
     start();

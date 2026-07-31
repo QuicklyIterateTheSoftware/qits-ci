@@ -7,8 +7,13 @@ import java.time.Instant;
  *
  * <p>The id is here because a live-only stream is not the end of the design — catch-up from the
  * event log is the next feature, and an envelope that carries its identity is what lets a consumer
- * one day say "everything after this one" without the frame format changing. Nothing in this module
- * uses it beyond logging today, and that is deliberate rather than an omission.
+ * one day say "everything after this one" without the frame format changing.
+ *
+ * <p><b>This record is public because {@link eu.wohlben.qits.eventsourcing.QitsRawEventListener}
+ * receives it.</b> It is the wire as it arrived and it is handed over unchanged and unshared-per-
+ * listener — every raw listener on one frame gets the same instance, which is safe because a record
+ * of strings is immutable. A typed listener never sees it: that path deserializes {@code payload}
+ * into the event class and the frame stays inside {@link EventDispatcher}.
  *
  * <p>Unknown fields are ignored (see {@link CanonicalJson}): a qits-events that grows a field must
  * not stop this subscriber from reading the ones it already understood.
