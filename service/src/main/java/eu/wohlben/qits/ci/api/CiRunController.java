@@ -113,6 +113,32 @@ public class CiRunController {
   }
 
   /**
+   * Everything CI has accepted and not finished — {@code QUEUED} or {@code RUNNING} — across every
+   * repository, newest first. No parameters, and step output is not carried (fetch a single run for
+   * that).
+   *
+   * <p><b>The one read here that is not scoped to a repository</b>, and the exception is the whole
+   * point: "what is CI doing right now" has no repository to scope to, and a client that had to ask
+   * per repository would have to know the repositories first and would still see a different instant
+   * in each answer. It became answerable only when a queued run became a row — before that, half of
+   * this list lived in an executor's queue where nothing could read it.
+   *
+   * <p>It carries no {@code ?limit=} because it needs none: what is active is bounded by what one
+   * single-threaded worker has accepted, not by how long the instance has been up.
+   *
+   * <p>{@code /active} is a literal segment and {@link #getRun}'s is a template, so JAX-RS matches
+   * this one first — a run whose id is the string {@code active} is not addressable, and no run id
+   * this service mints ever is.
+   */
+  @GET
+  @Path("/active")
+  @Operation(summary = "Every queued or running CI run, all repositories, newest first")
+  @APIResponse(responseCode = "200", description = "The active runs, without step output")
+  public ListRunsResponse listActiveRuns() {
+    return new ListRunsResponse(runService.activeRuns().stream().map(mapper::toDto).toList());
+  }
+
+  /**
    * One run with its steps, exit codes and captured output — plus, while it is running, the {@code
    * live} object holding the step in flight and what it has printed so far.
    *
@@ -151,8 +177,13 @@ public class CiRunController {
    *
    * <p>202 rather than 200, because the run is not finished when this returns — the container has
    * been asked, its daemon still has to answer with a terminal frame, and the worker still has rows
-   * to write. Poll the run for the outcome. Cancelling anything that is not running is a 409: a
-   * finished run has nothing to stop, and a cheerful 202 would be a claim the caller cannot check.
+   * to write. Poll the run for the outcome. Cancelling a run that has already finished is a 409: it
+   * has nothing to stop, and a cheerful 202 would be a claim the caller cannot check.
+   *
+   * <p>A run that is still {@code QUEUED} can be cancelled too, and it is the cheap case — there is
+   * no container to ask, so the run is recorded {@code FAILED} with no steps and the worker never
+   * picks it up. Still a 202: the shape of the answer does not change with how far along the run
+   * was, and the caller polls either way.
    *
    * <p>Deliberately <b>not</b> {@code @Operation(hidden = true)}, unlike everything else in this
    * service. The intake and the run reads are machine surfaces; this one is a button a person
@@ -161,10 +192,10 @@ public class CiRunController {
    */
   @POST
   @Path("/{runId}/cancel")
-  @Operation(summary = "Cancel a running CI run")
-  @APIResponse(responseCode = "202", description = "The run's container has been asked to stop")
+  @Operation(summary = "Cancel a queued or running CI run")
+  @APIResponse(responseCode = "202", description = "The run has been stopped or asked to stop")
   @APIResponse(responseCode = "404", description = "No such run")
-  @APIResponse(responseCode = "409", description = "The run is not running, so there is nothing to stop")
+  @APIResponse(responseCode = "409", description = "The run has already finished, so there is nothing to stop")
   public Response cancelRun(@PathParam("runId") String runId) {
     runService.cancel(runId);
     return Response.accepted().build();

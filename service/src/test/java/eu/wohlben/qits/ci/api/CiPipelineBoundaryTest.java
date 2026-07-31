@@ -20,6 +20,9 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,6 +55,9 @@ public class CiPipelineBoundaryTest {
 
   /** The all-zero sha git reports as the old id of a newly created branch. */
   private static final String ZERO_SHA = "0".repeat(40);
+
+  /** The two statuses a run can hold before it is finished. */
+  private static final List<String> ACTIVE = List.of("QUEUED", "RUNNING");
 
   private static final String CONFIG_GREEN =
       """
@@ -316,6 +322,188 @@ public class CiPipelineBoundaryTest {
     assertEquals(ids.stream().sorted().toList(), ids, "the listing must be sorted ascending");
   }
 
+  @Test
+  public void theActiveRouteIsTheListingAndNotASingleRunNamedActive() {
+    // /runs/active and /runs/{runId} share a prefix. JAX-RS ranks a literal segment above a
+    // template, so this resolves to the listing — but "surely the spec sorts it right" is exactly
+    // the kind of belief that surfaces as a silently 404ing client, so it is asserted rather than
+    // reasoned about. If the template ever captured it, requireRun("active") would 404 here.
+    given()
+        .when()
+        .get("/ci/api/runs/active")
+        .then()
+        .statusCode(200)
+        .contentType(ContentType.JSON)
+        // The listing envelope, not a run object: `runs` is present and the single-run shape is not.
+        .body("$", org.hamcrest.Matchers.hasKey("runs"))
+        .body("id", org.hamcrest.Matchers.nullValue())
+        .body("commitSha", org.hamcrest.Matchers.nullValue());
+  }
+
+  @Test
+  public void theActiveListingHoldsTheQueuedAndRunningRunsAndDropsThemWhenTheyFinish()
+      throws Exception {
+    // Staged against a genuinely occupied worker rather than a sleep: the run worker is
+    // single-threaded, so parking one run inside its first step is what makes the next one queue.
+    // Both states are then real at one instant and the endpoint is asked about that instant.
+    String busy = seedOrigin();
+    String waiting = seedOrigin();
+    String busySha = pushBranchWithConfig(busy, "ci-active-1", CONFIG_GREEN);
+    String waitingSha = pushBranchWithConfig(waiting, "ci-active-2", CONFIG_GREEN);
+
+    CompletableFuture<String> inStepZero = new CompletableFuture<>();
+    CountDownLatch release = new CountDownLatch(1);
+    fakeRunner.during(
+        0,
+        spec -> {
+          inStepZero.complete(spec.runId());
+          try {
+            release.await(30, TimeUnit.SECONDS);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        });
+
+    postReceive(busy, "ci-active-1", ZERO_SHA, busySha);
+    String runningId = inStepZero.get(30, TimeUnit.SECONDS);
+    // The intake writes the row before it answers, so this run is on the record the moment the 202
+    // lands — no polling needed for it to be findable.
+    postReceive(waiting, "ci-active-2", ZERO_SHA, waitingSha);
+
+    try {
+      List<Map<String, Object>> active = listActiveRuns();
+      List<String> ids = active.stream().map(run -> (String) run.get("id")).toList();
+      Map<String, Object> queued = runIn(active, waiting);
+      assertEquals("QUEUED", queued.get("status"), "the accepted run is on the record, not started");
+      assertEquals("RUNNING", runIn(active, busy).get("status"));
+      // Newest first across repositories, with no parameter asked for either.
+      assertTrue(
+          ids.indexOf((String) queued.get("id")) < ids.indexOf(runningId),
+          "the newer run must come first");
+      // Everything the suite finished earlier is terminal, so nothing terminal may be here.
+      assertTrue(
+          active.stream()
+              .noneMatch(run -> List.of("SUCCESS", "FAILED", "CONFIG_ERROR").contains(run.get("status"))),
+          "a finished run has no business in the active listing");
+      // The list shape excludes step output, exactly as the run listing does.
+      assertNull(queued.get("steps"), "the active listing must not carry step output");
+      assertNull(queued.get("live"));
+    } finally {
+      release.countDown();
+    }
+
+    awaitTerminalRun(busy);
+    awaitTerminalRun(waiting);
+    // Both are terminal now, so neither is here. That an empty answer means "CI is idle" rather than
+    // "nothing was accepted" is only sayable because a queued run is a row.
+    List<Map<String, Object>> afterwards = listActiveRuns();
+    assertTrue(
+        afterwards.stream()
+            .noneMatch(
+                run -> busy.equals(run.get("repoId")) || waiting.equals(run.get("repoId"))),
+        "a terminal run leaves the active listing");
+  }
+
+  private static Map<String, Object> runIn(List<Map<String, Object>> runs, String repoId) {
+    return runs.stream()
+        .filter(run -> repoId.equals(run.get("repoId")))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("no active run for " + repoId));
+  }
+
+  @Test
+  public void theRepositorySummaryCarriesTheNewestRunAndTheNewestMainRun() throws Exception {
+    String bothBranches = seedOrigin();
+    String featureOnly = seedOrigin();
+
+    // main first, then a newer run on another branch — so lastRun and lastMainRun differ and the
+    // endpoint has to answer two different questions about one repository.
+    postReceive(
+        bothBranches, "main", ZERO_SHA, pushBranchWithConfig(bothBranches, "main", CONFIG_GREEN));
+    awaitRunCount(bothBranches, 1);
+    postReceive(
+        bothBranches,
+        "ci-summary-feature",
+        ZERO_SHA,
+        pushBranchWithConfig(bothBranches, "ci-summary-feature", CONFIG_GREEN));
+    List<Map<String, Object>> bothRuns = awaitRunCount(bothBranches, 2);
+
+    postReceive(
+        featureOnly,
+        "ci-summary-only",
+        ZERO_SHA,
+        pushBranchWithConfig(featureOnly, "ci-summary-only", CONFIG_GREEN));
+    awaitRunCount(featureOnly, 1);
+
+    List<Map<String, Object>> summaries =
+        given()
+            .when()
+            .get("/ci/api/repositories/summary")
+            .then()
+            .statusCode(200)
+            .contentType(ContentType.JSON)
+            .extract()
+            .jsonPath()
+            .getList("repositories");
+
+    Map<String, Object> both = summaryFor(summaries, bothBranches);
+    Map<String, Object> lastRun = asMap(both.get("lastRun"));
+    Map<String, Object> lastMainRun = asMap(both.get("lastMainRun"));
+    assertEquals(bothRuns.get(0).get("id"), lastRun.get("id"), "lastRun is the newest, any branch");
+    assertEquals("ci-summary-feature", lastRun.get("branch"));
+    assertEquals("main", lastMainRun.get("branch"), "lastMainRun is the newest run on main");
+    assertEquals(bothRuns.get(1).get("id"), lastMainRun.get("id"));
+    // Full run DTOs in both slots, minus what no listing carries.
+    assertEquals("SUCCESS", lastRun.get("status"));
+    assertEquals("POST_RECEIVE", lastRun.get("triggerType"));
+    assertNotNull(lastRun.get("commitSha"));
+    assertNull(lastRun.get("steps"), "a summary carries no step output");
+    assertNull(lastRun.get("live"));
+
+    // A repository that has never run on main says so with a null rather than by omitting the key
+    // or by falling back to its newest run.
+    Map<String, Object> feature = summaryFor(summaries, featureOnly);
+    assertEquals("ci-summary-only", asMap(feature.get("lastRun")).get("branch"));
+    assertNull(feature.get("lastMainRun"), "no run on main is a null lastMainRun");
+
+    // Ascending by repositoryId, the same ordering GET /ci/api/repositories answers with and for the
+    // same reason: a client diffing the two must not have to re-sort either.
+    List<String> ids = summaries.stream().map(s -> (String) s.get("repositoryId")).toList();
+    assertEquals(ids.stream().sorted().toList(), ids, "summaries must be sorted ascending");
+    // And it is the same set of repositories, not a different one.
+    assertEquals(
+        given().when().get("/ci/api/repositories").then().extract().jsonPath()
+            .getList("repositoryIds"),
+        ids,
+        "the summary must cover exactly the repositories the id listing names");
+  }
+
+  private static Map<String, Object> summaryFor(
+      List<Map<String, Object>> summaries, String repositoryId) {
+    return summaries.stream()
+        .filter(summary -> repositoryId.equals(summary.get("repositoryId")))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("no summary for " + repositoryId));
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Map<String, Object> asMap(Object value) {
+    assertNotNull(value, "expected a run object");
+    return (Map<String, Object>) value;
+  }
+
+  private List<Map<String, Object>> listActiveRuns() {
+    return given()
+        .when()
+        .get("/ci/api/runs/active")
+        .then()
+        .statusCode(200)
+        .contentType(ContentType.JSON)
+        .extract()
+        .jsonPath()
+        .getList("runs");
+  }
+
   // --- the wire contract the git host speaks (CiPostReceiveNotifier's payload) ---
 
   private void postReceive(String repoId, String branch, String oldSha, String newSha) {
@@ -359,14 +547,22 @@ public class CiPipelineBoundaryTest {
     return clone;
   }
 
-  /** Clones, commits the config on a new branch, pushes it; returns the pushed sha. */
+  /**
+   * Clones, commits the config on a branch, pushes it; returns the pushed sha. {@code main} is the
+   * branch every seeded origin is already on, so it is committed to rather than created.
+   */
   private String pushBranchWithConfig(String repoId, String branch, String config)
       throws Exception {
     Path clone = cloneRepo(repoId);
-    git(clone, "checkout", "-q", "-b", branch);
+    if (!"main".equals(branch)) {
+      git(clone, "checkout", "-q", "-b", branch);
+    }
     Path configFile = clone.resolve(".config/qits/ci-post-receive.yml");
     Files.createDirectories(configFile.getParent());
     Files.writeString(configFile, config);
+    // A second push of the same config to the same repository would otherwise be an empty commit,
+    // which git refuses — and a repository needs several pushes to have a run history worth reading.
+    Files.writeString(clone.resolve("branch.txt"), branch + " " + UUID.randomUUID() + "\n");
     commitAll(clone, "add ci config");
     String sha = git(clone, "rev-parse", "HEAD").trim();
     git(clone, "push", "-q", "origin", branch);
@@ -407,12 +603,18 @@ public class CiPipelineBoundaryTest {
     return fail("no " + expected + " CI runs for " + repoId + " within the deadline");
   }
 
-  /** Deadline-polls the run list until the (single) run reaches a terminal status. */
+  /**
+   * Deadline-polls the run list until the (single) run reaches a terminal status.
+   *
+   * <p>Both non-terminal states are named. {@code QUEUED} is a row now, so a run that has been
+   * accepted and not yet started reaches this listing — treating it as terminal would let every
+   * caller here assert against a run that has not run.
+   */
   private Map<String, Object> awaitTerminalRun(String repoId) throws Exception {
     long deadline = System.currentTimeMillis() + 30_000;
     while (System.currentTimeMillis() < deadline) {
       List<Map<String, Object>> runs = listRuns(repoId);
-      if (runs.size() == 1 && !"RUNNING".equals(runs.get(0).get("status"))) {
+      if (runs.size() == 1 && !ACTIVE.contains(runs.get(0).get("status"))) {
         return runs.get(0);
       }
       Thread.sleep(100);

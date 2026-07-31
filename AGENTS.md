@@ -156,9 +156,67 @@ Two more things live in this package and belong to it rather than to `ci/`:
   and two implementations of it drift into one that is not applied.
 - **Cancellation** is a flag plus a `Cancel` frame. A cancelled step still *finishes* — the daemon
   answers with a terminal frame — so the worker's await completes normally and cancelledness is read
-  from `CiRunService`'s own flag, never inferred from how the call came back. Before a step has
-  started there is nothing to cancel, so the launch is torn down instead, which completes the same
-  await at once.
+  from `CiRunService`'s own flag, never inferred from how the call came back. Between the launch and
+  the first frame there is no step to cancel, so the launch is torn down instead, which completes the
+  same await at once.
+
+  **Cancelling a run that has not started at all never reaches this package**, and that is the shape
+  a `QUEUED` row bought. `CiRunService.cancel` finds the row still queued, writes it `FAILED` in its
+  own transaction, and the worker's claim then sees a row that is no longer `QUEUED` and drops it —
+  no container, no `Cancel` frame, no launch to tear down. The flag is still raised, and that is not
+  belt-and-braces for its own sake: cancel runs on the request thread and the claim runs on the run
+  worker, so if the worker won the race and turned the row `RUNNING` in between, the flag is what
+  stops the run before its first container. Neither thread has to win for the answer to be right.
+
+## The run queue, and what a run row means
+
+**A run is a row from the moment it is accepted.** `CiRunService.onPostReceive` and
+`onEventTrigger` both `INSERT` a `QUEUED` row before they return; the worker's first act is
+`startQueued`, which flips it to `RUNNING` inside its own transaction *and reads the status back in
+the same transaction*, so a run that was cancelled while it waited is never picked up. Everything
+from there down is unchanged.
+
+**This revised the recording rule on purpose, and the old wording is worth having in front of you.**
+It read: *a run is only ever recorded when it says something true about a commit* — which was a
+statement about when the `INSERT` happens, and it is what made the queue invisible. It now reads:
+
+> **A run row exists from the moment the work is accepted, and it is removed again if it turns out to
+> describe nothing that happened.**
+
+What a *finished* worker leaves behind is unchanged outcome for outcome. The three cases that
+recorded nothing still record nothing — no config file (opt-in), a commit force-pushed away, a git
+host that could not be reached — but they reach that by **discarding** a row that already exists
+rather than by never writing one, through the same `discardRun` the mid-run `SHA_GONE` backstop uses.
+`CONFIG_ERROR` and the green/red outcomes finish the accepted row instead of inserting a second one.
+The only observable difference is a transient `QUEUED` row in between, which `GET
+/ci/api/runs/active` and, briefly, a repository's own listing will show.
+
+Two of those three deserve their reasoning restated, because "there is a row, why not keep it" is the
+tempting wrong answer. A repository that declares no pipeline must not accumulate a row per push, or
+opt-in stops meaning anything. And an unreachable git host must not leave a red row: **a read failure
+must not invent a gate**, and a red row is exactly an invented gate — the commit is very likely fine
+and this process simply could not ask.
+
+**The trap this closes is half of one, and say exactly that.** `QUEUED` survives a restart:
+`sweepInterrupted` re-enqueues those rows, oldest first, so a redeploy landing between a push and its
+build no longer eats the build and no longer needs a hand-replayed post-receive. `RUNNING` still dies:
+those rows are marked `FAILED`, because their in-flight step went with the process and the launch
+table is memory. Nothing here adds durability beyond the row, which is what keeps the rest of the
+restart story free.
+
+**The one gap is an event-triggered run left `QUEUED`, and it is discarded rather than re-enqueued.**
+An `EventRun` carries the event's payload and its already-parsed pipeline; neither is on the row, and
+the payload reaches the step containers as `$QITS_EVENT_PAYLOAD`. Re-enqueueing from the row alone
+would run a re-read pipeline against an empty payload — a different run than the one that was
+accepted, recorded as though it were the same one. Discarding restores exactly the pre-queue
+behaviour (the closure died, nothing was recorded) and leaves the unique constraint clear, so a
+redelivery of that event runs it properly. Persisting the payload is what would close it; it is a
+schema change, not a line in the sweep.
+
+**`onStart` skips test mode, so `sweepInterrupted` is package-private and the suite drives it.** A
+claim about a restart is made by seeding the rows a dead process would have left and calling it —
+`CiQueuedRunTest` does exactly that, including the ordering, which is `createdAt` because the worker
+is FIFO and a restart must not reorder a backlog.
 
 ## Addressing
 
@@ -167,6 +225,14 @@ Two more things live in this package and belong to it rather than to `ci/`:
 **`quarkus.rest.path=/ci/api` lives in `service/src/main/resources/application.properties` and the
 suite inherits it.** So a resource's `@Path` is relative to `/ci/api` and must never repeat `ci`.
 Tests address the absolute path, which is what makes them catch a prefix regression.
+
+**`/ci/api/runs/active` sits under `/ci/api/runs/{runId}`, and only JAX-RS' sorting rule keeps them
+apart.** A literal segment outranks a template, so the listing wins — but a regression there would
+show up as the client's rail 404ing and nothing else, so `CiPipelineBoundaryTest` asserts the route
+resolves to the listing envelope rather than to a lookup for a run named `active`. Same for
+`/ci/api/repositories/summary` under `/ci/api/repositories`, which is the easier case (that one has
+no template to lose to). Neither adds a literal Vert.x route, so
+`quarkus.quinoa.ignored-path-prefixes` is unchanged — `/api` already covers both.
 
 **`CiTokenFilter` matches on `UriInfo.getPath()`, which is relative to `quarkus.rest.path`.** It
 matches the literal `events`. Move or rename `CiEventController`'s `@Path` and the guard stops
@@ -512,6 +578,13 @@ follows is what biting it feels like.
   equal, and `CiEventTriggerDedupeTest` pins that H2 agrees rather than trusting it. The constraint
   kills replays, not descendants, which is why it is **no loop guard**: see the footgun in
   `README.md`, and note that nothing here is built that the future DAG feature would have to undo.
+
+  **It fires at accept now**, since the run row is written by `onEventTrigger` before it returns
+  rather than by the worker later. Nothing about the semantics moved with it: a redelivery still hits
+  the constraint and is still dropped as already-triggered, just on `ci-trigger-worker` instead of
+  `ci-run-worker`, and before a queue slot is spent rather than after. The `NULL` behaviour is
+  untouched — post-receive rows still carry a null `trigger_event_id`, they are just inserted a few
+  milliseconds earlier in the life of a push.
 - **The trigger file parser is strict where `ci-post-receive.yml` is lenient**, and the asymmetry is
   the point rather than an inconsistency. In a pipeline an unread key costs a feature; in a
   *selection* it costs correctness, because an absent `when:` means **unconditional** — so a mistyped
@@ -610,6 +683,30 @@ into a live table: add it **with a default**, so every existing row is written c
 than getting a silent one. Its unique constraint is the trigger engine's at-most-once guarantee and
 its `NULL` behaviour is load-bearing — see "The trigger engine".
 
+**`V4__queued_runs.sql` is the worked example of the other kind: widening a check constraint the
+original script never named.** V1 declared the status domain inline — `status varchar(32) not null
+check (status in (...))` — so H2 generated the name, and there is no portable way to drop an
+anonymous constraint. Three things came out of that and none of them should be undone:
+
+- **The generated name was measured, not guessed.** `CONSTRAINT_76`, on a database created by V1 and
+  on this platform's live `~/.qits/data/ci/h2/ci.mv.db` alike; H2 derives it from an object counter
+  and V1 is the same script everywhere. Reproduce it with `java -cp <h2.jar> org.h2.tools.RunScript`
+  over the lineage and `select constraint_name, constraint_type from
+  information_schema.table_constraints where table_name='CI_RUN'`.
+- **The replacement is named** (`ck_ci_run_status`), so the next widening is one line with nothing to
+  measure.
+- **The migration then writes one `QUEUED` row and deletes it**, and that probe is the load-bearing
+  part. A database whose V1 check landed under a different generated name would take the drop as a
+  no-op, add the named constraint beside the surviving one, and reject **every** accepted run at
+  insert — silently in every JVM test, loudly only in the deployment. That is precisely this repo's
+  worst failure family (the `AUTO_SERVER=TRUE` that killed the binary, the eventsourcing datasource
+  url). The probe turns it into a Flyway failure at boot with the offending constraint named in the
+  error, and cd's health gate keeps the previous container. Verified by renaming the constraint in a
+  scratch database and watching V4 refuse to apply.
+
+Add a status value ⇒ add a line to `ck_ci_run_status`. The enum's `@Enumerated(EnumType.STRING)` is
+not the guard; the constraint is, and it will reject what the enum happily writes.
+
 ## Authentication
 
 Authentication happens at `qits-gateway`. This service resolves a principal from a trusted header
@@ -654,8 +751,9 @@ mechanism at all — which is what every service here was before the header land
   machine surfaces stay out. For a long time that left `paths: {}`, then one path (`POST
   /ci/api/runs/{runId}/cancel`, the one operation here a person invokes on purpose), because no
   client read anything. **qits-spa-ci changed the answer, not the criterion**: it reads `GET
-  /ci/api/repositories`, `GET /ci/api/runs` and `GET /ci/api/runs/{runId}` on every page it draws, so
-  those are the JSON API a first-party client consumes and their `@Operation(hidden = true)` is gone.
+  /ci/api/repositories`, `GET /ci/api/repositories/summary`, `GET /ci/api/runs`, `GET
+  /ci/api/runs/active` and `GET /ci/api/runs/{runId}` on every page it draws, so those are the JSON
+  API a first-party client consumes and none of them carries `@Operation(hidden = true)`.
   Keeping them hidden would have meant this file omitted the entire contract that client depends on,
   and a breaking change to `CiRunDto` would have landed with an **empty diff** — which is the exact
   opposite of why the file is committed. `POST /ci/api/events/post-receive` stays hidden and the
@@ -769,9 +867,13 @@ mechanism at all — which is what every service here was before the header land
   the retired approach alive in the test sources after it left the main ones. Real step semantics are
   proven in exactly one place, `CiDaemonGateIT`, against a real container. The two fakes are
   duplicated on purpose — the modules do not share a test classpath.
-  The ci module's copy also carries a `during(stepIndex, …)` hook: it runs something on the worker
-  thread *while* a step is executing, which is how a cancellation arriving mid-step is staged with no
-  sleep and no race about when "mid-step" is.
+  Both copies carry a `during(stepIndex, …)` hook: it runs something on the worker thread *while* a
+  step is executing, which is how a cancellation arriving mid-step is staged with no sleep and no
+  race about when "mid-step" is. It is also how `QUEUED` is staged at all — the run worker is
+  single-threaded, so a run parked inside its first step really does hold the next one in the queue,
+  and both states are then real at one instant the test controls. That is why the service module's
+  copy grew the hook too: `RUNNING` and `QUEUED` had to be observable over HTTP, which is where the
+  SPA sees them.
 - **Two classes in this repo run with the event bus on, and they share one profile deliberately.**
   Everything else inherits the shipped `%test` darkness, so "the suite dials nothing" is the default
   rather than an arrangement each test makes; `BuildSuccessfulPublishTest` turns it back on through a

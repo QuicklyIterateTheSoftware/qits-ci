@@ -1,15 +1,20 @@
 package eu.wohlben.qits.ci.persistence;
 
 import eu.wohlben.qits.ci.entity.CiRun;
+import eu.wohlben.qits.ci.entity.CiRunStatus;
 import io.quarkus.hibernate.orm.panache.PanacheRepositoryBase;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.util.List;
+import java.util.Optional;
 
 /** Panache DAO for {@link CiRun} (keyed by its String UUID row id). */
 @ApplicationScoped
 public class CiRunRepository implements PanacheRepositoryBase<CiRun, String> {
 
   private static final String NEWEST_FIRST = "repoId = ?1 order by createdAt desc, id desc";
+
+  private static final String NEWEST_FIRST_ON_BRANCH =
+      "repoId = ?1 and branch = ?2 order by createdAt desc, id desc";
 
   /** All runs recorded for a repository, newest-first. */
   public List<CiRun> listByRepoIdNewestFirst(String repoId) {
@@ -27,6 +32,51 @@ public class CiRunRepository implements PanacheRepositoryBase<CiRun, String> {
    */
   public List<CiRun> listByRepoIdNewestFirst(String repoId, int limit) {
     return find(NEWEST_FIRST, repoId).range(0, limit - 1).list();
+  }
+
+  /**
+   * The newest run recorded for a repository on any branch, or empty when it has none — the {@code
+   * lastRun} half of {@code GET /ci/api/repositories/summary}.
+   */
+  public Optional<CiRun> newestFor(String repoId) {
+    return find(NEWEST_FIRST, repoId).firstResultOptional();
+  }
+
+  /**
+   * The newest run recorded for a repository on one branch, or empty when it has none — the {@code
+   * lastMainRun} half of the same summary.
+   *
+   * <p>A separate query rather than a filter over {@link #newestFor}'s answer, because the two
+   * questions have different answers and the second one's answer can be arbitrarily far down the
+   * list: a repository with a hundred feature-branch runs since its last push to {@code main} would
+   * need the whole history read to find it.
+   */
+  public Optional<CiRun> newestForBranch(String repoId, String branch) {
+    return find(NEWEST_FIRST_ON_BRANCH, repoId, branch).firstResultOptional();
+  }
+
+  /**
+   * Every run that is accepted but not finished — {@code QUEUED} or {@code RUNNING} — across all
+   * repositories, newest-first. The read behind {@code GET /ci/api/runs/active}.
+   *
+   * <p>Unscoped by repository on purpose, and it is the one read on this surface that is: the
+   * question it answers is "what is CI doing right now", which has no repository to scope to. It is
+   * bounded by what a single-threaded worker can have accepted rather than by a limit, so it does
+   * not carry one.
+   */
+  public List<CiRun> listActiveNewestFirst() {
+    return list(
+        "status in (?1, ?2) order by createdAt desc, id desc",
+        CiRunStatus.QUEUED,
+        CiRunStatus.RUNNING);
+  }
+
+  /**
+   * Every run left {@code QUEUED} by a previous process, oldest-first — what the startup sweep
+   * re-enqueues, in the order the runs were accepted so a restart does not reorder a backlog.
+   */
+  public List<CiRun> listQueuedOldestFirst() {
+    return list("status = ?1 order by createdAt, id", CiRunStatus.QUEUED);
   }
 
   /**

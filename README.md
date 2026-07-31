@@ -95,8 +95,10 @@ rest of qits it reaches over a URL it is configured with:
 |---|---|---|
 | in | `POST /ci/api/events/post-receive` — `{repoId, branch, oldSha, newSha}`, one per updated branch ref | guarded by `qits.ci.token` (`X-CI-Token`) |
 | in | `GET /ci/api/runs?repositoryId={repoId}[&limit={n}]`, `GET /ci/api/runs/{runId}` | not token-guarded; they carry build logs, so a deployment must keep them behind its auth policy |
+| in | `GET /ci/api/runs/active` → `{"runs": [...]}` — every `QUEUED` or `RUNNING` run on the instance, all repositories, newest first, no parameters | same; unscoped, because "what is CI doing right now" has no repository to scope to |
 | in | `GET /ci/api/repositories` → `{"repositoryIds": [...]}` — the distinct repo ids this instance has runs for, ascending | same; it is the one read here that is not scoped to a repository, because it answers *which* |
-| in | `POST /ci/api/runs/{runId}/cancel` → 202, 409 on a run that is not running | same: no token, behind the deployment's auth policy |
+| in | `GET /ci/api/repositories/summary` → `{"repositories": [{repositoryId, lastRun, lastMainRun}]}` — ascending by id, full run objects, `lastMainRun` null when there is none | same; it is the id listing plus the two runs a client would otherwise make a request per repository to find |
+| in | `POST /ci/api/runs/{runId}/cancel` → 202, 409 on a run that has already finished | same: no token, behind the deployment's auth policy |
 | in | `ws://…/ci/daemon` — the socket each step container's daemon dials **out** to | authenticated by a host-minted per-container secret, not by any token |
 | out | where the git host answers, for ci's **own** `git fetch` of the pushed ref — ci appends `/git/<repoId>` | `qits.ci.git-host-url` |
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
@@ -128,6 +130,23 @@ answer rather than an arbitrary sample. There is deliberately **no `?offset=` an
 offset over a list that grows at the head re-shows rows under concurrent inserts, and the two things
 anyone wants (the newest n, then one specific run) are both already covered. A real history walk
 wants `before=<createdAt>`, and that waits for a requirement.
+
+**Two reads exist because the alternative was a request per repository.** `GET
+/ci/api/repositories/summary` is `GET /ci/api/repositories` with, per id, the repository's newest run
+on any branch (`lastRun`) and its newest run on `main` (`lastMainRun`, null when it has none, and
+frequently the same run as `lastRun`). A client drawing "which repositories are there and how is each
+doing" used to call the id listing and then one bounded run listing per id — n+1 round trips over the
+gateway for one question. Both slots carry the **full** run object, minus `steps` and `live` as every
+listing here is, because a second "run summary" type would drift from `CiRunDto` for nothing. The
+older endpoint keeps returning bare `repositoryIds` and keeps its name: it names ids, this one names
+objects about *runs*, and neither claims ci owns a repository.
+
+`GET /ci/api/runs/active` is the other one: every run on the instance that is `QUEUED` or `RUNNING`,
+across all repositories, newest first, no parameters. It is the only read here that is not scoped to
+a repository *and* not a listing of them — "what is CI doing right now" has no repository to scope to,
+and asking per repository would mean knowing the repositories first and still seeing a different
+instant in each answer. It needs no `?limit=`: what is active is bounded by what one single-threaded
+worker has accepted, not by uptime. It became answerable only when a queued run became a row (below).
 
 The event sender is the git host's post-receive hook, which lives in
 [qits-artifacts](https://github.com/QuicklyIterateTheSoftware/qits-artifacts) (`CiPostReceiveNotifier`).
@@ -461,14 +480,47 @@ transport. The relay is memory and dies with the process — the persisted tail 
 the record.
 
 `POST /ci/api/runs/{runId}/cancel` answers 202 and asks the in-flight container to stop. The step it
-was on is recorded `FAILED` with "cancelled" in its output and the rest `SKIPPED`. Cancelling a run
-that is not running is a 409. It is the one operation here a person invokes on purpose, so — unlike
-the intake and the run reads — it is **not** hidden from `docs/openapi.yml`.
+was on is recorded `FAILED` with "cancelled" in its output and the rest `SKIPPED`. A run still
+`QUEUED` can be cancelled too, and it is the cheap case: there is no container to ask, so the run is
+recorded `FAILED` with no steps and the worker never picks it up. Cancelling a run that has already
+finished is a 409. It is the one operation here a person invokes on purpose, so — unlike the intake —
+it is **not** hidden from `docs/openapi.yml`.
 
-A restart mid-run costs that run, honestly: on boot, runs left `RUNNING` are marked `FAILED`,
-containers carrying the `qits.ci.run` label are removed, and a daemon from a previous life that
-dials in presents a secret this process does not know and is closed 1008. No durability is added for
-this by design — the launch table is memory, and that is what makes the restart story free.
+## What a restart costs
+
+**A run is a row from the moment it is accepted.** The intake and the trigger engine both `INSERT`
+before they answer, with status `QUEUED`, and the worker flips it to `RUNNING` when it dequeues it.
+Before that, a queued run was a closure on a single-threaded executor and nothing else — invisible to
+every read surface, and gone with the process. That was the lossy intake: a redeploy landing between
+the push and the build lost the build with no row anywhere to say so, and the fix was to POST the
+post-receive again by hand.
+
+**The trap is half dead, and the halves are worth stating exactly.** On boot:
+
+- runs left `RUNNING` are still marked `FAILED` — their in-flight step died with the process, the
+  launch table is memory, and no re-run could be honest about a step that had already started;
+- runs left `QUEUED` are **re-enqueued**, oldest first, because they never started and the row says
+  everything needed to start them. Nothing is lost and nothing has to be replayed;
+- containers carrying the `qits.ci.run` label are removed, and a daemon from a previous life that
+  dials in presents a secret this process does not know and is closed 1008.
+
+The one exception is an **event-triggered** run left `QUEUED`: it is discarded rather than
+re-enqueued. Its pipeline arrives already parsed and its event payload reaches the step containers as
+`$QITS_EVENT_PAYLOAD`, and neither is on the row — so re-running it from the row would run a
+different pipeline against an empty payload. Discarding restores exactly the pre-queue behaviour and
+leaves the dedupe constraint clear, so a redelivery of that event runs it properly. Persisting the
+payload is what would close it, and it is a schema change rather than a line of code.
+
+No durability is added beyond the row by design — the launch table is still memory, and that is what
+keeps the rest of the restart story free.
+
+**So the recording rule is revised, deliberately.** It used to be "a run is only ever recorded when
+it says something true about a commit", which was a statement about when the `INSERT` happens. It is
+now: *a run row exists from the moment the work is accepted, and it is removed again if it turns out
+to describe nothing that happened.* What a finished worker leaves behind is unchanged outcome for
+outcome — no config file, a vanished commit and an unreachable git host all still leave **no row** —
+the difference is a transient `QUEUED` row in between, which `GET /ci/api/runs/active` and, briefly,
+a repository's own listing will show.
 
 ## Deploying it
 

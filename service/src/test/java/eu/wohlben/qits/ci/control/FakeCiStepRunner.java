@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * The step-runner seam for the service suite — a <b>scripted-event</b> fake, the same shape the ci
@@ -48,6 +49,7 @@ public class FakeCiStepRunner implements CiStepRunner {
   // proxy's own (empty) field, not the contextual instance's.
   private final List<StepSpec> executed = new ArrayList<>();
   private final Map<Integer, Script> scripted = new HashMap<>();
+  private final Map<Integer, Consumer<StepSpec>> during = new HashMap<>();
   private final List<String> cancelled = new ArrayList<>();
 
   public List<StepSpec> executed() {
@@ -62,9 +64,23 @@ public class FakeCiStepRunner implements CiStepRunner {
     scripted.put(stepIndex, Script.of(result, chunks));
   }
 
+  /**
+   * Run something on the run worker <b>while</b> this step is executing — the same hook the ci
+   * module's copy carries, and it is here for the same reason: it is how a test stages the states
+   * that only exist while a run is in flight without a sleep and without a race.
+   *
+   * <p>At this level that is what makes {@code RUNNING} and {@code QUEUED} observable over HTTP. The
+   * worker is single-threaded, so a run parked inside its first step really does hold the next one
+   * in the queue, and the read surface really is being asked about that instant.
+   */
+  public void during(int stepIndex, Consumer<StepSpec> action) {
+    during.put(stepIndex, action);
+  }
+
   public void reset() {
     executed.clear();
     scripted.clear();
+    during.clear();
     cancelled.clear();
   }
 
@@ -78,6 +94,10 @@ public class FakeCiStepRunner implements CiStepRunner {
     executed.add(spec);
     Script script = scripted.getOrDefault(spec.stepIndex(), green(spec.stepIndex()));
     listener.onStarted();
+    Consumer<StepSpec> midStep = during.get(spec.stepIndex());
+    if (midStep != null) {
+      midStep.accept(spec);
+    }
     for (String chunk : script.chunks()) {
       listener.onChunk(chunk);
     }

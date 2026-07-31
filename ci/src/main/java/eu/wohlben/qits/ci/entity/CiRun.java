@@ -46,8 +46,10 @@ public class CiRun extends PanacheEntityBase {
    * created and repeated into every one of its step containers, so a deploy landing mid-run cannot
    * make step 3 speak a different protocol than step 1, and the row records forever what ran it.
    *
-   * <p>Null on a run that never launched a container (a {@code CONFIG_ERROR}), and on every run
-   * recorded before the daemon existed.
+   * <p>Null on a run that never launched a container — one still {@code QUEUED}, a {@code
+   * CONFIG_ERROR}, one cancelled before it started — and on every run recorded before the daemon
+   * existed. It is written when the first container is about to launch rather than when the row is
+   * inserted, which is what keeps that true now that the row predates the pin.
    */
   @Column(name = "daemon_version", length = 64)
   public String daemonVersion;

@@ -15,6 +15,12 @@ import java.util.List;
  * steps} legitimately holds fewer entries than the pipeline declared, and {@code live} is what says
  * which step the gap belongs to instead of leaving it looking like a run with missing steps.
  *
+ * <p><b>{@code QUEUED} is a run that has been accepted and not started</b>, and a client must treat
+ * it as non-terminal: it has no {@code finishedAt}, no {@code daemonVersion}, no steps and no {@code
+ * live} — there is nothing running to be live about — and it will move on its own, so keep polling.
+ * The two active statuses are {@code QUEUED} and {@code RUNNING}; the three terminal ones are {@code
+ * SUCCESS}, {@code FAILED} and {@code CONFIG_ERROR}, and a cancelled run is {@code FAILED}.
+ *
  * <p>{@code daemonVersion} is the {@code qits-ci-daemon} build every one of this run's containers
  * ran, pinned once at run creation — so the row records forever what produced its results.
  *

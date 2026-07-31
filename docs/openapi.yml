@@ -48,6 +48,7 @@ components:
     CiRunStatus:
       type: string
       enum:
+      - QUEUED
       - RUNNING
       - SUCCESS
       - FAILED
@@ -96,6 +97,13 @@ components:
           type: array
           items:
             type: string
+    ListRepositorySummariesResponse:
+      type: object
+      properties:
+        repositories:
+          type: array
+          items:
+            $ref: "#/components/schemas/RepositorySummaryDto"
     ListRunsResponse:
       type: object
       properties:
@@ -103,6 +111,15 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/CiRunDto"
+    RepositorySummaryDto:
+      type: object
+      properties:
+        repositoryId:
+          type: string
+        lastRun:
+          $ref: "#/components/schemas/CiRunDto"
+        lastMainRun:
+          $ref: "#/components/schemas/CiRunDto"
 paths:
   /ci/api/repositories:
     get:
@@ -114,6 +131,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ListRepositoryIdsResponse"
+      tags:
+      - Ci Repository Controller
+  /ci/api/repositories/summary:
+    get:
+      summary: Each repository with its newest run and its newest run on main
+      responses:
+        "200":
+          description: "One entry per repository, ascending by id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListRepositorySummariesResponse"
       tags:
       - Ci Repository Controller
   /ci/api/runs:
@@ -144,6 +173,18 @@ paths:
             \ a positive integer"
       tags:
       - Ci Run Controller
+  /ci/api/runs/active:
+    get:
+      summary: "Every queued or running CI run, all repositories, newest first"
+      responses:
+        "200":
+          description: "The active runs, without step output"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListRunsResponse"
+      tags:
+      - Ci Run Controller
   /ci/api/runs/{runId}:
     get:
       summary: "One CI run with its steps, output and — while it runs — its live step"
@@ -166,7 +207,7 @@ paths:
       - Ci Run Controller
   /ci/api/runs/{runId}/cancel:
     post:
-      summary: Cancel a running CI run
+      summary: Cancel a queued or running CI run
       parameters:
       - name: runId
         in: path
@@ -175,11 +216,11 @@ paths:
           type: string
       responses:
         "202":
-          description: The run's container has been asked to stop
+          description: The run has been stopped or asked to stop
         "404":
           description: No such run
         "409":
-          description: "The run is not running, so there is nothing to stop"
+          description: "The run has already finished, so there is nothing to stop"
       tags:
       - Ci Run Controller
 info:
