@@ -1,5 +1,6 @@
 package eu.wohlben.qits.eventsourcing.control;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import eu.wohlben.qits.eventsourcing.QitsEvent;
 import eu.wohlben.qits.eventsourcing.QitsEventListener;
 import jakarta.annotation.PostConstruct;
@@ -66,6 +67,13 @@ public class EventDispatcher {
    * frame, an unknown signature, a payload that will not deserialize nor a listener that threw may
    * take the connection down — losing one event is the designed failure here, losing the stream is
    * not.
+   *
+   * <p><b>An unreadable frame is a WARN, and it used to be a DEBUG.</b> The two failures are not
+   * comparable: an unknown signature below is ordinary traffic, while a frame this module asked for
+   * and then could not read is a defect in the frame format, in the far side, or — the case that
+   * bought this line — in the native image's reflection metadata. At DEBUG a binary that could not
+   * deserialize {@link EventFrame} at all said <em>nothing</em>, on every frame, for as long as it
+   * ran. Dropping it stays right; being quiet about it did not.
    */
   @SuppressWarnings("unchecked")
   public void dispatch(String text) {
@@ -73,7 +81,7 @@ public class EventDispatcher {
     try {
       frame = CanonicalJson.frame(text);
     } catch (RuntimeException e) {
-      LOG.debugf("dropped an unreadable frame: %s", e.getMessage());
+      LOG.warnf("dropped an unreadable frame [%s]: %s", describe(text), e.getMessage());
       return;
     }
     List<QitsEventListener<?>> listeners = bySignature.get(frame.name());
@@ -93,5 +101,32 @@ public class EventDispatcher {
             e, "listener %s failed on %s", listener.getClass().getName(), frame.name());
       }
     }
+  }
+
+  /**
+   * Name the frame that could not be read, if anything about it can still be named.
+   *
+   * <p>Deliberately a <em>second, untyped</em> read rather than a substring of the text: a frame
+   * that is well-formed JSON but will not bind to {@link EventFrame} — precisely what a missing
+   * native-image registration looks like, since {@code readTree} needs no reflection while binding
+   * to a record does — still yields its {@code name} and {@code id}. That is the whole difference
+   * between "qits-events sent something this version does not understand" and "this build cannot
+   * read its own contract", and it is knowable at the moment of the failure or not at all.
+   *
+   * <p>The frame's own text is never logged. It is another service's data of unbounded size, and
+   * the two identifiers are what a person needs to go look the event up in the event log.
+   */
+  private static String describe(String text) {
+    try {
+      JsonNode node = CanonicalJson.parse(text);
+      JsonNode name = node.get("name");
+      JsonNode id = node.get("id");
+      if (name != null || id != null) {
+        return (name == null ? "?" : name.asText()) + " " + (id == null ? "?" : id.asText());
+      }
+    } catch (RuntimeException e) {
+      // Not JSON at all. There is no identity to report, and the text is not ours to put in a log.
+    }
+    return "unidentifiable";
   }
 }

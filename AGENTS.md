@@ -38,7 +38,10 @@ second rule of the same kind, and three things follow:
   green. Prefer what is already in the image — `ProcessBuilder` over a process library (which is why
   `CiProcess` and `GitConfigFetcher` shell out rather than link a docker or git client), and
   `java.lang.foreign` over JNA. If a native build needs configuration to pass, that configuration is
-  part of the change.
+  part of the change. The repo's one explicit registration is `EventWireReflection` in
+  `service/…/bus/`, and it is worth reading as the worked example of this bullet: the types are
+  ordinary records nobody had to think about until a hand-built `ObjectMapper` put them outside
+  everything Quarkus scans. See "The eventsourcing module".
 - **So is every config default the app boots with.** `quarkus.datasource.ci.jdbc.url` carried
   `AUTO_SERVER=TRUE` out of the monorepo; it asks H2 to start its own TCP server, whose classes are
   not in the image, and the binary died at boot on a default no JVM test ever used. It was dropped
@@ -333,6 +336,47 @@ Two configuration facts about this module that are easy to get backwards:
   IPv4 bind, this) — **a config default no JVM test exercises, failing only in the packaged artifact
   in its real environment**. It fails loudly and safely, since cd's health gate keeps the previous
   container, but it fails.
+
+  **The fourth member is not a config default at all, and it is the one that failed quietly.**
+  `service/…/bus/EventWireReflection` is a class with no code: a `@RegisterForReflection` naming
+  `BuildSuccessful`, `EventEnvelope`, `EventFrame` and the `CanonicalJson$QitsEventMixin`, plus a
+  private constructor. Without it the deployed binary threw Jackson's `No serializer found for class
+  … BuildSuccessful … you may need to configure reflection` on **every** green build — inside
+  `CanonicalJson` and therefore *before* an envelope existed, so the event never reached the outbox
+  either. Not a delayed delivery, a lost one, with a single WARN per run to say so.
+
+  Nothing registered them because **`CanonicalJson` builds its own `ObjectMapper` on purpose**
+  (above, and not negotiable): the graph that mapper serializes is invisible to the build step that
+  scans for what needs reflecting on. **The mix-in is in the list because two binaries were built to
+  find out, and it is the worse of the two failures.** Jackson reads its `@JsonIgnore`s with
+  `getDeclaredMethods()`; with the three record types registered and the mix-in left out, a green
+  build published `{"branch":…,"commitSha":…,"eventId":"00a32ad6-…","finishedAt":…,"repoId":…,
+  "runId":…}` — no crash, no log, `eventId` simply present in a payload that is supposed to carry no
+  identity at all. A wire contract violation that breaks nothing visible is not a lesser bug than one
+  that throws. Register; do not "fix" a recurrence by injecting the CDI mapper.
+
+  It lives in `service/` rather than beside the code it describes for the reason everything native
+  does: the deployable is what gets built into an image, and `eventsourcing/` is a library on its
+  way to its own repository. `EventWireReflectionTest` guards the list's **completeness** — every
+  listener bean's event type is in it, the mix-in's name still resolves — and says in its own javadoc
+  that completeness is all a JVM test can guard, because on a JVM these classes reflect whether
+  anyone registered them or not. The correctness proof is the binary, running: the round trip through
+  a real qits-events.
+
+  **That proof is cheap enough to repeat before a rollout, and it is how both facts above were
+  established.** `sdk env` then `./mvnw package -Dnative -DskipTests`, run `service/target/qits-ci`
+  with `QITS_EVENTSOURCING_ENABLED=true`, `QITS_EVENTS_URL` pointed at any process that answers a PUT
+  with a 201, and push `steps: []` through the intake — a zero-step pipeline reaches SUCCESS with no
+  docker and no daemon, which is the shortest path there is from a fresh binary to a published event.
+  Read the PUT body. Anything about this module that only the binary can be wrong about is one minute
+  of native-image away from being known rather than believed.
+
+  **The far end of that failure was mute, and that is fixed too.** `EventDispatcher` logged a frame
+  it could not read at DEBUG, so a binary that could not deserialize `EventFrame` would have consumed
+  the entire stream in silence for as long as it ran. It is a WARN now, naming the frame's `name` and
+  `id` when the text is JSON at all (a second, untyped read — `readTree` needs no reflection, which
+  is precisely why it still works when binding does not). An unknown *signature* stays DEBUG: that
+  one is ordinary traffic, since a subscription set is a filter rather than a promise.
 
 `quarkus-scheduler` (the outbox sweeper's) arrives transitively with the jar and is new to this
 deployable; `quarkus-websockets-next` was already here for the ci-daemon control plane, so the

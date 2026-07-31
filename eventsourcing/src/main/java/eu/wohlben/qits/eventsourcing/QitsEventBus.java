@@ -24,6 +24,17 @@ import org.jboss.logging.Logger;
  * An unserializable event is a programming error that shows up as a warning on the first publish,
  * which is the right amount of noise for something no retry would fix.
  *
+ * <p><b>And it writes no row for either, which was weighed rather than overlooked.</b> The
+ * unserializable case stopped being hypothetical the day a native image could not reflect on the
+ * event class, and "at least record the loss" was the obvious repair. It does not fit: the
+ * serializer is what threw, so there is no {@code payload} — the one thing an outbox row exists to
+ * hold — and a {@code FAILED} row with a null payload is one the sweeper can never retry and a
+ * dead-letter view could never resend. In the second case, writing a row is the identical database
+ * write that just failed. The outbox is what has <em>not arrived yet</em>, which is what lets its
+ * row count be a health signal rather than a log; the record of an event that could not be built is
+ * the warning below, carrying the id and the signature, and that warning is how the native-image gap
+ * was actually found.
+ *
  * <p>Disabled ({@code qits.eventsourcing.enabled=false}) it is a debug log and nothing else: no
  * request, no row, no subscriber. That is the {@code %dev}/{@code %test} posture the platform gives
  * every external telemetry-shaped dependency, and it means a test suite that never configured

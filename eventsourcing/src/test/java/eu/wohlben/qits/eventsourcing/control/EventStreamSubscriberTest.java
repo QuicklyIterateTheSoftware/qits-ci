@@ -12,9 +12,14 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BooleanSupplier;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -89,14 +94,65 @@ class EventStreamSubscriberTest {
     assertEquals("still here", things.received().get(0).what());
   }
 
+  /**
+   * Dropped, and <b>loud about it</b>. The level is the assertion: this was a DEBUG, and a native
+   * image that could not bind {@link EventFrame} at all therefore consumed every frame in silence
+   * for as long as it ran. A frame the subscriber asked for and cannot read is a defect signal —
+   * unlike an unknown signature above, which is ordinary traffic — so it has to arrive at a level
+   * that is on by default. Capturing through JUL is what makes "on by default" the thing under test:
+   * the handler sees what the logger's own level lets through, so a return to DEBUG fails here.
+   */
   @Test
-  void anUnreadableFrameIsDroppedRatherThanFatal() {
-    StubEventsServer.broadcast("not json at all");
-    Instant when = Instant.parse("2026-07-31T12:46:03Z");
-    StubEventsServer.broadcast(
-        frame("ThingHappened", when, CanonicalJson.payload(new ThingHappened("still here", 1, when))));
+  void anUnreadableFrameIsDroppedWithAWarningThatNamesIt() {
+    List<LogRecord> captured = new CopyOnWriteArrayList<>();
+    Handler capture =
+        new Handler() {
+          @Override
+          public void publish(LogRecord record) {
+            captured.add(record);
+          }
 
-    await(() -> !things.received().isEmpty(), "the stream to survive a garbage frame");
+          @Override
+          public void flush() {}
+
+          @Override
+          public void close() {}
+        };
+    java.util.logging.Logger dispatcherLog =
+        java.util.logging.Logger.getLogger(EventDispatcher.class.getName());
+    dispatcherLog.addHandler(capture);
+    try {
+      // Well-formed JSON that will not bind: the frame still has an identity, and reporting it is
+      // the difference between "the far side sent something odd" and "this build cannot read its
+      // own contract".
+      String id = UUID.randomUUID().toString();
+      StubEventsServer.broadcast(
+          "{\"id\":\"" + id + "\",\"name\":\"ThingHappened\",\"occurredAt\":\"not a timestamp\"}");
+      StubEventsServer.broadcast("not json at all");
+
+      Instant when = Instant.parse("2026-07-31T12:46:03Z");
+      StubEventsServer.broadcast(
+          frame(
+              "ThingHappened", when, CanonicalJson.payload(new ThingHappened("still here", 1, when))));
+      await(() -> !things.received().isEmpty(), "the stream to survive a garbage frame");
+
+      List<String> warnings =
+          captured.stream()
+              .filter(r -> r.getLevel().intValue() >= Level.WARNING.intValue())
+              .map(EventStreamSubscriberTest::rendered)
+              .toList();
+      // Set-wise, not by index: each frame is handled on its own executor thread, so which warning
+      // lands first is the pool's business and not a property worth asserting.
+      assertEquals(2, warnings.size(), "both unreadable frames must be reported: " + warnings);
+      assertTrue(
+          warnings.stream().anyMatch(w -> w.contains("ThingHappened " + id)),
+          "a frame that is JSON must be named: " + warnings);
+      assertTrue(
+          warnings.stream().anyMatch(w -> w.contains("unidentifiable")),
+          "a frame that is not JSON has no identity to report: " + warnings);
+    } finally {
+      dispatcherLog.removeHandler(capture);
+    }
   }
 
   /**
@@ -121,6 +177,22 @@ class EventStreamSubscriberTest {
         frame("ThingHappened", when, CanonicalJson.payload(new ThingHappened("after", 1, when))));
     await(() -> !things.received().isEmpty(), "the reconnected stream to deliver");
     assertEquals("after", things.received().get(0).what());
+  }
+
+  /**
+   * A handler sees the record before anything formats it — jboss-logging's {@code warnf} carries the
+   * format string and its arguments separately — so the test has to do what a console handler would.
+   */
+  private static String rendered(LogRecord record) {
+    Object[] params = record.getParameters();
+    if (params == null || params.length == 0) {
+      return String.valueOf(record.getMessage());
+    }
+    try {
+      return String.format(record.getMessage(), params);
+    } catch (RuntimeException notPrintf) {
+      return record.getMessage() + " " + Arrays.toString(params);
+    }
   }
 
   /** The shape qits-events pushes: the envelope plus the row's id. */
