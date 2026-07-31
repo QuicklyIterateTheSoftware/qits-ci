@@ -10,7 +10,14 @@
 #
 # Build from the repo root:
 #
+#     git submodule update --init service/src/main/webui
+#     (cd service/src/main/webui && npm ci && npm run build)
 #     docker build -t qits/ci:latest -f docker/Dockerfile .
+#
+# The first two lines are not optional and are not a convenience: this image carries the ci client
+# (service/src/main/webui = the qits-spa-ci submodule), and the builder stage below packages a bundle
+# that was ALREADY BUILT rather than building one. See the Quinoa flags on the mvnw line for why the
+# build cannot happen inside that stage.
 #
 # --- this image does NOT run with an empty environment, and that is not a packaging bug ------------
 # `docker run --rm qits/ci:latest` dies before the HTTP listener with
@@ -122,21 +129,66 @@ COPY . .
 # at `package` rather than `verify` is what keeps `CiPackagedSurfaceIT` out of the image build; it
 # wants a free port and a writable home, neither of which this stage is the right place to arrange.
 #
-# The two `package-manager-install` flags are how the Angular client gets built HERE. Quinoa shells
-# out to npm, and a Mandrel builder image has no node — so without them this stage fails the moment
-# the webui submodule is present, and the flags are on the command line rather than in
-# application.properties precisely because a developer machine already has node and should keep using
-# its own. The version is pinned so the image build is reproducible, not "whatever nodejs.org calls
-# current".
+# --- the Quinoa flags, and why this stage no longer builds the client -----------------------------
 #
-# A build context whose webui submodule is NOT initialised fails this stage with `No package.json
-# found in Web UI directory: 'src/main/webui'` — git leaves the gitlink as an empty directory, and an
-# empty directory is the one case Quinoa treats as a misconfiguration rather than as "no client".
-# Loud is the right failure here, but it is a failure: see AGENTS.md, "The Angular client".
-RUN ./mvnw -B -ntp -pl service -am package -Dnative -DskipTests \
+# package-manager-install: the Mandrel builder image ships no node at all, so this stage installs its
+# own — from nodejs.org, which a docker build can reach. It lives here rather than in
+# application.properties on purpose: a local or CI `mvnw` build must use the node on PATH, so that no
+# build silently downloads a toolchain. 22.22.0 is the PLATFORM pin, the node every other qits
+# service's builder stage installs and the version a developer's host carries. Note it is
+# deliberately NOT the step container's node: node-docker-base is node:24-alpine, and the bundle this
+# image consumes was built there. The two do not have to agree, because this stage does not build the
+# bundle — the commands below are neutered to `--version`, so the only thing node does here is exist
+# and prove its package manager runs.
+#
+# The three command overrides are the load-bearing part, and the reason this file deviates from the
+# platform's Quinoa recipe (docs/project-setup-quinoa-angular.md in the qits monorepo, which has the
+# builder run the client's real install and build):
+#
+#   service/src/main/webui is qits-spa-ci, and it depends on @qits/ui-components. That package exists
+#   ONLY on the platform's own npm registry (qits-artifacts). A RUN step in a docker build reaches
+#   the public internet — Maven Central, npmjs.org, nodejs.org — and can reach the platform registry
+#   by NO address: not the qits-net alias, not localhost:8081, not host.docker.internal. So the
+#   install cannot happen here — it hangs on the localhost:8081 the submodule's own .npmrc names and
+#   then dies on npm's `Exit handler never called!`, which says nothing about why — and an install
+#   that "worked" here would have resolved the @qits scope against npmjs.org, where that name does
+#   not exist and never will.
+#
+# The bundle is therefore built BEFORE this image, by the pipeline step in
+# .config/qits/ci-post-receive.yml, which runs on qits-net where the registry is reachable, and
+# arrives in the build context as service/src/main/webui/dist/ (see .dockerignore). `--version` is
+# the null command: it proves the package manager is really there and does nothing else.
+#
+# THIS DOES NOT FAIL QUIETLY. The `test -f` below stops a context with no bundle before the
+# multi-minute native compile, and Quinoa's own build-dir check would stop it after. A forgotten
+# `npm run build` in the step is a red build, not a service that ships without its client. (The same
+# guard covers the case this comment used to describe on its own: a webui submodule that is NOT
+# initialised, which git leaves as an empty directory and Quinoa rejects with `No package.json found
+# in Web UI directory: 'src/main/webui'` — see AGENTS.md, "The Angular client".)
+#
+# --- and why the bundle is copied onto itself first -----------------------------------------------
+# Quinoa does not copy build-dir into target/quinoa/build, it MOVES it, and overlayfs cannot rename a
+# directory that still lives in a LOWER image layer. It answers EXDEV, the JDK falls back to its
+# cross-file-store path, and that path refuses a non-empty directory — the build dies seconds in with
+# `DirectoryNotEmptyException: …/dist/qits-spa-ci/browser`, which names the source and explains
+# nothing. A builder stage that *creates* dist itself is immune by accident; ours arrives by COPY.
+#
+# One `cp` re-materialises it in the layer that is about to move it. It has to be in THIS `RUN` and
+# not a tidier one of its own — a layer boundary is exactly what it is undoing.
+RUN d=service/src/main/webui/dist/qits-spa-ci/browser; \
+    test -f "$d/index.html" || { \
+      echo "No built client at $d." >&2; \
+      echo "The build context must carry one: run 'npm ci && npm run build'" >&2; \
+      echo "in service/src/main/webui first — this stage cannot, see the Quinoa flags above." >&2; \
+      exit 1; }; \
+    cp -a "$d" "$d.layer" && rm -rf "$d" && mv "$d.layer" "$d" && \
+    ./mvnw -B -ntp -pl service -am package -Dnative -DskipTests \
       -Dquarkus.native.native-image-xmx=4g \
       -Dquarkus.quinoa.package-manager-install=true \
-      -Dquarkus.quinoa.package-manager-install.node-version=22.22.0
+      -Dquarkus.quinoa.package-manager-install.node-version=22.22.0 \
+      -Dquarkus.quinoa.package-manager-command.install=--version \
+      -Dquarkus.quinoa.package-manager-command.ci=--version \
+      -Dquarkus.quinoa.package-manager-command.build=--version
 
 # --- runtime --------------------------------------------------------------------------------------
 FROM registry.access.redhat.com/ubi9/ubi-minimal:9.6

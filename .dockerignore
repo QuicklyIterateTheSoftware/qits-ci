@@ -15,14 +15,24 @@
 **/target
 **/target-ide
 
-# The Angular client's own build output, for the same two reasons one level down. `npm install` runs
-# inside the build stage, and a host node_modules is the worse half of this: it is the bulk of a
-# working tree once the submodule is initialised, and it carries binaries compiled for the HOST
-# rather than for the builder image — Quinoa reuses an existing node_modules rather than reinstalling
-# over it, so leaking one in is not merely slow, it is how the image gets a client built by the wrong
-# toolchain.
+# The Angular client's install output: the bulk of a working tree once the submodule is initialised,
+# full of binaries compiled for the HOST rather than for the builder image, and nothing in the build
+# stage reads it — that stage runs no install and no client build (see docker/Dockerfile). `.angular`
+# is the CLI's own cache, the same shape of host-local junk.
+#
+# NOTE THE ASYMMETRY with what this file used to say, and with the platform's Quinoa recipe
+# (docs/project-setup-quinoa-angular.md), which excludes the client's dist/ as well: here dist/ is
+# the PAYLOAD. Since the webui took a dependency on @qits/ui-components — which exists only on the
+# platform's own npm registry, reachable from no address a docker build has — the bundle is built
+# BEFORE this image by .config/qits/ci-post-receive.yml, on qits-net where that registry answers.
+# Excluding dist/ would fail the build at the `test -f` guard on the mvnw line.
 **/node_modules
-service/src/main/webui/dist
+service/src/main/webui/.angular
+
+# Quinoa's own toolchain install directory. The build stage creates its own (service/.quinoa); a
+# host-installed one would be a Linux/glibc question we do not want to import from whatever built the
+# context.
+**/.quinoa
 
 # Local env / IDE cruft
 .env
