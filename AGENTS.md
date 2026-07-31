@@ -393,7 +393,8 @@ rather than free: `publish()` never throws, attempts the PUT inline, and gives u
 qits-events costs each green build a few seconds and nothing else. Anything slower than that does
 not belong behind that port.
 
-Two configuration facts about this module that are easy to get backwards:
+Two configuration facts about the bus that are easy to get backwards, and both are this repo's
+to get right rather than the library's:
 
 - **The darkness belongs to `service/`, not to the library.** The jar ships
   `qits.eventstream.enabled=true` — a library that shipped dark is one whose first deployment
