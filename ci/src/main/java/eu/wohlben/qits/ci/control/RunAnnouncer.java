@@ -33,6 +33,25 @@ import java.time.Instant;
  */
 public interface RunAnnouncer {
 
+  /**
+   * A run went green. {@code triggerEventId} is <b>the event that caused this run</b>, or null when
+   * nothing did — which is every push, and a push publishing a chain root is correct.
+   *
+   * <p><b>A plain {@code String}, and that is the whole reason this parameter is here rather than an
+   * ambient value.</b> It is a foreign id, which is exactly how this module names foreign things, and
+   * it keeps {@code ci/} free of every eventsourcing type — the dependency this seam exists to
+   * prevent. The bus stamps causation from a thread-local that the implementation could have read
+   * instead; it would read null, because the engine consumed the frame on the socket's dispatch
+   * thread and this call happens later on {@code ci-run-worker}. A thread-local does not follow work,
+   * deliberately. So the id travels durably on {@code CiRun.triggerEventId} and arrives here as an
+   * argument, and {@code BuildSuccessfulAnnouncer} hands it to {@code publish(event, parent)} — where
+   * an explicit non-null argument outranks the ambient context by design, precisely for this case.
+   */
   void onRunSucceeded(
-      String runId, String repoId, String branch, String commitSha, Instant finishedAt);
+      String runId,
+      String repoId,
+      String branch,
+      String commitSha,
+      Instant finishedAt,
+      String triggerEventId);
 }

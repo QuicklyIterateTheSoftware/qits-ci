@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.Tag;
@@ -109,7 +110,8 @@ public class CiDaemonHandshakeIT {
                       credentials.daemonId(),
                       credentials.secret(),
                       binaryUrl,
-                      false));
+                      false,
+                      Map.of()));
           try {
             assertTrue(launched.started(), "docker refused the launch: " + launched.error());
 
@@ -169,7 +171,8 @@ public class CiDaemonHandshakeIT {
                       // The one thing changed: this container holds a secret the host did not mint.
                       credentials.secret().substring(1) + "x",
                       binaryUrl,
-                      false));
+                      false,
+                      Map.of()));
           try {
             assertTrue(launched.started(), launched.error());
             assertFalse(
@@ -207,7 +210,8 @@ public class CiDaemonHandshakeIT {
                       credentials.daemonId(),
                       credentials.secret(),
                       servedBinaryUrl + "-does-not-exist",
-                      false));
+                      false,
+                      Map.of()));
           try {
             assertTrue(launched.started(), launched.error());
             assertFalse(

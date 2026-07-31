@@ -1,5 +1,7 @@
 package eu.wohlben.qits.ci.control;
 
+import java.util.Map;
+
 /**
  * Executes one pipeline step. The sole implementation is {@code CiDaemonStepRunner} in the service
  * module: it starts a container, waits for that container's own {@code qits-ci-daemon} to dial back,
@@ -33,6 +35,14 @@ public interface CiStepRunner {
    * a bind mount of the host's docker socket. It travels here rather than being read from config
    * because it is a <em>property of the step</em> — one step of a run may have it and the next may
    * not, and the run row records each of them the same way.
+   *
+   * <p>{@code env} is <b>run-scoped</b> environment the container gets on top of the fixed contract:
+   * today exactly the {@code QITS_EVENT_*} four an event-triggered run carries, and empty on every
+   * push. It is a map rather than four fields because what it holds is a property of the <em>trigger</em>
+   * and this seam has no business enumerating triggers; it is emitted in sorted key order so an argv
+   * stays something a test can assert literally. <b>It never carries anything a repository authored</b>
+   * — the implementation writes the platform's own variables after these, so nothing here can shadow
+   * the contract the daemon boots on.
    */
   record StepSpec(
       String runId,
@@ -44,7 +54,8 @@ public interface CiStepRunner {
       String script,
       String daemonBinaryUrl,
       int timeoutSeconds,
-      boolean docker) {}
+      boolean docker,
+      Map<String, String> env) {}
 
   /**
    * How the step ended, in the vocabulary the orchestrator branches on. Every value here is a

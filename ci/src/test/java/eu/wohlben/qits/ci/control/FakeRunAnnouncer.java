@@ -17,7 +17,12 @@ import java.util.List;
 public class FakeRunAnnouncer implements RunAnnouncer {
 
   public record Announced(
-      String runId, String repoId, String branch, String commitSha, Instant finishedAt) {}
+      String runId,
+      String repoId,
+      String branch,
+      String commitSha,
+      Instant finishedAt,
+      String triggerEventId) {}
 
   private final List<Announced> announced = Collections.synchronizedList(new ArrayList<>());
 
@@ -31,7 +36,12 @@ public class FakeRunAnnouncer implements RunAnnouncer {
 
   @Override
   public void onRunSucceeded(
-      String runId, String repoId, String branch, String commitSha, Instant finishedAt) {
-    announced.add(new Announced(runId, repoId, branch, commitSha, finishedAt));
+      String runId,
+      String repoId,
+      String branch,
+      String commitSha,
+      Instant finishedAt,
+      String triggerEventId) {
+    announced.add(new Announced(runId, repoId, branch, commitSha, finishedAt, triggerEventId));
   }
 }

@@ -5,6 +5,12 @@ The **in-repo CI pipeline**: a repository opts in by committing
 commit, runs each step's script in a fresh container of the step's declared image, and records a
 per-step pass/fail for the push — advisory, queryable over REST.
 
+There is a **second trigger**. A repository may also commit `.config/qits/ci-event-*.yml` files,
+each naming a domain event on the platform's bus and a selection over its payload; a matching event
+runs that file's pipeline against the head of `main`. That is the release train — a library
+releases, the repositories that declared an interest build themselves — and every hop of it is
+recorded, with the event that caused it, on the run and in the event log.
+
     git submodule update --init   # the Angular client at service/src/main/webui
     mvn verify                    # green from a clone alone — no monorepo, no docker, no credentials
 
@@ -140,6 +146,12 @@ startup, which is what a trigger reading selections out of other repositories' f
 subscribe frame is the union of both, `"*"` collapsing it to `["*"]`, and a frame both want reaches
 both — typed first.
 
+**The trigger engine is that raw consumer, and it says `"*"` permanently**, so this service's
+subscribe frame *is* `["*"]`: the event names it cares about live in other repositories' files and
+change with every push, and a listener that waited to read config before naming anything would never
+open the stream it reads config over. `BuildSuccessfulListener` no longer appears on the wire and is
+unaffected, because dispatch filters and the wire never did.
+
 **Every event carries a nullable `parentId`** — the event that caused it — so a release train is a
 chain in the log rather than a set of rows distinguishable from coincidence only by their
 timestamps. It is envelope data, stamped by `QitsEventBus.publish` and never declared by an event
@@ -243,6 +255,119 @@ env npm_config_registry="$QITS_NPM_PROXY_URL" \
     "npm_config_@qits:registry=$QITS_NPM_REGISTRY_URL" \
     pnpm install --frozen-lockfile
 ```
+
+## The other file a repository commits: `.config/qits/ci-event-*.yml`
+
+A push is not the only thing that can run a pipeline. A repository may also commit **event
+triggers**: files that name a domain event off the platform's bus and a selection over its payload,
+and run their own pipeline when both hold. The motivating shape is the release train — a library
+releases, every consuming SPA's event pipeline commits the version bump, each SPA's own release
+fires the pipelines of the services embedding it — where each hop is one repository declaring, in
+its own tree, which upstream events it cares about.
+
+```yaml
+# .config/qits/ci-event-ui-components-released.yml
+event: BuildSuccessful          # the event NAME (its signature), matched exactly
+when:                           # the selection — omit it to fire on every event of that name
+  - repoId: { exact: qits-spa-ui-components }
+    branch: { exact: main }
+steps:                          # exactly the schema ci-post-receive.yml uses
+  - image: qits/build-images/node-base:latest
+    script: ./bump-ui-components.sh
+```
+
+- **The `*` is yours and is completely ignored.** It names the trigger for humans. A repository may
+  have any number of these files; each is an independent trigger with its own pipeline, and two of
+  them matching one event are two runs by design.
+- **They are read from the head of `main`**, not from a commit — an event names no push, so the
+  platform's one tracked branch supplies the ref. The run records the head sha it built.
+- **The two trigger types never blur.** A `ci-post-receive.yml` containing `event:` or `when:` is a
+  config error, and a `ci-event-*.yml` without `event:` is one too.
+- `steps:` is the same schema, `docker: true` and `timeout-seconds:` included, with the same
+  meanings and the same warnings.
+
+### The selection
+
+`when:` is a **list of match groups**, and groups are **OR**'d. A group is a **map of dot-path to
+matcher**, and its entries are **AND**'d. So one group with two entries is "x and y", two groups are
+"x or y", and there is no third nesting form to choose between. A map value may be a **list** of
+matchers, also AND'd — the one thing a plain map cannot spell is two matchers on the same path.
+
+```yaml
+when:
+  - repoId: { exact: qits-spa-ui-components }     # x AND y
+    branch: { exact: main }
+  - repoId:                                       # …OR: two matchers on one path
+      - { prefix: qits-spa- }
+      - { exists: true }
+    imageDigest: { exists: false }
+```
+
+The whole matcher vocabulary is **`exact`**, **`prefix`** and **`exists`** (a boolean). There is no
+`regex`, deliberately: `exact` and `prefix` cover the release train, and a regex invites the
+complexity a data-only document exists to avoid. Add one when a real trigger needs one.
+
+**Paths are dot-paths into the payload JSON** — navigation only, no wildcards, no filters, no
+indexing (`repoId`, `repository.url`; `tags.0` is refused rather than resolved). A missing path is
+`exists: false` and fails `exact`/`prefix`. **Values compare as strings**, so a non-string JSON
+value compares by its literal: `count: { exact: "3" }` matches the number 3 and `green: { exact:
+"true" }` matches the boolean. Quote them — bare `yes` is a YAML *boolean* and `exact: yes` is a
+parse error rather than a comparison against `"yes"`.
+
+**An absent or empty `when:` means unconditional**: the trigger fires on every event of the name it
+declared. That is the documented default, and it is why this file is **strict about unknown
+top-level keys** where `ci-post-receive.yml` is lenient about them — a mistyped `wehn:` would
+otherwise parse as "no selection", and no selection means *every* event. Unknown matcher keys,
+non-string match values, malformed structure and duplicate keys are all parse errors too, logged at
+WARN naming the repository and the file. **One unparseable trigger file never disables the
+repository's others.**
+
+> **A `when:` that matches an event your own build publishes is an unbounded build loop.** A green
+> run publishes `BuildSuccessful`; a trigger in the same repository selecting that event runs a
+> build, which publishes another `BuildSuccessful`, and so on forever. Each hop is a *new* event id,
+> so the at-most-once dedupe never engages — it stops replays, not descendants. **Review is the only
+> guard.** Cycle and self-reference detection is a separate future feature that builds the graph of
+> trigger declarations across repositories and finds cycles there, with its own UX; nothing in this
+> feature guesses at it. The provenance columns a triggered run records are the trail it will
+> consume.
+
+### What an event-triggered step container gets
+
+The four `QITS_EVENT_*` variables, alongside everything every step container already receives:
+
+| Variable | What |
+|---|---|
+| `QITS_EVENT_ID` | The event that caused this run — also its own events' `parentId` |
+| `QITS_EVENT_NAME` | The event's name, the same one `event:` matched |
+| `QITS_EVENT_OCCURRED_AT` | The event's own timestamp, ISO-8601 |
+| `QITS_EVENT_PAYLOAD` | The canonical JSON payload, **verbatim** |
+
+The payload is not flattened into per-field variables: env names derived from payload paths invite
+collisions and quoting bugs, and `jq` — which the step images carry — is already the platform's
+answer inside a step. A push-triggered run gets none of these.
+
+### Which repositories are asked
+
+Every arriving event is evaluated against **the repositories qits-ci already knows** — the union of
+its recorded runs' repo ids and its own bare caches. qits-artifacts hosts the git repositories but
+deliberately exposes no listing of them (its `/v2/_catalog` and npm search routes refuse enumeration
+by design, and `GET /artifacts/api/repositories` lists *artifact* repositories, which a git repo
+never creates), and qits-ci has no shared filesystem to scan the way qits-projects does. The
+consequence, stated plainly: **a repository qits-ci has never seen a push from cannot event-trigger
+until it pushes once.** Committing the trigger file is such a push, so in practice the gap closes
+itself. It is one method (`CiCandidateRepos`) so that the day a listing exists, swapping to it is
+one class.
+
+### Exactly one run per (event, trigger file)
+
+However many groups of a `when:` match, matching is boolean rather than multiplicative. The
+guarantee that survives a redelivery and a race is a **database unique constraint** on
+`(trigger_event_id, repo_id, config_path)`: a second arrival of the same event — bus replays are
+legal, and the future catch-up feature will redeliver on purpose — is dropped as already-triggered
+and records no second run. Every run records why it exists (`triggerType`, `triggerEventId`,
+`triggerEventName`, `configPath` on `GET /ci/api/runs`), and a triggered run's own
+`BuildSuccessful` carries the triggering event as its `parentId`, so a release train is a chain in
+the event log rather than a set of rows distinguishable from coincidence only by their timestamps.
 
 ## How a step runs — qits-ci starts containers, and that is all
 

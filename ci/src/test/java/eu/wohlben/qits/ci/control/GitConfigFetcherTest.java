@@ -1,13 +1,19 @@
 package eu.wohlben.qits.ci.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
+import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerFile;
+import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerLookup;
 import eu.wohlben.qits.ci.error.BadRequestException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -102,11 +108,109 @@ public class GitConfigFetcherTest {
         BadRequestException.class, () -> fetcher.read("repo-1", "a/../../b", "cafebabe0000"));
   }
 
+  // --- the event half: listing .config/qits/ci-event-*.yml at the branch head ---
+
+  @Test
+  public void listsEveryTriggerFileAtTheBranchHeadWithTheShaItReadThemAt() throws Exception {
+    String repoId = "repo-with-triggers";
+    String sha =
+        seedServedRepo(
+            repoId,
+            "steps: []\n",
+            Map.of(
+                ".config/qits/ci-event-one.yml", "event: A\n",
+                ".config/qits/ci-event-two.yml", "event: B\n"));
+
+    EventTriggerLookup lookup = fetcher.readEventTriggers(repoId, BRANCH);
+    assertEquals(EventTriggerLookup.Status.FOUND, lookup.status());
+    assertEquals(sha, lookup.headSha(), "the run records the head the trigger was read at");
+    assertEquals(
+        Map.of(".config/qits/ci-event-one.yml", "event: A\n", ".config/qits/ci-event-two.yml", "event: B\n"),
+        lookup.files().stream()
+            .collect(Collectors.toMap(EventTriggerFile::path, EventTriggerFile::content)));
+  }
+
+  @Test
+  public void thePostReceiveConfigAndUnrelatedFilesAreNotTriggerFiles() throws Exception {
+    String repoId = "repo-mixed";
+    seedServedRepo(
+        repoId,
+        "steps: []\n",
+        Map.of(
+            ".config/qits/ci-event-real.yml", "event: A\n",
+            ".config/qits/notes.md", "hello\n",
+            ".config/qits/ci-event-nope.yaml", "event: B\n"));
+
+    List<String> paths =
+        fetcher.readEventTriggers(repoId, BRANCH).files().stream()
+            .map(EventTriggerFile::path)
+            .toList();
+    assertEquals(List.of(".config/qits/ci-event-real.yml"), paths);
+  }
+
+  @Test
+  public void aRepositoryWithNoQitsConfigAtAllListsNothingRatherThanFailing() throws Exception {
+    String repoId = "repo-bare";
+    String sha = seedServedRepo(repoId, null);
+    EventTriggerLookup lookup = fetcher.readEventTriggers(repoId, BRANCH);
+    assertEquals(EventTriggerLookup.Status.FOUND, lookup.status());
+    assertEquals(sha, lookup.headSha());
+    assertEquals(List.of(), lookup.files());
+  }
+
+  @Test
+  public void theListingFollowsTheBranchRatherThanAPinnedCommit() throws Exception {
+    // An event names no commit, so the head is resolved rather than given — and it must be the head
+    // as of this read, not whatever it was the last time ci fetched.
+    String repoId = "repo-moving";
+    String first = seedServedRepo(repoId, "steps: []\n", Map.of(".config/qits/ci-event-a.yml", "event: A\n"));
+    assertEquals(first, fetcher.readEventTriggers(repoId, BRANCH).headSha());
+
+    advanceServedBranch(repoId, "later.txt");
+    String moved = fetcher.readEventTriggers(repoId, BRANCH).headSha();
+    assertNotEquals(first, moved);
+  }
+
+  @Test
+  public void anUnreachableOrUnknownRepositoryIsUnreachableRatherThanEmpty() {
+    // Told apart from "declares no trigger", because the two mean different things to the engine:
+    // one is a repository with nothing to say, the other is a repository ci could not ask.
+    assertEquals(
+        EventTriggerLookup.Status.UNREACHABLE,
+        fetcher.readEventTriggers("no-such-repo", BRANCH).status());
+    fetcher.gitHostUrl = "file://" + base.resolve("no-such-dir");
+    assertEquals(
+        EventTriggerLookup.Status.UNREACHABLE,
+        fetcher.readEventTriggers("any-repo", BRANCH).status());
+  }
+
+  @Test
+  public void aRepositoryWithoutThatBranchIsUnreachable() throws Exception {
+    String repoId = "repo-other-branch";
+    seedServedRepo(repoId, "steps: []\n");
+    assertEquals(
+        EventTriggerLookup.Status.UNREACHABLE,
+        fetcher.readEventTriggers(repoId, "no-such-branch").status());
+  }
+
+  @Test
+  public void theListingValidatesItsIdentifiersToo() {
+    // Same standard as read(): repoId reaches a filesystem path, branch reaches a git argv.
+    assertThrows(BadRequestException.class, () -> fetcher.readEventTriggers("../../etc", BRANCH));
+    assertThrows(
+        BadRequestException.class, () -> fetcher.readEventTriggers("repo-1", "--upload-pack=x"));
+  }
+
   /**
    * Creates a bare repo at {@code <base>/git/<repoId>} whose tip commit carries the config content
    * (or no config file at all for {@code null}); returns the tip sha.
    */
   private String seedServedRepo(String repoId, String configContent) throws Exception {
+    return seedServedRepo(repoId, configContent, Map.of());
+  }
+
+  private String seedServedRepo(String repoId, String configContent, Map<String, String> extraFiles)
+      throws Exception {
     Path work = Files.createTempDirectory("ci-fetch-work");
     try {
       git(null, "init", "-q", "-b", "main", work.toString());
@@ -115,6 +219,11 @@ public class GitConfigFetcherTest {
         Path config = work.resolve(CiConfigParser.CONFIG_PATH);
         Files.createDirectories(config.getParent());
         Files.writeString(config, configContent);
+      }
+      for (Map.Entry<String, String> extra : extraFiles.entrySet()) {
+        Path file = work.resolve(extra.getKey());
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, extra.getValue());
       }
       git(work, "add", ".");
       git(work, "-c", "user.email=ci@test", "-c", "user.name=ci", "commit", "-q", "-m", "seed");

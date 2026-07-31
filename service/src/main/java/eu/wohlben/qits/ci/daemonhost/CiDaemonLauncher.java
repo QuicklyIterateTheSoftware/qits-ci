@@ -10,7 +10,9 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
@@ -177,7 +179,8 @@ public class CiDaemonLauncher {
       String daemonId,
       String secret,
       String daemonBinaryUrl,
-      boolean docker) {}
+      boolean docker,
+      Map<String, String> env) {}
 
   /**
    * Whether the container started, under what name, and what docker said if it did not. A failed
@@ -408,6 +411,15 @@ public class CiDaemonLauncher {
     // container, on this network — a publish here is an ordinary HTTP step needing no socket.
     env(argv, "QITS_NPM_REGISTRY_URL", artifactsNpmHostedUrl);
     env(argv, "QITS_NPM_PROXY_URL", artifactsNpmProxyUrl);
+    // Run-scoped extras, LAST and in sorted key order. Last because everything above is the fixed
+    // contract the daemon boots on and nothing may shadow it — today these are the four QITS_EVENT_*
+    // of an event-triggered run and the map is empty on every push, but "the platform's variables are
+    // written first" is the property worth keeping rather than the current contents. Sorted because
+    // the whole argv is asserted literally by CiDaemonLauncherTest, and a set's iteration order is
+    // not a thing to assert against.
+    for (Map.Entry<String, String> extra : new TreeMap<>(spec.env()).entrySet()) {
+      env(argv, extra.getKey(), extra.getValue());
+    }
     argv.add("--entrypoint");
     argv.add("/bin/sh");
     argv.add(spec.image());

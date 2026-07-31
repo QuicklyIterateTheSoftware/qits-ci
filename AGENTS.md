@@ -356,7 +356,8 @@ Six things are easy to get wrong here:
   paths run inside the *same single* `CausationScope` of the arriving frame's id. What a raw listener
   must not forget is that enqueueing work for another thread is past any thread-local's reach by
   construction — carry `frame.id()` on whatever is enqueued and pass it to `publish(event, parent)` at
-  the far end, which is what `CiRun.triggerEventId` is for.
+  the far end, which is what `CiRun.triggerEventId` is for. That consumer exists now; see "The
+  trigger engine".
 
 Its own datasource, persistence unit and Flyway lineage (`eventsourcing`, `db/eventsourcing/migration`)
 follow the platform convention, for the ordinary reason plus one more: the split out of this repo
@@ -466,6 +467,67 @@ deployable; `quarkus-websockets-next` was already here for the ci-daemon control
 client half costs the image nothing. `quarkus-undertow` stays absent — check it with the
 `dependency:tree` line under "The Angular client" after touching this pom.
 
+## The trigger engine
+
+There are **two** trigger types now, and the second one is the reason the raw-listener seam exists.
+A repository commits `.config/qits/ci-event-<anything>.yml` naming a domain event and a selection
+over its payload; a matching event on the bus runs that file's pipeline against the head of `main`.
+The design is the superproject's `ci-event-triggers-plan.md`, the format is `README.md`, and what
+follows is what biting it feels like.
+
+- **`ci/` stays free of the bus, in both directions.** `service/…/bus/CiEventTriggerListener` is the
+  `QitsRawEventListener` bean; it turns an `EventFrame` into `CiEventTriggerService.Arrival`, four
+  plain strings, and hands it over. That is the same seam shape `RunAnnouncer` is on the publishing
+  side, pointed the other way, and it is why `CiEventTriggerService` — which does the real work —
+  imports no `eu.wohlben.qits.eventsourcing` type. Keep it that way; the extraction rule protects
+  the library, and this one protects the domain.
+- **`signatures()` is `Set.of(ALL)` permanently, and it is not laziness.** The wire set is derived
+  only when the connection is opened and **the subscriber does not dial at all when the union is
+  empty**, so a listener that answered `Set.of()` until it had read some config would never open the
+  stream it would read config over. `"*"` is the seam's documented idiom for exactly this, and the
+  cost is that this deployable's subscribe frame is literally `["*"]` —
+  `CiEventTriggerCausationTest` reads it off the stub to keep that from being a belief.
+- **Three threads, and each boundary is deliberate.** `onFrame` runs on the bus's websocket worker,
+  one frame at a time for *every* consumer, so it only enqueues. Evaluation runs on its own
+  single-threaded `ci-trigger-worker`: not the dispatch thread because it does a `git fetch` per
+  candidate repository, and **not `ci-run-worker`** either, though that is the obvious reuse — that
+  thread is inside a running pipeline for minutes, and an event evaluated when the build ends is
+  evaluated against a `main` that has moved. Single-threaded because two evaluations of one
+  repository would race on the same bare cache. The queue is bounded; a full one is a WARN naming
+  the event that was not evaluated, which beats turning a burst into heap.
+- **The causation edge crosses those threads as data, not as context.** `CausationScope` is a plain
+  `ThreadLocal` and does not follow work — that is its design, not its limitation. So the frame's
+  `id` is written to `ci_run.trigger_event_id`, read back off the row at `announceRun`, and passed to
+  `publish(event, parent)` as an explicit argument, which outranks the ambient context precisely for
+  this case. It survives a restart, which no context could. Note it is the frame's `id` and never its
+  `parentId`: the arriving event causes this run, its own parent is the previous hop's business.
+- **The dedupe is a database constraint and the `NULL` behaviour is load-bearing.** `unique
+  (trigger_event_id, repo_id, config_path)` is the at-most-one-run-per-(event, trigger file)
+  guarantee, and it has to be a constraint rather than a check because what it survives is a race and
+  a restart. **Every post-receive run has a null `trigger_event_id`** with the same repo and the same
+  config path as the last one, so a database treating those as duplicates would break the second push
+  to every repository — SQL says rows collide only when all corresponding values are non-null and
+  equal, and `CiEventTriggerDedupeTest` pins that H2 agrees rather than trusting it. The constraint
+  kills replays, not descendants, which is why it is **no loop guard**: see the footgun in
+  `README.md`, and note that nothing here is built that the future DAG feature would have to undo.
+- **The trigger file parser is strict where `ci-post-receive.yml` is lenient**, and the asymmetry is
+  the point rather than an inconsistency. In a pipeline an unread key costs a feature; in a
+  *selection* it costs correctness, because an absent `when:` means **unconditional** — so a mistyped
+  `wehn:` would silently widen the trigger to every event of that name. Unknown top-level keys and
+  duplicate keys are therefore errors in a trigger file and are not in a pipeline. The `steps:`
+  schema is shared verbatim (`CiConfigSchema`), because a step must not mean two things.
+- **The candidate list is the feature's one acknowledged compromise.** qits-artifacts owns the
+  repositories and deliberately exposes no listing of them, so `KnownCiRepos` answers with what
+  qits-ci already knows: recorded runs' repo ids plus its own bare caches. A repository that has
+  never pushed cannot event-trigger until it does. It is one method behind `CiCandidateRepos` so the
+  day a listing exists the swap is one class — and `FakeCandidateRepos` exercises that swap rather
+  than leaving it a claim.
+- **Nothing here needed native-image registration**, and `EventWireReflection`'s javadoc says why in
+  full: SnakeYAML's `SafeConstructor` produces plain collections, the parser builds its records by
+  hand, and the payload is `readTree`'d into a `JsonNode` and walked. No binding, no reflection, no
+  fifth member of the family this file names. Check that reasoning again if the engine ever gains a
+  Jackson `readValue`.
+
 ## Adding a dependency on another context
 
 Don't. This context has no compile-time dependency on any other qits module and should not grow
@@ -539,6 +601,12 @@ Keep it that way; do not buffer a step's output whole.
 `ci/src/main/resources/db/ci/migration/`, hand-written, its own lineage on its own datasource. It
 was never part of the monorepo's shared `db/migration` lineage, so it came across from the
 extraction unsquashed and unchanged — keep appending to it.
+
+`V3__event_triggers.sql` is worth reading as the worked example of backfilling a `not null` column
+into a live table: add it **with a default**, so every existing row is written correctly by the
+`alter` itself, then `drop default`, so a future insert that forgets the value fails loudly rather
+than getting a silent one. Its unique constraint is the trigger engine's at-most-once guarantee and
+its `NULL` behaviour is load-bearing — see "The trigger engine".
 
 ## Authentication
 
@@ -679,16 +747,31 @@ mechanism at all — which is what every service here was before the header land
   The ci module's copy also carries a `during(stepIndex, …)` hook: it runs something on the worker
   thread *while* a step is executing, which is how a cancellation arriving mid-step is staged with no
   sleep and no race about when "mid-step" is.
-- **`BuildSuccessfulPublishTest` is the only class in this repo that runs with the event bus on.**
+- **Two classes in this repo run with the event bus on, and they share one profile deliberately.**
   Everything else inherits the shipped `%test` darkness, so "the suite dials nothing" is the default
-  rather than an arrangement each test makes; that class turns it back on through a
-  `QuarkusTestProfile` and points it at its own `StubEventsServer` — a trimmed second copy of the
-  eventsourcing module's, duplicated for the reason both `FakeCiStepRunner`s are (the modules do not
-  share a test classpath, and a test-jar to bridge forty lines is worse). It drives a real run to
-  `SUCCESS` through the real intake and asserts the *wire* contract the other side was built
-  against: one PUT per green run, a v4 UUID in the path, `name` as the signature, and the run's
-  coordinates in the canonical payload. Retries, the outbox and the three-way PUT semantics belong
-  to the eventsourcing suite; the round trip through a real qits-events belongs to the platform.
+  rather than an arrangement each test makes; `BuildSuccessfulPublishTest` turns it back on through a
+  `QuarkusTestProfile` and points it at its own `StubEventsServer`, and
+  `CiEventTriggerCausationTest` reuses **that same profile class** rather than declaring an identical
+  one — a second `@TestProfile` is a second Quarkus start, and these two want the same application.
+  The second class is the trigger engine's bus half: a real frame through `EventDispatcher`, a real
+  `git ls-tree` of a real bare, and the `parentId` on the PUT the triggered run publishes — the
+  platform's first automatic causation edge, which nothing in the `ci` module can see. It is also
+  where the stub's recorded **subscribe frame** is asserted to be `["*"]`; subscribes are not cleared
+  by `reset()`, because there is one per connection and the connection outlives every test method.
+
+  The stub they share is a trimmed second copy of the eventsourcing module's, duplicated for the
+  reason both `FakeCiStepRunner`s are (the modules do not share a test classpath, and a test-jar to
+  bridge forty lines is worse). `BuildSuccessfulPublishTest` drives a real run to `SUCCESS` through
+  the real intake and asserts the *wire* contract the other side was built against: one PUT per green
+  run, a v4 UUID in the path, `name` as the signature, and the run's coordinates in the canonical
+  payload. Retries, the outbox and the three-way PUT semantics belong to the eventsourcing suite; the
+  round trip through a real qits-events belongs to the platform.
+
+  **One thing bites in both, and it is the shared candidate list.** Every repository either class has
+  ever seeded is a candidate for every frame the trigger engine evaluates, for the life of that
+  Quarkus instance. So a trigger file in a test fixture must select something **unique to the
+  repository that committed it**, or one test method's event fires an earlier method's repository and
+  "exactly two runs, exactly two publishes" stops being a statement about the test making it.
 - `CiPipelineBoundaryTest` starts at the intake POST, not at a `git push`, because the git host is
   in qits-artifacts. Assertions about what the git host's hook does or does not send belong there.
 - `CiDaemonGateIT` is **the** gate: the outline's whole lifecycle through the real intake path, on

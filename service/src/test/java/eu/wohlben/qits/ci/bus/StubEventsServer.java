@@ -41,6 +41,14 @@ public class StubEventsServer implements QuarkusTestResourceLifecycleManager {
 
   private static final List<Put> PUTS = Collections.synchronizedList(new ArrayList<>());
 
+  /**
+   * Every subscribe frame this stub was sent. Recorded because the deployable's own wire set is a
+   * claim worth one assertion here: the trigger engine's raw listener says {@code "*"} permanently,
+   * which collapses the whole union to {@code ["*"]} — so {@code BuildSuccessfulListener} stops
+   * appearing on the wire and keeps working, since dispatch filters and the wire never did.
+   */
+  private static final List<String> SUBSCRIBES = Collections.synchronizedList(new ArrayList<>());
+
   private static Vertx vertx;
   private static HttpServer server;
 
@@ -51,7 +59,19 @@ public class StubEventsServer implements QuarkusTestResourceLifecycleManager {
     }
   }
 
-  /** Forget what arrived. Called between tests; the server itself is one per JVM. */
+  /** Every subscribe frame that arrived, in order, verbatim. */
+  public static List<String> subscribes() {
+    synchronized (SUBSCRIBES) {
+      return List.copyOf(SUBSCRIBES);
+    }
+  }
+
+  /**
+   * Forget what arrived. Called between tests; the server itself is one per JVM.
+   *
+   * <p>Subscribes are deliberately <b>not</b> cleared: there is one per connection and the connection
+   * outlives every test method, so clearing would throw away the only copy of the frame.
+   */
   public static void reset() {
     PUTS.clear();
   }
@@ -86,11 +106,12 @@ public class StubEventsServer implements QuarkusTestResourceLifecycleManager {
                     socket.reject();
                     return;
                   }
-                  // The subscribe frame is read and dropped: this stub broadcasts nothing, because
-                  // what a broadcast does on arrival is the eventsourcing suite's dispatch test and
-                  // the live platform's end-to-end proof. Accepting the upgrade is what keeps the
+                  // The subscribe frame is recorded and nothing is ever broadcast back: what a
+                  // broadcast does on arrival is the eventsourcing suite's dispatch test and the live
+                  // platform's end-to-end proof, and a test here that needs a frame delivers it
+                  // through EventDispatcher directly. Accepting the upgrade is what keeps the
                   // subscriber from redialling through the whole test.
-                  socket.textMessageHandler(frame -> {});
+                  socket.textMessageHandler(SUBSCRIBES::add);
                 });
     server.listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().join();
     return Map.of("qits.events.url", "http://127.0.0.1:" + server.actualPort());

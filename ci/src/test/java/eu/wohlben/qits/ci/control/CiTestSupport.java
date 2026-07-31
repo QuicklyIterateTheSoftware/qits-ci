@@ -17,6 +17,7 @@ public abstract class CiTestSupport {
   @Inject protected CiStepRepository steps;
   @Inject protected FakeCiStepRunner fakeRunner;
   @Inject protected FakeCiConfigSource fakeConfig;
+  @Inject protected FakeCandidateRepos fakeCandidates;
 
   /**
    * Drop everything this test thread has already loaded, so the next read really goes to the
@@ -42,5 +43,8 @@ public abstract class CiTestSupport {
             });
     fakeRunner.reset();
     fakeConfig.reset();
+    // Empty by default, so no suite evaluates a trigger it did not ask for — the same reason the
+    // eventsourcing module's recording raw listeners want nothing until a test arms them.
+    fakeCandidates.reset();
   }
 }

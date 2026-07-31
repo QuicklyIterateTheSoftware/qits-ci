@@ -53,6 +53,18 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * reason to widen a library's encapsulation — and the string cannot rot unnoticed: {@code
  * EventWireReflectionTest} resolves it.
  *
+ * <p><b>The trigger engine adds nothing here, and that is worth stating rather than leaving to be
+ * rediscovered</b> — it is the natural worry in this repository, since the engine parses YAML from
+ * other repositories and JSON from other services on every frame. Neither reflects on a type of ours.
+ * The trigger files go through SnakeYAML's {@code SafeConstructor}, which produces {@code java.util}
+ * collections and boxed primitives and instantiates no class named by repository content (that is a
+ * <em>security</em> property first, and this is the second thing it buys); {@code CiEventTriggerParser}
+ * then builds its records by hand from those maps. The event payload is read with {@code readTree}
+ * into a {@code JsonNode} and walked — no binding, which is exactly why {@code EventDispatcher} uses
+ * the same call to name a frame it could not bind. The only wire type the raw path touches is {@link
+ * EventFrame}, already registered above because the typed path touches it too. The provenance fields
+ * on {@code CiRunDto} are ordinary REST serialization through the CDI mapper, which Quarkus scans.
+ *
  * <p>All of this is in {@code service/} because {@code service/} is where every native concession in
  * this repo lives. {@code eventsourcing/} is a library on its way out of this repo and {@code
  * ci-events/} is this repo's vocabulary; the deployable is what gets built into an image, so the

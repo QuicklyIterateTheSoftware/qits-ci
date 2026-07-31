@@ -1,6 +1,7 @@
 package eu.wohlben.qits.ci.dto;
 
 import eu.wohlben.qits.ci.entity.CiRunStatus;
+import eu.wohlben.qits.ci.entity.CiTriggerType;
 import java.time.Instant;
 import java.util.List;
 
@@ -16,6 +17,14 @@ import java.util.List;
  *
  * <p>{@code daemonVersion} is the {@code qits-ci-daemon} build every one of this run's containers
  * ran, pinned once at run creation — so the row records forever what produced its results.
+ *
+ * <p>The four <b>provenance</b> fields say what caused the run. {@code triggerType} is {@code
+ * POST_RECEIVE} or {@code EVENT}; {@code configPath} is the committed file that declared the
+ * pipeline, which on an event-triggered run identifies <em>which</em> {@code
+ * .config/qits/ci-event-*.yml} matched; {@code triggerEventId} and {@code triggerEventName} are the
+ * event that caused it, null on every push. They are exposed here because the run API is where an
+ * operator reads a run's provenance from outside — no client renders them yet, and that is a later,
+ * small follow-up rather than a gap.
  */
 public record CiRunDto(
     String id,
@@ -26,5 +35,9 @@ public record CiRunDto(
     Instant createdAt,
     Instant finishedAt,
     String daemonVersion,
+    CiTriggerType triggerType,
+    String triggerEventId,
+    String triggerEventName,
+    String configPath,
     List<CiStepDto> steps,
     CiLiveStepDto live) {}

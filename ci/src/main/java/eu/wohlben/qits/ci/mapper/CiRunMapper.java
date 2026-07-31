@@ -32,6 +32,10 @@ public interface CiRunMapper {
         bare.createdAt(),
         bare.finishedAt(),
         bare.daemonVersion(),
+        bare.triggerType(),
+        bare.triggerEventId(),
+        bare.triggerEventName(),
+        bare.configPath(),
         steps.stream().map(this::toDto).toList(),
         live);
   }

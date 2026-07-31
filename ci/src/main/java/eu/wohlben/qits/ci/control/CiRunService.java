@@ -9,6 +9,7 @@ import eu.wohlben.qits.ci.entity.CiRun;
 import eu.wohlben.qits.ci.entity.CiRunStatus;
 import eu.wohlben.qits.ci.entity.CiStep;
 import eu.wohlben.qits.ci.entity.CiStepStatus;
+import eu.wohlben.qits.ci.entity.CiTriggerType;
 import eu.wohlben.qits.ci.error.ConflictException;
 import eu.wohlben.qits.ci.error.NotFoundException;
 import eu.wohlben.qits.ci.persistence.CiRunRepository;
@@ -21,14 +22,18 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
+import java.sql.SQLIntegrityConstraintViolationException;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.hibernate.exception.ConstraintViolationException;
 import org.jboss.logging.Logger;
 
 /**
@@ -41,6 +46,14 @@ import org.jboss.logging.Logger;
  *
  * <p>That worker now parks on a socket rather than on a process — {@link CiStepRunner} waits for a
  * step container's own daemon — but the shape is unchanged: one blocking call per step, in order.
+ *
+ * <p><b>There are two ways in and one way through.</b> {@link #onPostReceive} is the push, which
+ * names its own commit and has this class read the config out of it; {@link #onEventTrigger} is a
+ * domain event that matched a {@code .config/qits/ci-event-*.yml}, which names no commit and arrives
+ * with its pipeline already parsed at the head of {@code main} ({@code CiEventTriggerService} had to
+ * read the file to know there was anything to run). From {@link #runSteps} down they are the same
+ * path — same worker, same recording semantics, same containers — and what tells them apart
+ * afterwards is the row's own provenance.
  *
  * <p><b>Steps are persisted at their end.</b> A {@link CiStep} row is inserted once, already
  * terminal; while a step runs it has no row at all and the live output is the runner's in-memory
@@ -160,6 +173,95 @@ public class CiRunService {
         });
   }
 
+  /**
+   * One matched event trigger, resolved: the repository, the head the trigger was read at, the
+   * pipeline that file declared, and the event that caused all of it.
+   *
+   * <p>The pipeline travels here <b>already parsed</b>, unlike the post-receive path which parses on
+   * this worker. That is the shape the two triggers force: an event has no commit of its own, so
+   * {@code CiEventTriggerService} must resolve the head and read the file to know whether there is
+   * anything to run at all — by the time it knows, it has parsed. Re-reading here would be a second
+   * fetch against a branch that may have moved, and the run would then record a sha it did not build.
+   */
+  public record EventRun(
+      String repoId,
+      String branch,
+      String sha,
+      CiEventTrigger trigger,
+      String eventId,
+      String eventName,
+      Instant occurredAt,
+      String payload) {}
+
+  /** The async entry the trigger engine calls — returns immediately, the run executes queued. */
+  public void onEventTrigger(EventRun request) {
+    CiIdentifiers.requireRepoId(request.repoId());
+    CiIdentifiers.requireBranch(request.branch());
+    CiIdentifiers.requireSha(request.sha());
+    worker.submit(
+        () -> {
+          try {
+            executeEventRun(request);
+          } catch (RuntimeException e) {
+            LOG.errorf(
+                e,
+                "Event-triggered CI run for %s (%s) failed unexpectedly",
+                request.repoId(),
+                request.eventId());
+          }
+        });
+  }
+
+  /**
+   * The synchronous event-triggered run — package-private so tests drive it without the worker.
+   *
+   * <p>It joins the post-receive path at {@link #runSteps}: same worker, same recording semantics,
+   * same daemon pin, same step containers. The two differences are both in the row it writes — the
+   * provenance columns, and the {@code QITS_EVENT_*} environment its containers get.
+   *
+   * <p><b>The insert is the dedupe.</b> A second arrival of the same event hits the unique constraint
+   * on {@code (trigger_event_id, repo_id, config_path)} and is dropped as already-triggered rather
+   * than re-run: {@link #persistEventRun} returns null and this returns without a run. There is no
+   * "already triggered" state to record — the first run is the record.
+   */
+  void executeEventRun(EventRun request) {
+    // Resolved once, here, exactly as on the push path: every step container of this run downloads
+    // the same daemon build.
+    DaemonPin pin = runner.pinDaemon();
+    CiRun run = persistEventRun(request, pin.version());
+    if (run == null) {
+      return;
+    }
+    try {
+      runSteps(run, request.trigger().pipeline(), pin, eventEnv(request));
+    } catch (RuntimeException e) {
+      LOG.errorf(e, "CI run %s failed unexpectedly", run.id);
+      QuarkusTransaction.requiringNew().run(() -> failIncompleteSteps(run.id));
+      finishRun(run.id, CiRunStatus.FAILED);
+    } finally {
+      cancelled.remove(run.id);
+      runner.runClosed(run.id);
+    }
+  }
+
+  /**
+   * What an event-triggered run's step containers see, and the whole of it.
+   *
+   * <p>The payload goes in <b>verbatim</b>, as the canonical JSON qits-events stored — no per-field
+   * flattening. Env names derived from payload paths invite collisions and quoting bugs, and {@code
+   * jq} is already the platform's answer inside a step; a step that wants one field asks for it.
+   */
+  private static Map<String, String> eventEnv(EventRun request) {
+    Map<String, String> env = new TreeMap<>();
+    env.put("QITS_EVENT_ID", request.eventId());
+    env.put("QITS_EVENT_NAME", request.eventName());
+    env.put(
+        "QITS_EVENT_OCCURRED_AT",
+        request.occurredAt() == null ? "" : request.occurredAt().toString());
+    env.put("QITS_EVENT_PAYLOAD", request.payload() == null ? "" : request.payload());
+    return Map.copyOf(env);
+  }
+
   /** The synchronous run — package-private so tests drive it without the worker. */
   void execute(String repoId, String branch, String sha) {
     ConfigLookup lookup = configSource.read(repoId, branch, sha);
@@ -178,7 +280,7 @@ public class CiRunService {
       }
       case INVALID -> {
         LOG.infof("CI config unusable at %s@%s: %s", repoId, sha, lookup.message());
-        persistRun(repoId, branch, sha, CiRunStatus.CONFIG_ERROR, null);
+        persistPostReceiveRun(repoId, branch, sha, CiRunStatus.CONFIG_ERROR, null);
         return;
       }
       case FOUND -> {
@@ -191,15 +293,15 @@ public class CiRunService {
       pipeline = parser.parse(lookup.content());
     } catch (CiConfigException e) {
       LOG.infof("CI config error at %s@%s: %s", repoId, sha, e.getMessage());
-      persistRun(repoId, branch, sha, CiRunStatus.CONFIG_ERROR, null);
+      persistPostReceiveRun(repoId, branch, sha, CiRunStatus.CONFIG_ERROR, null);
       return;
     }
 
     // Resolved once, here: every step container of this run downloads the same daemon build.
     DaemonPin pin = runner.pinDaemon();
-    CiRun run = persistRun(repoId, branch, sha, CiRunStatus.RUNNING, pin.version());
+    CiRun run = persistPostReceiveRun(repoId, branch, sha, CiRunStatus.RUNNING, pin.version());
     try {
-      runSteps(run, pipeline, pin);
+      runSteps(run, pipeline, pin, Map.of());
     } catch (RuntimeException e) {
       LOG.errorf(e, "CI run %s failed unexpectedly", run.id);
       QuarkusTransaction.requiringNew().run(() -> failIncompleteSteps(run.id));
@@ -214,7 +316,8 @@ public class CiRunService {
    * The sequential loop. Each iteration blocks on one container's whole lifetime and then writes
    * exactly one terminal row; whatever the loop did not reach is written {@code SKIPPED} at the end.
    */
-  private void runSteps(CiRun run, CiPipeline pipeline, DaemonPin pin) {
+  private void runSteps(
+      CiRun run, CiPipeline pipeline, DaemonPin pin, Map<String, String> env) {
     List<CiPipeline.CiStepDecl> declared = pipeline.steps();
     int index = 0;
     boolean failed = false;
@@ -235,7 +338,8 @@ public class CiRunService {
                     decl.script(),
                     pin.binaryUrl(),
                     decl.timeoutSeconds() == null ? stepTimeoutSeconds : decl.timeoutSeconds(),
-                    decl.docker()),
+                    decl.docker(),
+                    env),
                 stamps);
 
         // A cancellation completes the await NORMALLY — the daemon answers a Cancel with a terminal
@@ -349,11 +453,20 @@ public class CiRunService {
    *
    * <p>Failures are the port's, not the run's: a green run stays green whatever an announcement
    * does.
+   *
+   * <p><b>{@code triggerEventId} rides along, and it is how causation crosses a thread.</b> On an
+   * event-triggered run it is the event that caused the run; the announcer hands it to the bus as the
+   * published event's parent, so the run's own {@code BuildSuccessful} names what caused it and a
+   * release train is a chain in the event log. It comes off the row rather than out of an ambient
+   * context because there is none to read here: the engine consumed the frame on the bus's dispatch
+   * thread and this is {@code ci-run-worker}, minutes later. Null on every push, which publishes a
+   * root — correctly, since a push is not caused by an event.
    */
   private void announceRun(CiRun run, Instant finishedAt) {
     for (RunAnnouncer announcer : runAnnouncers) {
       try {
-        announcer.onRunSucceeded(run.id, run.repoId, run.branch, run.commitSha, finishedAt);
+        announcer.onRunSucceeded(
+            run.id, run.repoId, run.branch, run.commitSha, finishedAt, run.triggerEventId);
       } catch (RuntimeException e) {
         LOG.warnf(e, "Announcing run %s failed", run.id);
       }
@@ -393,7 +506,96 @@ public class CiRunService {
     };
   }
 
-  private CiRun persistRun(
+  /** A run caused by a push: the constant config path, no event, {@code POST_RECEIVE}. */
+  private CiRun persistPostReceiveRun(
+      String repoId, String branch, String sha, CiRunStatus status, String daemonVersion) {
+    CiRun run = newRun(repoId, branch, sha, status, daemonVersion);
+    run.triggerType = CiTriggerType.POST_RECEIVE;
+    run.configPath = CiConfigParser.CONFIG_PATH;
+    // No step rows: they are written one at a time, terminal, as each step ends.
+    QuarkusTransaction.requiringNew().run(() -> runs.persist(run));
+    return run;
+  }
+
+  /**
+   * A run caused by a domain event, or <b>null when this (event, repository, trigger file) already
+   * has one</b>.
+   *
+   * <p>Both halves of that are here on purpose. The {@link CiRunRepository#alreadyTriggered} query is
+   * the cheap one and catches the ordinary case — a redelivery, which the bus is allowed to do and
+   * which a future catch-up feature will do deliberately. The caught constraint violation is the one
+   * that matters: it is the guarantee, it holds across a race and a restart in a way no read-then-write
+   * can, and reaching it is not an error to report but the answer to a question. Anything that is
+   * <em>not</em> a unique violation is rethrown, because a run that failed to insert for some other
+   * reason is a defect and must not look like a duplicate.
+   *
+   * <p>Both run in <b>one</b> {@code requiringNew} bracket, which they have to for two reasons: this
+   * is the run worker and a worker thread has no request context, so an unwrapped read has no session
+   * at all; and a check in its own transaction would be answering about a moment that has already
+   * passed by the time the insert happens.
+   */
+  private CiRun persistEventRun(EventRun request, String daemonVersion) {
+    String configPath = request.trigger().configPath();
+    CiRun run =
+        newRun(
+            request.repoId(),
+            request.branch(),
+            request.sha(),
+            CiRunStatus.RUNNING,
+            daemonVersion);
+    run.triggerType = CiTriggerType.EVENT;
+    run.configPath = configPath;
+    run.triggerEventId = request.eventId();
+    run.triggerEventName = request.eventName();
+    boolean inserted;
+    try {
+      inserted =
+          QuarkusTransaction.requiringNew()
+              .call(
+                  () -> {
+                    if (runs.alreadyTriggered(request.eventId(), request.repoId(), configPath)) {
+                      return false;
+                    }
+                    runs.persist(run);
+                    return true;
+                  });
+    } catch (RuntimeException e) {
+      if (!isUniqueViolation(e)) {
+        throw e;
+      }
+      LOG.infof(
+          "Event %s reached %s in %s twice — the first run stands",
+          request.eventId(), configPath, request.repoId());
+      return null;
+    }
+    if (!inserted) {
+      LOG.debugf(
+          "Event %s already triggered %s in %s — no second run",
+          request.eventId(), configPath, request.repoId());
+      return null;
+    }
+    return run;
+  }
+
+  /**
+   * Whether a failed insert was the unique constraint rather than something else. Walked rather than
+   * matched on a message: the exception a Panache persist wraps a constraint violation in depends on
+   * the transaction boundary that flushed it, so the cause chain is the only stable place to look.
+   */
+  private static boolean isUniqueViolation(Throwable e) {
+    for (Throwable cause = e; cause != null; cause = cause.getCause()) {
+      if (cause instanceof ConstraintViolationException
+          || cause instanceof SQLIntegrityConstraintViolationException) {
+        return true;
+      }
+      if (cause.getCause() == cause) {
+        break;
+      }
+    }
+    return false;
+  }
+
+  private static CiRun newRun(
       String repoId, String branch, String sha, CiRunStatus status, String daemonVersion) {
     CiRun run = new CiRun();
     run.id = UUID.randomUUID().toString();
@@ -406,8 +608,6 @@ public class CiRunService {
     if (status != CiRunStatus.RUNNING) {
       run.finishedAt = run.createdAt;
     }
-    // No step rows: they are written one at a time, terminal, as each step ends.
-    QuarkusTransaction.requiringNew().run(() -> runs.persist(run));
     return run;
   }
 

