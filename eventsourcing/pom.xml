@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben.qits</groupId>
+        <artifactId>qits-ci</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!-- The event bus client: publish an event to qits-events, listen for events from it.
+         `QitsEvent`, `QitsEventBus`, `QitsEventListener` are the whole public surface; the outbox,
+         the canonical-JSON serializer and the websocket subscriber are how they are kept.
+
+         A FUTURE LIBRARY THAT HAPPENS TO LIVE HERE. It sits in this repo because qits-ci is its
+         first consumer, and it is separated so that extracting it is a `git mv` plus a pom rather
+         than a refactor — see eventsourcing-plan.md in the superproject. That intent is enforced,
+         not merely stated:
+
+           THE EXTRACTION RULE — no `eu.wohlben.qits.ci.*` import may appear anywhere in this
+           module, main or test. `ExtractionRuleTest` greps this module's sources for it, so the
+           rule fails a build rather than a review. The event classes qits-ci emits live one module
+           over, in `ci-events`, which depends on this one and never the other way round.
+
+         The name mismatch is the other two modules' mismatch, for the other reason: the directory
+         is `eventsourcing/` and the artifactId `qits-eventsourcing` because a bare
+         `eu.wohlben.qits:eventsourcing` would collide in the shared ~/.m2 every workspace container
+         mounts. Here the DIRECTORY is the one that stays generic — it is the name the module will
+         carry into its own repository. -->
+    <artifactId>qits-eventsourcing</artifactId>
+    <name>qits-ci :: eventsourcing</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-arc</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The outbox is a Panache entity in this module's OWN named persistence unit; see
+                 src/main/resources/META-INF/microprofile-config.properties. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-hibernate-orm-panache</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jdbc-h2</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Jackson itself, NOT the CDI ObjectMapper. CanonicalJson builds its own mapper and
+                 configures every knob the wire contract depends on, because the canonical form is a
+                 thing another service compares byte-for-byte and must not be at the mercy of a
+                 consuming application's ObjectMapperCustomizers. The extension is here for the
+                 dependency and the native-image registrations, not for the bean. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jackson</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The @Scheduled outbox sweeper. A new extension for this repo (qits-artifacts talked
+                 itself out of one for a twenty-line lazy sweep and said so in OciUploadSessions);
+                 it is taken here because the retry schedule is the durability guarantee — a
+                 failed publish has to be retried with nothing else happening in the process, which
+                 is precisely what "sweep when something else comes along" cannot promise.
+                 Native-image supported, and it registers no reflection of ours: the scheduled
+                 method is a plain package-private method on an @ApplicationScoped bean. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-scheduler</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The CLIENT half — BasicWebSocketConnector, dialling qits-events' /events/stream.
+                 The extension ships a server too and this module registers no @WebSocket, so the
+                 only cost is in what a consumer already carries: `service` has had
+                 quarkus-websockets-next since the ci-daemon control plane landed, so joining this
+                 module into it adds nothing to the deployable or to the native image.
+
+                 It is the connector rather than vert.x-core's own WebSocketClient (which is what
+                 qits-ci-daemon uses, deliberately, to avoid linking an HTTP server into a 45MB
+                 static binary) because this module is only ever consumed by a service that is
+                 already serving HTTP, and the connector's callback shape carries the reconnect
+                 logic with far less ceremony. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-websockets-next</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <!-- The consuming Quarkus app needs an index of this jar's beans and entities —
+                     the outbox entity, the sweeper's @Scheduled method and the listener beans are
+                     all discovered from it. Same reason `ci` carries the plugin. -->
+                <groupId>io.smallrye</groupId>
+                <artifactId>jandex-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

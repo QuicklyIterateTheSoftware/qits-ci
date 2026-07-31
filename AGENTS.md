@@ -65,11 +65,18 @@ package:
 - `ci-daemon-protocol/` — the vendored wire contract (below). Its package is
   `eu.wohlben.qits.cidaemon.protocol`, deliberately not under `eu.wohlben.qits.ci`: it is a copy of
   another repo's module and its package must stay byte-identical with the original.
+- `eventsourcing/` — the event bus client (below). Its package is `eu.wohlben.qits.eventsourcing`,
+  and it may not import `eu.wohlben.qits.ci.*` at all.
+- `ci-events/` — the event classes qits-ci emits, `eu.wohlben.qits.ci.events`. Under this repo's own
+  namespace because it *is* this repo's vocabulary; depends on `eventsourcing` and nothing else.
 
-The **directories** are `ci/`, `service/` and `ci-daemon-protocol/`; the artifactIds are
-`qits-ci-domain`, `qits-ci-service` and `qits-ci-daemon-protocol`. The first two mismatch
-deliberately — the extracted git history is anchored to the directory names, and generic coordinates
-like `eu.wohlben:ci` would collide in the shared `~/.m2` that every workspace container mounts.
+The **directories** are `ci/`, `service/`, `ci-daemon-protocol/`, `eventsourcing/` and `ci-events/`;
+the artifactIds are `qits-ci-domain`, `qits-ci-service`, `qits-ci-daemon-protocol`,
+`qits-eventsourcing` and `qits-ci-events`. The first two mismatch deliberately — the extracted git
+history is anchored to the directory names, and generic coordinates like `eu.wohlben:ci` would
+collide in the shared `~/.m2` that every workspace container mounts. `eventsourcing/` mismatches for
+the same collision reason in the other direction: the directory keeps the generic name because that
+is the name it will carry into its own repository.
 
 ## The vendored protocol module
 
@@ -230,6 +237,47 @@ Note Quinoa is **disabled by default in test mode**, so no `@QuarkusTest` builds
 suite's runtime is unchanged. What the SPA is actually served as is proven by `package` plus the
 packaged artifact, not by surefire.
 
+## The eventsourcing module
+
+`eventsourcing/` is a **library that has not moved out yet**. It is the platform's event bus client
+— `QitsEvent`, `QitsEventBus.publish`, `QitsEventListener` — and it lives here because qits-ci is
+its first consumer and for no other reason. The design is the superproject's
+`eventsourcing-plan.md`; what follows is what biting it feels like.
+
+**THE EXTRACTION RULE: no `eu.wohlben.qits.ci.*` may be imported anywhere in that module, main or
+test.** The whole value of the arrangement is that lifting it out is a `git mv` plus a pom, and one
+import taken in the moment because the class was right there turns that into a refactor.
+`ExtractionRuleTest` greps the module's own sources, so it fails a build rather than a review. The
+event classes go the other way round: `ci-events/` depends on `eventsourcing/`, never the reverse,
+and it is allowed the `ci` namespace precisely because it is qits-ci's vocabulary rather than the
+library's.
+
+Four things are easy to get wrong here:
+
+- **The canonical form is a wire contract, not a formatting preference.** qits-events stores the
+  `payload` string verbatim and compares it byte-for-byte to tell an idempotent replay (200) from a
+  reused UUID (400), so two serializations of one event that differ by a space are a contradiction
+  to the other side. `CanonicalJson` therefore builds its **own** `ObjectMapper` rather than
+  injecting the CDI one — the consuming application's `ObjectMapperCustomizer`s must not be able to
+  reach it — and sets every knob that could vary explicitly. Its class javadoc names each and why.
+- **`eventId` is fixed at construction and never regenerated.** It is the `{id}` of the PUT, which
+  is the only reason a retry is safe: a request whose response was lost replays as a 200 instead of
+  writing the event twice. An event class may hold it as an ordinary record component; the library
+  keeps everything `QitsEvent` declares out of the payload, so identity travels in the envelope.
+- **The publisher's `HttpClient` is pinned to HTTP/1.1.** The JDK default is HTTP/2 with an `h2c`
+  upgrade, and an upgrade carrying a request body **delivers that body twice** — measured against
+  the test stub, once through the server's upgrade handler and again as an HTTP/2 data frame ninety
+  milliseconds later. Idempotency made it harmless and therefore invisible; it was a doubled request
+  on every publish. Do not drop the `version(...)` line.
+- **The outbox is failure-path-only, and empty in a healthy process.** A publish that lands writes
+  nothing; a row that is delivered on retry is deleted. So the row count is a health signal rather
+  than a log, and the log is qits-events. The known hole — a crash between the inline attempt
+  failing and the row committing — is named in `OutboxEvent`'s javadoc and deliberately left open.
+
+Its own datasource, persistence unit and Flyway lineage (`eventsourcing`, `db/eventsourcing/migration`)
+follow the platform convention, for the ordinary reason plus one more: the split out of this repo
+should move files, not data.
+
 ## Adding a dependency on another context
 
 Don't. This context has no compile-time dependency on any other qits module and should not grow
@@ -356,7 +404,22 @@ mechanism at all — which is what every service here was before the header land
   (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first.
   `CiPackagedSurfaceIT` is deliberately outside that race: failsafe passes it
   `quarkus.http.test-port=0`, so the packaged app it launches takes a free port instead of queueing
-  behind whatever surefire has not finished releasing.
+  behind whatever surefire has not finished releasing. `eventsourcing/`'s suite sets the same key in
+  its own `src/test/resources/application.properties`, for a version of the same reason it can
+  actually fix: that module registers no route at all — quarkus-websockets-next is there for its
+  *client* — so the server a `@QuarkusTest` starts is incidental, and three test classes asking for
+  three configurations means three restarts racing one port.
+- **The eventsourcing suite talks to a real socket and a fake clock.** `StubEventsServer` is a
+  `QuarkusTestResourceLifecycleManager` — a Vert.x server answering the real PUT and the real
+  upgrade on an ephemeral port, handed to Quarkus as `qits.events.url` *before it boots*, which is
+  the only way a port that cannot be known earlier reaches the application's config (qits-gateway's
+  `StubUpstream`, same shape). It is deliberately dumb: it scripts status codes and records what
+  arrived, and holds no idempotency table, because a second implementation of qits-events whose
+  agreement with the first nobody checks is worse than no coverage. `TestClock` is a plain
+  `Clock` bean that outranks the module's `@DefaultBean` producer, so the retry schedule's
+  eighty-odd seconds are walked in milliseconds and `OutboxSweeper#sweep` is called rather than
+  waited for. The scheduled tick is configured to 24h in the same file so it never lands in the
+  middle of one.
 - `CiPackagedSurfaceIT` is the only test that runs the **packaged artifact** — the fast-jar under
   `-DskipITs=false`, the binary under `-Dnative`. It is not a second boundary test and behaviour
   does not belong in it: it asserts the handful of things a `@QuarkusTest` structurally cannot see,

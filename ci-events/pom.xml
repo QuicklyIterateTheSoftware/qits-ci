@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben.qits</groupId>
+        <artifactId>qits-ci</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!-- qits-ci's event vocabulary: the things this service announces to the platform. Today
+         exactly one, `BuildSuccessful`.
+
+         A module of its own, between `eventsourcing` and everything else, for one reason: a
+         vocabulary is what a *consumer* needs, and nothing else in this repo is. The day a second
+         service wants to listen for BuildSuccessful it depends on this jar and gets the class plus
+         the bus and no part of qits-ci's domain — which is why the split is here rather than a
+         package inside `ci`.
+
+         It depends on `eventsourcing` and on nothing else, not even quarkus-arc: these are plain
+         records, and a data module that cannot boot a container cannot grow a service.
+
+         THE EXTRACTION RULE DOES NOT APPLY HERE, and the package says so — `eu.wohlben.qits.ci.events`
+         is under qits-ci's own namespace because this IS qits-ci's vocabulary. Only `eventsourcing`
+         carries the no-ci-imports rule; this module is on the other side of that arrow.
+
+         Separately *publishable* one day, separately *published* explicitly out of scope now. -->
+    <artifactId>qits-ci-events</artifactId>
+    <name>qits-ci :: events</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-eventsourcing</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Plain JUnit 5, not quarkus-junit5: nothing here is a @QuarkusTest. The suite drives
+                 plain constructors and the canonical serializer, which needs no container. -->
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

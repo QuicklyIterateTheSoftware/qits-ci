@@ -38,8 +38,13 @@
     <name>qits-ci</name>
 
     <modules>
-        <!-- Listed first: `service` depends on both. -->
+        <!-- Listed first: `service` depends on all four. `eventsourcing` and `ci-events` come
+             before `ci` because that is the direction of the dependency arrow — ci-events depends
+             on eventsourcing and on nothing else, eventsourcing depends on nothing of ours at all.
+             (Maven computes the reactor order itself; the listing is documentation.) -->
         <module>ci-daemon-protocol</module>
+        <module>eventsourcing</module>
+        <module>ci-events</module>
         <module>ci</module>
         <module>service</module>
     </modules>
@@ -116,6 +121,16 @@
             <dependency>
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-ci-daemon-protocol</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-eventsourcing</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-ci-events</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>
