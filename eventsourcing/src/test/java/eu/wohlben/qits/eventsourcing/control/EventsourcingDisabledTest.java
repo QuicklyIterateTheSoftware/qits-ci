@@ -2,7 +2,9 @@ package eu.wohlben.qits.eventsourcing.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
+import eu.wohlben.qits.eventsourcing.CausationScope;
 import eu.wohlben.qits.eventsourcing.QitsEventBus;
 import eu.wohlben.qits.eventsourcing.control.TestEvents.ThingHappened;
 import io.quarkus.test.common.WithTestResource;
@@ -11,6 +13,7 @@ import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import java.util.Map;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -45,6 +48,25 @@ class EventsourcingDisabledTest extends EventsourcingTestSupport {
 
     assertEquals(0, StubEventsServer.puts().size(), "no request may leave a disabled module");
     assertEquals(0, outboxCount(), "and nothing is queued for later either");
+  }
+
+  /**
+   * Causation changes nothing about darkness, in either of its two shapes: a scope establishes a
+   * value on a thread whether or not anything is listening, and an explicit parent is just an
+   * argument. Neither may become a reason for a disabled bus to dial, and neither may become a row.
+   */
+  @Test
+  void aDisabledBusStampsNothingBecauseItPublishesNothing() {
+    CausationScope.with(
+        UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        () -> bus.publish(new ThingHappened("shipped", 1, T0)));
+    bus.publish(
+        new ThingHappened("shipped", 2, T0),
+        UUID.fromString("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"));
+
+    assertEquals(0, StubEventsServer.puts().size(), "a cause is not a reason to dial");
+    assertEquals(0, outboxCount());
+    assertNull(CausationScope.current(), "and the scope still unwound");
   }
 
   @Test

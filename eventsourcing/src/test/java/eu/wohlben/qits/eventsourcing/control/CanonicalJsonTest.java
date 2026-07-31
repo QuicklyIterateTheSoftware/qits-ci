@@ -3,6 +3,7 @@ package eu.wohlben.qits.eventsourcing.control;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -107,14 +108,21 @@ class CanonicalJsonTest {
   }
 
   @Test
-  void theEnvelopeIsTheContractsShapeWithDescriptionSpelledAsAnExplicitNull() {
+  void theEnvelopeIsTheContractsShapeWithTheNullablesSpelledAsExplicitNulls() {
     EventEnvelope envelope = EventEnvelope.of(new ThingHappened("shipped", 3, WHEN));
 
     String json = CanonicalJson.envelope(envelope);
     JsonNode parsed = CanonicalJson.parse(json);
 
-    assertEquals(List.of("description", "name", "occurredAt", "payload"), fieldNames(parsed));
+    // Alphabetical, so parentId lands between occurredAt and payload without anybody choosing where
+    // — the mapper's SORT_PROPERTIES_ALPHABETICALLY is what makes a new envelope field free of an
+    // ordering decision.
+    assertEquals(
+        List.of("description", "name", "occurredAt", "parentId", "payload"), fieldNames(parsed));
     assertTrue(parsed.get("description").isNull(), json);
+    // @JsonInclude(ALWAYS) is on the TYPE, so the new component inherited the exception to the
+    // omit-nulls rule: absent means an explicit null on the wire, never a missing key.
+    assertTrue(parsed.get("parentId").isNull(), json);
     assertEquals("ThingHappened", parsed.get("name").asText());
     assertEquals("2026-07-31T12:46:03Z", parsed.get("occurredAt").asText());
     // payload is a STRING holding JSON, not a nested object — the server never parses it.
@@ -143,6 +151,23 @@ class CanonicalJsonTest {
     assertEquals("ThingHappened", frame.name());
     assertEquals(WHEN, frame.occurredAt());
     assertEquals("shipped", CanonicalJson.payloadTo(frame.payload(), ThingHappened.class).what());
+    // The five-field frame an older qits-events pushes: the sixth binds to null rather than failing.
+    // That is the one-directional compatibility clause the feature rests on, and it is why the
+    // rollout order is qits-events first.
+    assertNull(frame.parentId());
+  }
+
+  @Test
+  void aFrameCarryingAParentReadsItBack() {
+    String parent = UUID.randomUUID().toString();
+    String text =
+        """
+        {"id":"%s","name":"ThingHappened","occurredAt":"2026-07-31T12:46:03Z",\
+        "payload":"{\\"what\\":\\"shipped\\"}","description":null,"parentId":"%s"}
+        """
+            .formatted(UUID.randomUUID(), parent);
+
+    assertEquals(parent, CanonicalJson.frame(text).parentId());
   }
 
   private static List<String> fieldNames(JsonNode node) {

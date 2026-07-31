@@ -60,7 +60,7 @@ class BuildSuccessfulTest {
     JsonNode json = CanonicalJson.parse(CanonicalJson.envelope(envelope));
 
     assertEquals(
-        List.of("description", "name", "occurredAt", "payload"),
+        List.of("description", "name", "occurredAt", "parentId", "payload"),
         json.properties().stream().map(Map.Entry::getKey).toList());
     assertEquals("BuildSuccessful", json.get("name").asText());
     assertEquals("2026-07-31T12:46:03Z", json.get("occurredAt").asText());
@@ -70,6 +70,10 @@ class BuildSuccessfulTest {
             + "\"repoId\":\"qits-ci\",\"runId\":\"run-1\"}",
         json.get("payload").asText());
     assertEquals(true, json.get("description").isNull(), "description is an explicit null");
+    // parentId joined the envelope when causation landed. BuildSuccessful itself did NOT change —
+    // that is the design: no event class ever declares a parent, so the payload above is the same
+    // six keys it always was, and the causation lives one level out where the server compares it.
+    assertEquals(true, json.get("parentId").isNull(), "a build nothing caused is a chain root");
   }
 
   @Test

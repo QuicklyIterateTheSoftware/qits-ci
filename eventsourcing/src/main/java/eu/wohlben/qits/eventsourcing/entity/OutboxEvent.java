@@ -46,6 +46,20 @@ public class OutboxEvent extends PanacheEntityBase {
   /** The envelope's {@code description}. Always null today; the column exists so a row is the whole envelope. */
   @Lob public String description;
 
+  /**
+   * The envelope's {@code parentId} — the event that caused this one, or null for a root.
+   *
+   * <p><b>Stored rather than re-derived, and that is the whole reason this column exists.</b> The
+   * cause is an ambient or argued value at the moment of the publish and is gone by the time the
+   * sweeper runs, on another thread, possibly minutes later; qits-events meanwhile compares {@code
+   * name} + {@code occurredAt} + {@code payload} + {@code parentId} to tell a replay from a reused
+   * id. A retry that rebuilt the envelope without this would be a different request than the one it
+   * is retrying — a 400 against its own landed first attempt, or a caused event quietly re-published
+   * as a chain root. Same argument the {@link #payload} column carries, one field further on.
+   */
+  @Column(name = "parent_id", length = 36)
+  public String parentId;
+
   @Enumerated(EnumType.STRING)
   @Column(nullable = false, length = 16)
   public OutboxStatus status;

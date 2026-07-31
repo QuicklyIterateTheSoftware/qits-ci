@@ -24,6 +24,26 @@ package eu.wohlben.qits.eventsourcing;
  * <p>{@link #onEvent} runs on a worker thread, one frame at a time per connection, and a throw is
  * logged and swallowed — it must not take the socket down with it. Anything slow belongs on the
  * listener's own executor.
+ *
+ * <p><b>Which is exactly where causation is dropped, so the bridge is part of the advice.</b> The
+ * dispatcher runs {@link #onEvent} inside {@link CausationScope} of the arriving event's id, so
+ * anything published <em>on this thread</em> is stamped with it and no argument is needed. A hand-off
+ * to your own executor leaves that scope behind — a plain {@code ThreadLocal} does not follow work,
+ * and deliberately so — so capture and re-establish it:
+ *
+ * <pre>{@code
+ * public void onEvent(ThingHappened event) {
+ *   UUID cause = CausationScope.current();
+ *   executor.submit(() -> CausationScope.with(cause, () -> {
+ *     bus.publish(new SomethingFollowed(...));
+ *   }));
+ * }
+ * }</pre>
+ *
+ * <p>Or pass it: {@code bus.publish(followUp, cause)} says the same thing at one site instead of a
+ * region, and is the better shape when the code that knows the cause is the code that publishes.
+ * What is <em>not</em> an option is doing neither and believing the chain was recorded — a dropped
+ * parent is a root event, which is a silent, unbackfillable loss.
  */
 public interface QitsEventListener<E extends QitsEvent> {
 

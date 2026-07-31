@@ -1,6 +1,7 @@
 package eu.wohlben.qits.eventsourcing.control;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import eu.wohlben.qits.eventsourcing.CausationScope;
 import eu.wohlben.qits.eventsourcing.QitsEvent;
 import eu.wohlben.qits.eventsourcing.QitsEventListener;
 import jakarta.annotation.PostConstruct;
@@ -12,6 +13,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.UUID;
 import org.jboss.logging.Logger;
 
 /**
@@ -74,8 +76,15 @@ public class EventDispatcher {
    * bought this line — in the native image's reflection metadata. At DEBUG a binary that could not
    * deserialize {@link EventFrame} at all said <em>nothing</em>, on every frame, for as long as it
    * ran. Dropping it stays right; being quiet about it did not.
+   *
+   * <p><b>The listener loop runs inside {@link CausationScope} of the arriving frame's id</b>, so an
+   * event a listener publishes while consuming records this one as its parent with nobody passing an
+   * argument. One scope for the whole loop rather than one per listener: every listener on a frame
+   * is running because of the same arrival, so they see the same cause. The scope is unwound before
+   * this method returns — including when a listener throws, since {@code with} restores in a {@code
+   * finally} — which is what keeps a stale parent off the next frame on a worker thread that is
+   * reused for the life of the process.
    */
-  @SuppressWarnings("unchecked")
   public void dispatch(String text) {
     EventFrame frame;
     try {
@@ -91,6 +100,11 @@ public class EventDispatcher {
       LOG.debugf("no listener for signature %s", frame.name());
       return;
     }
+    CausationScope.with(causeOf(frame), () -> deliver(frame, listeners));
+  }
+
+  @SuppressWarnings("unchecked")
+  private void deliver(EventFrame frame, List<QitsEventListener<?>> listeners) {
     for (QitsEventListener<?> listener : listeners) {
       try {
         QitsEvent event =
@@ -100,6 +114,27 @@ public class EventDispatcher {
         LOG.errorf(
             e, "listener %s failed on %s", listener.getClass().getName(), frame.name());
       }
+    }
+  }
+
+  /**
+   * The arriving event's id as a {@link UUID}, or null if it is not one.
+   *
+   * <p>The frame's {@code id} is a {@link String} — qits-events' column is a {@code varchar(255)}
+   * with no format promise attached — and this is the one place in the module that has to make a
+   * UUID of it. <b>Unparseable means "no cause", not "drop the frame".</b> Dropping an event is a
+   * designed failure here; refusing to dispatch over an id format is not, and a throw out of this
+   * method would take out every listener on the frame for the sake of a field none of them read.
+   */
+  private static UUID causeOf(EventFrame frame) {
+    if (frame.id() == null) {
+      return null;
+    }
+    try {
+      return UUID.fromString(frame.id());
+    } catch (IllegalArgumentException notAUuid) {
+      LOG.debugf("frame id %s is not a uuid; dispatching %s with no cause", frame.id(), frame.name());
+      return null;
     }
   }
 

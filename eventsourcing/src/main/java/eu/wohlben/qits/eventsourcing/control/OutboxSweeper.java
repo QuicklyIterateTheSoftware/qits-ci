@@ -19,6 +19,11 @@ import org.jboss.logging.Logger;
  * fires must not have a second thread re-attempting the same rows, because two in-flight {@code
  * PUT}s of one id is the one situation the server's idempotency was not designed to arbitrate.
  *
+ * <p><b>It stamps nothing.</b> A sweep re-sends a <em>stored</em> envelope, causation included, so
+ * the one path in this module that could have gone wrong about a parent cannot: the value was fixed
+ * when the envelope was built and is read back off the row. That is the property the outbox's
+ * {@code parent_id} column exists to protect.
+ *
  * <p>{@link #sweep()} is public and returns what it did, which is how the retry schedule is tested:
  * a test moves its clock to the row's {@code nextAttemptAt} and calls this, instead of sleeping
  * through eighty seconds of real backoff.
@@ -57,9 +62,14 @@ public class OutboxSweeper {
     Instant now = clock.instant();
     List<OutboxEvent> due = outbox.due(now);
     for (OutboxEvent row : due) {
+      // Rebuilt from the stored columns and from nothing else — including parent_id, which the
+      // server compares. A parent re-read from the ambient context here would be whatever the
+      // SCHEDULER's thread happens to hold, which is never the right answer and is usually null.
       EventsPublisher.Delivery attempt =
           publisher.put(
-              row.id, new EventEnvelope(row.name, row.occurredAt, row.payload, row.description));
+              row.id,
+              new EventEnvelope(
+                  row.name, row.occurredAt, row.payload, row.description, row.parentId));
       if (attempt.delivered()) {
         outbox.delivered(row.id);
       } else {

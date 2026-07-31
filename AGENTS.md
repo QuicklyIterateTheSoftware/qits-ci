@@ -257,7 +257,7 @@ event classes go the other way round: `ci-events/` depends on `eventsourcing/`, 
 and it is allowed the `ci` namespace precisely because it is qits-ci's vocabulary rather than the
 library's.
 
-Four things are easy to get wrong here:
+Five things are easy to get wrong here:
 
 - **The canonical form is a wire contract, not a formatting preference.** qits-events stores the
   `payload` string verbatim and compares it byte-for-byte to tell an idempotent replay (200) from a
@@ -278,6 +278,53 @@ Four things are easy to get wrong here:
   nothing; a row that is delivered on retry is deleted. So the row count is a health signal rather
   than a log, and the log is qits-events. The known hole — a crash between the inline attempt
   failing and the row committing — is named in `OutboxEvent`'s javadoc and deliberately left open.
+- **Causation is stamped by the bus, in the envelope, and it never touches an event class.**
+  `EventEnvelope` carries a nullable `parentId` — the event that caused this one — and
+  `QitsEventBus.publish` is the only place it is resolved. The precedence is the whole rule: **an
+  explicit non-null argument wins; a null or absent one falls back to `CausationScope.current()`;
+  outside any scope the event is a root.** So `publish(e)` *is* `publish(e, null)` — one
+  implementation, one call shape — and the deliberate detach is spelled `CausationScope.with(null,
+  …)`, which is a statement about a region rather than about one call. That asymmetry is settled, not
+  an oversight.
+
+  `QitsEvent` gained **no** fifth method and no event class gained a component, which is the
+  decision rather than an omission. A record is immutable and its parent is known later than it is;
+  a default method reading a thread-local would answer differently on the sweeper's thread an hour
+  later, which is exactly what `eventId`'s stability argument forbids; and a fifth accessor would
+  need a fifth `@JsonIgnore` in `CanonicalJson`'s mix-in — the one place this repo has already been
+  bitten silently. `CanonicalJson` and its mix-in are therefore **unchanged**, and a payload is
+  byte-identical whether the event was published under a parent or not. That last property has a
+  test, because it is the same lesson the mix-in taught.
+
+  `EventDispatcher` runs the listener loop inside `CausationScope` of the arriving frame's `id`, so
+  a listener that publishes while consuming records the edge with nobody passing an argument. **That
+  is why `CausationScope` is public API**: this library tells listeners that "anything slow belongs
+  on the listener's own executor", and a hand-off to an executor is precisely what drops the ambient
+  value — a plain `ThreadLocal` does not follow work, deliberately (inheritance copies at thread
+  *creation*, which pooled executors do long before any consumption). The bridge is capture
+  `current()` on the dispatch thread and re-establish it with `with(...)` inside the task, or pass
+  the id to `publish` explicitly. Both are in `QitsEventListener`'s javadoc, which is where a
+  listener author will look.
+
+  **The outbox's `parent_id` column is the load-bearing line of the whole feature.** qits-events
+  compares `name` + `occurredAt` + `payload` + `parentId` to tell an idempotent replay (200) from a
+  reused UUID (400) — `description` stays outside it — so a sweeper that rebuilt the envelope
+  without the parent would send a *different* request than the attempt it is retrying: a 400 against
+  its own landed first attempt, or a caused event quietly republished as a chain root. The parent is
+  fixed when the envelope is built and stored with it, exactly as the payload is, and the sweep
+  re-reads nothing ambient. `CausationStampingTest` sweeps inside a *different* scope to prove it.
+
+  **The rollout order is one-directional and it is not a preference.** Quarkus does not fail on
+  unknown JSON properties, so a qits-ci that stamps against a qits-events that has not yet learned
+  the field has its parents silently dropped — every chain of that window recorded as roots, and
+  causation cannot be backfilled from anything. qits-events ships first; the other direction (a
+  server that knows the field, a publisher that never sends it) is the compatibility clause, since an
+  absent `parentId` binds to null. The design is the superproject's `event-causation-plan.md`.
+
+  No cycle guard and no self-parent repair, here or anywhere on this side. A guard that catches only
+  `A → A` cannot see `A → B → A` and its presence would tell a reader that cycles are handled;
+  detection belongs where the graph is visible. qits-events does reject a self-edge, because that one
+  is decidable from a single row.
 
 Its own datasource, persistence unit and Flyway lineage (`eventsourcing`, `db/eventsourcing/migration`)
 follow the platform convention, for the ordinary reason plus one more: the split out of this repo

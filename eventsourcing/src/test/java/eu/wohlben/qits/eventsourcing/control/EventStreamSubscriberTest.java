@@ -198,7 +198,7 @@ class EventStreamSubscriberTest {
   /** The shape qits-events pushes: the envelope plus the row's id. */
   private static String frame(String name, Instant occurredAt, String payload) {
     return CanonicalJson.canonicalize(
-        new EventFrame(UUID.randomUUID().toString(), name, occurredAt, payload, null));
+        new EventFrame(UUID.randomUUID().toString(), name, occurredAt, payload, null, null));
   }
 
   private static void await(BooleanSupplier condition, String what) {

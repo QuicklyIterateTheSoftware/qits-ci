@@ -133,6 +133,14 @@ qits-ci is also the **first consumer** of the same bus: `service/…/bus/BuildSu
 receives its own announcement back off `/events/stream` and logs it. Nothing hangs off that yet; it
 is there because a producer nobody has ever seen consume is a bus with an untested second half.
 
+**Every event carries a nullable `parentId`** — the event that caused it — so a release train is a
+chain in the log rather than a set of rows distinguishable from coincidence only by their
+timestamps. It is envelope data, stamped by `QitsEventBus.publish` and never declared by an event
+class, and it is filled in from an explicit argument or from `CausationScope`, the ambient
+thread-local the dispatcher establishes around each listener call. A `BuildSuccessful` from a push
+is a root and carries null; when the trigger engine lands, an event-triggered run's will carry the
+event that triggered it. The rules that bite are in AGENTS.md under "The eventsourcing module".
+
 Both halves are **dark in `%dev` and `%test`** (`qits.eventsourcing.enabled`), the same posture the
 OTLP exporter takes, and a deployment without a qits-events is a supported configuration in exactly
 the way a deployment without a qits-cd is.

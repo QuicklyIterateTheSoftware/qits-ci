@@ -12,6 +12,20 @@ import java.time.Instant;
  *
  * <p>Unknown fields are ignored (see {@link CanonicalJson}): a qits-events that grows a field must
  * not stop this subscriber from reading the ones it already understood.
+ *
+ * <p><b>{@code parentId} is what this module's causation stamping reads on the way in</b>, and it is
+ * appended last rather than placed beside the envelope's copy of it because both sides bind by
+ * <em>name</em>: component order here is not a contract, and the same {@code
+ * FAIL_ON_UNKNOWN_PROPERTIES}-off that lets a subscriber built against five fields survive a sixth
+ * is what makes an older qits-events sending five still bind (the missing one arrives as null). It
+ * is the frame's {@code id} rather than this field that {@link EventDispatcher} scopes a listener
+ * with — the arriving event is the cause of whatever the listener publishes, and its own parent is
+ * the previous hop's business.
  */
 public record EventFrame(
-    String id, String name, Instant occurredAt, String payload, String description) {}
+    String id,
+    String name,
+    Instant occurredAt,
+    String payload,
+    String description,
+    String parentId) {}
