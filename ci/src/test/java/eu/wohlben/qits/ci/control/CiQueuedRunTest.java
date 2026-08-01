@@ -274,7 +274,8 @@ public class CiQueuedRunTest extends CiTestSupport {
             null, // the selection already matched; nothing below this seam reads it
             new CiPipeline(
                 List.of(
-                    new CiPipeline.CiStepDecl("alpine:3", "echo bump", null, false, List.of())))),
+                    new CiPipeline.CiStepDecl("alpine:3", "echo bump", null, false, List.of()))),
+            List.of()), // declares no artifact: this run announces a build and nothing more
         eventId,
         "BuildSuccessful",
         Instant.parse("2026-07-31T12:46:03Z"),

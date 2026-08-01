@@ -19,7 +19,9 @@ import org.yaml.snakeyaml.constructor.SafeConstructor;
  * different trigger declarations, so the step list is one implementation — a repo must not discover
  * that {@code timeout-seconds} means something different in a trigger file. What the two do
  * <em>not</em> share is their treatment of unknown top-level keys, and that asymmetry is intentional
- * rather than an oversight: see {@link CiEventTriggerParser}.
+ * rather than an oversight: see {@link CiEventTriggerParser}. {@code artifacts:} is parsed there
+ * too, because only a trigger file can carry one — its key name lives here so both sides of the
+ * two-way rule spell it once.
  *
  * <p>The load is the {@code QitsConfigParser} pattern throughout — SnakeYAML's {@link
  * SafeConstructor}, plain maps and lists only, never instantiating a class named by repository
@@ -39,6 +41,14 @@ final class CiConfigSchema {
   static final String WHEN_KEY = "when";
 
   static final String STEPS_KEY = "steps";
+
+  /**
+   * The artifacts a trigger file's pipeline publishes. A third member of the two-way rule: it is
+   * read only from a {@code ci-event-*.yml} and is an error in {@code ci-post-receive.yml}, because
+   * what it declares is announced with the <em>triggering event's</em> version and a push carries
+   * none.
+   */
+  static final String ARTIFACTS_KEY = "artifacts";
 
   /** The per-step branch filter — legal in a pipeline file, an error in a trigger file. */
   static final String BRANCHES_KEY = "branches";

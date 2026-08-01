@@ -1,5 +1,6 @@
 package eu.wohlben.qits.ci.control;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import eu.wohlben.qits.ci.control.CiConfigParser.CiConfigException;
 import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
 import eu.wohlben.qits.ci.control.CiStepRunner.DaemonPin;
@@ -142,6 +143,16 @@ public class CiRunService {
 
   /** The green-run event port (see {@link RunAnnouncer}); zero implementations is fine. */
   @Inject Instance<RunAnnouncer> runAnnouncers;
+
+  /** The published-artifact port (see {@link ReleaseAnnouncer}); zero implementations is fine. */
+  @Inject Instance<ReleaseAnnouncer> releaseAnnouncers;
+
+  /**
+   * The field a release pipeline's version comes out of. It is the triggering event's payload, read
+   * by name — {@code SCMRelease} carries it, and a trigger file declaring artifacts against an event
+   * that does not was written for something this cannot feed.
+   */
+  private static final String VERSION_FIELD = "version";
 
   @ConfigProperty(name = "qits.ci.output-max-chars")
   int outputMaxChars;
@@ -362,7 +373,7 @@ public class CiRunService {
     pinDaemonVersion(run.id, pin.version());
     run.daemonVersion = pin.version();
     try {
-      runSteps(run, request.trigger().pipeline(), pin, eventEnv(request));
+      runSteps(run, request.trigger().pipeline(), pin, eventEnv(request), declaredRelease(request));
     } catch (RuntimeException e) {
       LOG.errorf(e, "CI run %s failed unexpectedly", run.id);
       QuarkusTransaction.requiringNew().run(() -> failIncompleteSteps(run.id));
@@ -390,6 +401,25 @@ public class CiRunService {
     env.put("QITS_EVENT_PAYLOAD", request.payload() == null ? "" : request.payload());
     return Map.copyOf(env);
   }
+
+  /**
+   * What a green run of this trigger file will announce beyond {@code BuildSuccessful}: the
+   * artifacts it declared, and the payload the version is read out of. Null when the file declared
+   * none, which is every ordinary event pipeline and every push.
+   *
+   * <p><b>This is the whole reason the payload travels down into {@link #runSteps}.</b> It is on no
+   * column — an event-triggered run cannot be reconstructed from its row, which is why a {@code
+   * QUEUED} one is discarded at restart rather than re-enqueued — so the only place it exists at run
+   * completion is the closure the worker is already holding. Reading it here rather than at accept
+   * time is deliberate too: a red run must announce nothing and warn about nothing.
+   */
+  private static DeclaredRelease declaredRelease(EventRun request) {
+    List<CiArtifact> artifacts = request.trigger().artifacts();
+    return artifacts.isEmpty() ? null : new DeclaredRelease(artifacts, request.payload());
+  }
+
+  /** The artifacts a run's trigger file declared, and the event payload they take their version from. */
+  private record DeclaredRelease(List<CiArtifact> artifacts, String eventPayload) {}
 
   /**
    * Accept and run a push in one call — package-private so tests drive the whole state machine
@@ -475,7 +505,7 @@ public class CiRunService {
     pinDaemonVersion(run.id, pin.version());
     run.daemonVersion = pin.version();
     try {
-      runSteps(run, pipeline, pin, Map.of());
+      runSteps(run, pipeline, pin, Map.of(), null);
     } catch (RuntimeException e) {
       LOG.errorf(e, "CI run %s failed unexpectedly", run.id);
       QuarkusTransaction.requiringNew().run(() -> failIncompleteSteps(run.id));
@@ -516,7 +546,11 @@ public class CiRunService {
    * row reads this way" sentence. No new status, no new column, no migration.
    */
   private void runSteps(
-      CiRun run, CiPipeline pipeline, DaemonPin pin, Map<String, String> env) {
+      CiRun run,
+      CiPipeline pipeline,
+      DaemonPin pin,
+      Map<String, String> env,
+      DeclaredRelease release) {
     List<CiPipeline.CiStepDecl> declared = pipeline.steps();
     int index = 0;
     boolean failed = false;
@@ -635,6 +669,7 @@ public class CiRunService {
     if (!red) {
       notifyCd(run);
       announceRun(run, finishedAt);
+      announceRelease(run, finishedAt, release);
     }
   }
 
@@ -685,6 +720,72 @@ public class CiRunService {
         LOG.warnf(e, "Announcing run %s failed", run.id);
       }
     }
+  }
+
+  /**
+   * Announces what a green <b>release pipeline</b> published — one announcement per declared
+   * artifact, through {@link ReleaseAnnouncer}, after {@link #announceRun} because "this build
+   * passed" is the more general statement of the two.
+   *
+   * <p><b>It is additional and never a replacement.</b> Every green run still announces itself
+   * exactly as before; a declaration adds N events, it removes none. A run with no declaration —
+   * every push and every ordinary event pipeline — reaches this method with a null and does nothing.
+   *
+   * <p><b>A declaration whose trigger carries no version publishes nothing, loudly.</b> The version
+   * is not qits-ci's to invent: it belongs to the release the pipeline built, and the only place it
+   * exists is the payload of the event that triggered the run. So a file declaring artifacts against
+   * an event with no {@code version} field is a file written for a trigger that cannot feed it, and
+   * the honest answer is a WARN naming the run and the event rather than an announcement with a
+   * guessed or blank version — which downstream would install.
+   */
+  private void announceRelease(CiRun run, Instant finishedAt, DeclaredRelease release) {
+    if (release == null) {
+      return;
+    }
+    String version = versionOf(release.eventPayload());
+    if (version == null) {
+      LOG.warnf(
+          "Run %s: %s declares %d artifact(s), but the %s event that triggered it carries no '%s' —"
+              + " nothing published",
+          run.id, run.configPath, release.artifacts().size(), run.triggerEventName, VERSION_FIELD);
+      return;
+    }
+    for (CiArtifact artifact : release.artifacts()) {
+      for (ReleaseAnnouncer announcer : releaseAnnouncers) {
+        try {
+          announcer.onArtifactPublished(
+              run.id,
+              run.repoId,
+              version,
+              artifact.type().declared(),
+              artifact.name(),
+              finishedAt,
+              run.triggerEventId);
+        } catch (RuntimeException e) {
+          // Per artifact, so one failed announcement never costs the siblings theirs.
+          LOG.warnf(e, "Announcing artifact %s of run %s failed", artifact.name(), run.id);
+        }
+      }
+    }
+  }
+
+  /**
+   * The triggering event's {@code version}, or null when there is none to read.
+   *
+   * <p>The payload is walked rather than bound, which is the trigger engine's rule and the same one
+   * that keeps this path free of native-image reflection metadata. A non-string value is compared as
+   * its JSON literal exactly as a selection would read it, so a version that arrives as a number is
+   * announced as the digits it was written with rather than refused.
+   */
+  private static String versionOf(String payload) {
+    JsonNode version =
+        CiEventSelectionEvaluator.resolve(
+            CiEventSelectionEvaluator.parsePayload(payload), VERSION_FIELD);
+    if (version == null) {
+      return null;
+    }
+    String text = CiEventSelectionEvaluator.asString(version);
+    return text.isBlank() ? null : text;
   }
 
   /**

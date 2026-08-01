@@ -1,0 +1,170 @@
+package eu.wohlben.qits.ci.control;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
+import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerFile;
+import eu.wohlben.qits.ci.entity.CiRun;
+import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+/**
+ * The {@link ReleaseAnnouncer} seam's semantics: which green runs announce a published artifact,
+ * with what, and — as often — which ones announce nothing.
+ *
+ * <p>Sibling of {@link RunAnnounceSeamTest}, and the pairing is the contract rather than a filing
+ * convenience. A release pipeline's green run announces on <b>both</b> ports: {@code
+ * BuildSuccessful} once, because it is a build that passed, and one {@code SoftwareRelease} per
+ * declared artifact, because it is also a release. This class asserts that both happen and that
+ * neither replaced the other.
+ *
+ * <p>What the production implementation does with the announcement (build a {@code SoftwareRelease},
+ * hand it to the bus, land a PUT under the triggering event's id) is {@code
+ * CiEventTriggerCausationTest}'s job in the service module.
+ */
+@QuarkusTest
+public class ReleaseAnnounceSeamTest extends CiTestSupport {
+
+  private static final String TRIGGER_PATH = ".config/qits/ci-event-own-release.yml";
+
+  private static final String HEAD = "b".repeat(40);
+
+  /** A release pipeline: it selects its own repository's SCM release and declares what it ships. */
+  private static final String RELEASE_TRIGGER =
+      """
+      event: SCMRelease
+      artifacts:
+        - { type: npm, name: "@qits/ui-components" }
+        - { type: docker, name: qits/qits-stt }
+      steps:
+        - image: alpine:3
+          script: ./publish-tag.sh
+      """;
+
+  /** The same file without the declaration — an ordinary event pipeline, which publishes nothing. */
+  private static final String PLAIN_TRIGGER =
+      """
+      event: SCMRelease
+      steps:
+        - image: alpine:3
+          script: echo bump
+      """;
+
+  private static final String RELEASED =
+      "{\"branch\":\"main\",\"projectId\":\"p-1\",\"repository\":\"qits-spa-ui-components\","
+          + "\"version\":\"1.4.0\"}";
+
+  private static final String NO_VERSION =
+      "{\"branch\":\"main\",\"projectId\":\"p-1\",\"repository\":\"qits-spa-ui-components\"}";
+
+  @Inject CiEventTriggerService engine;
+  @Inject CiRunService runService;
+  @Inject FakeRunAnnouncer runAnnouncer;
+  @Inject FakeReleaseAnnouncer releaseAnnouncer;
+
+  private String repoId;
+
+  @BeforeEach
+  void resetAnnouncers() {
+    repoId = "releaser-" + UUID.randomUUID().toString().substring(0, 8);
+    fakeCandidates.set(repoId);
+    runAnnouncer.reset();
+    releaseAnnouncer.reset();
+  }
+
+  private String deliver(String trigger, String payload) throws Exception {
+    fakeConfig.putTriggers(repoId, "main", HEAD, new EventTriggerFile(TRIGGER_PATH, trigger));
+    String eventId = UUID.randomUUID().toString();
+    engine.evaluate(
+        new CiEventTriggerService.Arrival(
+            eventId, "SCMRelease", Instant.parse("2026-08-01T09:00:00Z"), payload));
+    runService.awaitIdle();
+    forgetLoadedEntities();
+    return eventId;
+  }
+
+  @Test
+  public void aGreenReleasePipelineAnnouncesOncePerDeclaredArtifact() throws Exception {
+    String eventId = deliver(RELEASE_TRIGGER, RELEASED);
+
+    CiRun run = runService.runsFor(repoId).get(0);
+    List<FakeReleaseAnnouncer.Published> published = releaseAnnouncer.published();
+    assertEquals(2, published.size(), "two declarations are two announcements");
+
+    FakeReleaseAnnouncer.Published npm = published.get(0);
+    assertEquals(run.id, npm.runId());
+    assertEquals(repoId, npm.repoId(), "the repository that PUBLISHED it, not the one that released");
+    assertEquals("1.4.0", npm.version(), "the version comes out of the triggering event's payload");
+    assertEquals("npm", npm.packageType());
+    assertEquals("@qits/ui-components", npm.packageName());
+    assertEquals(eventId, npm.triggerEventId(), "the parent of the event this becomes");
+    assertNotNull(npm.finishedAt(), "an event with no occurredAt is a 400 on the wire");
+    assertTrue(
+        Duration.between(run.finishedAt, npm.finishedAt()).abs().toNanos() < 1_000,
+        "expected the row's own finishedAt (" + run.finishedAt + "), got " + npm.finishedAt());
+
+    FakeReleaseAnnouncer.Published docker = published.get(1);
+    assertEquals("docker", docker.packageType());
+    assertEquals("qits/qits-stt", docker.packageName());
+    assertEquals("1.4.0", docker.version());
+    assertEquals(eventId, docker.triggerEventId(), "N siblings under one parent");
+
+    // And the other port is untouched: this is still a build that passed, announced exactly once.
+    assertEquals(1, runAnnouncer.announced().size(), "SoftwareRelease is additional, not a swap");
+    assertEquals(run.id, runAnnouncer.announced().get(0).runId());
+  }
+
+  @Test
+  public void aRedReleasePipelineAnnouncesNothing() throws Exception {
+    fakeRunner.script(0, new CiStepRunner.StepResult(1, false, CiStepRunner.StepOutcome.OK, "boom"));
+    deliver(RELEASE_TRIGGER, RELEASED);
+
+    // A declaration is a claim about a pipeline that finished, so a failed publish step announces
+    // nothing — which is the whole reason the announcement waits for the terminal transition.
+    assertEquals(List.of(), releaseAnnouncer.published());
+    assertEquals(List.of(), runAnnouncer.announced());
+  }
+
+  @Test
+  public void aGreenRunThatDeclaredNothingAnnouncesNothing() throws Exception {
+    deliver(PLAIN_TRIGGER, RELEASED);
+
+    assertEquals(1, runAnnouncer.announced().size(), "it is still an ordinary green build");
+    assertEquals(
+        List.of(),
+        releaseAnnouncer.published(),
+        "no declaration, no release — the train stops here by construction");
+  }
+
+  @Test
+  public void aPushAnnouncesNothingOnThisPortEver() {
+    // A push cannot carry a declaration (`artifacts:` is a parse error in ci-post-receive.yml) and
+    // carries no version either, so this port is silent on the whole post-receive path.
+    String sha = UUID.randomUUID().toString().replace("-", "");
+    fakeConfig.put(
+        repoId, sha, ConfigLookup.found("steps:\n  - image: alpine:3\n    script: echo ok\n"));
+    runService.execute(repoId, "main", sha);
+
+    assertEquals(1, runAnnouncer.announced().size());
+    assertEquals(List.of(), releaseAnnouncer.published());
+  }
+
+  @Test
+  public void aDeclarationWhoseTriggerCarriesNoVersionAnnouncesNothing() throws Exception {
+    deliver(RELEASE_TRIGGER, NO_VERSION);
+
+    // The version is not qits-ci's to invent: announcing a blank one would publish a package
+    // reference nothing can resolve. The run is green and says so on the other port; the declaration
+    // is what was written against the wrong trigger, and it costs a WARN rather than an event.
+    assertEquals(1, runAnnouncer.announced().size());
+    assertEquals(List.of(), releaseAnnouncer.published());
+  }
+}

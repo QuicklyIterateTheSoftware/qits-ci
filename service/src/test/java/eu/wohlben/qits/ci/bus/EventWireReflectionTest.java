@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.JsonNode;
 import eu.wohlben.qits.ci.events.BuildSuccessful;
+import eu.wohlben.qits.ci.events.SoftwareRelease;
 import eu.wohlben.qits.eventstream.QitsEventListener;
 import eu.wohlben.qits.eventstream.control.CanonicalJson;
 import eu.wohlben.qits.eventstream.control.EventEnvelope;
@@ -54,9 +55,10 @@ public class EventWireReflectionTest {
         EventWireReflection.class.getAnnotation(RegisterForReflection.class);
     assertNotNull(registration, "the annotation IS the class; without it this file is a no-op");
     assertEquals(
-        Set.of(BuildSuccessful.class, EventEnvelope.class, EventFrame.class),
+        Set.of(
+            BuildSuccessful.class, SoftwareRelease.class, EventEnvelope.class, EventFrame.class),
         Set.of(registration.targets()),
-        "the event out, the PUT body, the frame in — adding a fourth wire type means adding it here");
+        "the two events out, the PUT body, the frame in — a fifth wire type means adding it here");
   }
 
   /**

@@ -22,7 +22,7 @@ recorded, with the event that caused it, on the run and in the event log.
 | `service/` | `eu.wohlben.qits.ci.api` — the JAX-RS event intake, the run read surface, the token filter and the exception mapper — plus `…ci.daemonhost`, the step-container control plane (below). |
 | `ci-daemon-protocol/` | `eu.wohlben.qits.cidaemon.protocol` — the ci-daemon wire contract, **vendored** from [qits-ci-daemon](https://github.com/QuicklyIterateTheSoftware/qits-ci-daemon) and never edited here. Framework-free; `diff -r` is the drift detector. |
 | `eventstream/` | A **submodule** — [qits-eventstream](https://github.com/QuicklyIterateTheSoftware/qits-eventstream), `eu.wohlben.qits.eventstream`, the platform's **event bus client** (publish to qits-events, listen for what it broadcasts). Its own repository now; checked out here so the reactor builds it in place. It knows nothing about CI, and nothing in it is edited from this side. |
-| `ci-events/` | `eu.wohlben.qits.ci.events` — the events this service announces, today just `BuildSuccessful`. Depends on `eventstream/` and nothing else, so a future consumer takes the vocabulary without taking qits-ci. |
+| `ci-events/` | `eu.wohlben.qits.ci.events` — the events this service announces: `BuildSuccessful` for every green run, `SoftwareRelease` once per artifact a release pipeline declared. Depends on `eventstream/` and nothing else, so a future consumer takes the vocabulary without taking qits-ci. |
 
 `ci/` is a library jar. **`service/` is the application** — it carries
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary:
@@ -105,6 +105,7 @@ rest of qits it reaches over a URL it is configured with:
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + `qits.ci.daemon-version` |
 | out | `POST /cd/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.cd.intake-url`; no token — cd's intake is not gateway-allowlisted, the call stays on qits-net |
 | out | `PUT /events/api/events/{uuid}` — one `BuildSuccessful` per **green** run, idempotent (the `RunAnnouncer` seam) | `qits.events.url`, `qits.eventstream.enabled` |
+| out | the same route — one `SoftwareRelease` per artifact a green **release pipeline** declared (the `ReleaseAnnouncer` seam) | the same two keys |
 | out | `ws://…/events/stream` — dialled out and held open, carrying what qits-events broadcasts back | the same two keys; the address is derived, never configured twice |
 | out | the registry a publishing step pushes to, as `$QITS_REGISTRY` and `$QITS_IMAGE_REPOSITORY` in **every** step container — dialled by the *host's docker daemon*, never by this process | `qits.artifacts.registry-host`, `qits.artifacts.image-repository` |
 | out | the npm registry roots, as `$QITS_NPM_REGISTRY_URL` (hosted, `@qits/*` publishes) and `$QITS_NPM_PROXY_URL` (the npmjs pull-through cache) in **every** step container — dialled by the *step container itself* on the shared network | `qits.artifacts.npm.hosted-url`, `qits.artifacts.npm.proxy-url` |
@@ -171,6 +172,12 @@ that is about to act, this is a *statement* anything on the platform may subscri
 does not land goes to an outbox in this process and is retried on a schedule; and it carries the
 run's own `finishedAt` as the event's `occurredAt`, plus `imageDigest` — which qits-ci never has,
 since a step publishes an image from inside its own container and answers with an exit code.
+
+**A green *release pipeline* announces one more thing per artifact it declared**: a
+`SoftwareRelease`, through a third seam — `ReleaseAnnouncer` in `ci/control`, implemented by
+`service/…/bus/SoftwareReleaseAnnouncer`. It is a separate port from `RunAnnouncer` because it says
+something else: not "a build passed" but "this exact package is in qits-artifacts and you can
+install it". See "The release pipeline, and what it declares".
 
 qits-ci is also the **first consumer** of the same bus: `service/…/bus/BuildSuccessfulListener`
 receives its own announcement back off `/events/stream` and logs it. Nothing hangs off that yet; it
@@ -371,11 +378,13 @@ steps:                          # exactly the schema ci-post-receive.yml uses
   them matching one event are two runs by design.
 - **They are read from the head of `main`**, not from a commit — an event names no push, so the
   platform's one tracked branch supplies the ref. The run records the head sha it built.
-- **The two trigger types never blur.** A `ci-post-receive.yml` containing `event:` or `when:` is a
-  config error, and a `ci-event-*.yml` without `event:` is one too.
+- **The two trigger types never blur.** A `ci-post-receive.yml` containing `event:`, `when:` or
+  `artifacts:` is a config error, and a `ci-event-*.yml` without `event:` is one too.
 - `steps:` is the same schema, `docker: true` and `timeout-seconds:` included, with the same
   meanings and the same warnings. The one key it subtracts is **`branches:`**, which is a parse
   error here — see "Binding a step to branches" for why refusing it beats ignoring it.
+- The one key it **adds** is **`artifacts:`**, optional, which turns the file into a *release
+  pipeline* — see below. It is a parse error in `ci-post-receive.yml`.
 
 ### The selection
 
@@ -421,6 +430,10 @@ repository's others.**
 > defense, and widening it to `prefix: qits-spa-` would close the circle by matching the repository's
 > own releases.
 >
+> **A release pipeline selecting its own repository is the exception, and it is safe for a reason
+> worth knowing.** It triggers on `SCMRelease` and publishes `SoftwareRelease` — two names, so the
+> circle does not close. Widen that `when:` to the event it publishes and it does.
+>
 > **The second shape needs no bus at all, and it is new with `branches:`.** A step bound to `prefix:
 > maintenance/` whose script force-pushes a `maintenance/*` ref re-triggers its own pipeline through
 > post-receive — a loop with no event, no trigger file and no dedupe anywhere near it. The release
@@ -431,6 +444,83 @@ repository's others.**
 > feature that builds the graph of trigger declarations across repositories and finds cycles there,
 > with its own UX; nothing in this feature guesses at it. The provenance columns a triggered run
 > records are the trail it will consume.
+
+### The release pipeline, and what it declares
+
+A **release pipeline** is an ordinary event trigger with two things added: it selects its own
+repository's `SCMRelease` — qits-workspaces publishes that the moment a release push is accepted —
+and it declares the artifacts it publishes.
+
+```yaml
+# .config/qits/ci-event-release.yml
+event: SCMRelease
+when:
+  - repository: { exact: qits-spa-ui-components }   # its OWN id, exact — see the loop warning
+artifacts:
+  - { type: npm, name: "@qits/ui-components" }
+  - { type: docker, name: qits/qits-stt }
+steps:
+  - image: qits/build-images/node-base:latest
+    script: |
+      v="$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -r .version)"
+      git fetch origin "refs/tags/$v:refs/tags/$v"
+      git checkout --detach "$v"
+      npm ci && npm publish --tag latest
+```
+
+**Checking out the released tag needs no platform change.** The two `git` lines above are measured
+working inside a step container: the daemon's clone has the remote, a fetch of one tag refspec is
+cheap, and `checkout --detach` lands on the peeled commit even for an annotated tag. qits-ci's
+triggering surface is unchanged — a tag push is not a CI trigger and deliberately never became one.
+
+`artifacts:` is a **non-empty list of mappings**, each exactly `{type, name}`:
+
+- **`type`** is `npm` or `docker`, and nothing else. The keyword is also the value on the wire.
+- **`name`** is the **exact package name**, non-blank. A scoped npm name has to be quoted — `@` is
+  a reserved YAML indicator, so `name: "@qits/ui-components"`. A docker name is **unqualified**
+  (`qits/qits-stt`, no registry host): the registry is `qits-artifacts:8080` inside a step container
+  and `localhost:8081` to qits-ci and qits-cd, so no qualified reference is portable and the
+  consumer is the one that knows which address it stands at.
+- Everything about it is strict, the way the rest of this file is: an empty list, an unknown type, a
+  missing or blank name, an extra key in the mapping, or a wrong shape is a parse error naming the
+  file. Omitting the key entirely is how a pipeline says it publishes nothing.
+
+**What it declares is not what it observed.** qits-ci never learns how to publish anything, so it
+cannot see what a step pushed; the declaration is a claim, and a green pipeline that quietly skipped
+its publish announces an artifact that is not there. That is the accepted price, and it buys the
+thing an emitted report could not: the declarations are **statically readable**, so a cross-repo
+dependency graph can be built from the trigger files without running a single pipeline.
+
+### `SoftwareRelease`, and why it is the one to trigger on
+
+When a run whose trigger file declared artifacts goes **green**, qits-ci publishes **one
+`SoftwareRelease` per declared artifact**:
+
+| Field | What |
+|---|---|
+| `repository` | the repository whose pipeline published it — this repo, not the upstream |
+| `version` | read out of the **triggering** event's payload `version` field |
+| `packageType` | `npm` or `docker`, as declared |
+| `packageName` | the declared name, verbatim |
+
+Each one carries the triggering event as its `parentId`, so N artifacts are N siblings under one
+cause and the whole train is a chain in the event log.
+
+It means **the package is in qits-artifacts and you can install it** — which is why a downstream
+bump pipeline triggers on this rather than on the SCM release. `SCMRelease` fires when source
+control has the version; the artifact does not exist until the upstream release pipeline has built
+and published it, and the gap between the two is an entire build.
+
+Three consequences worth stating plainly:
+
+- **`BuildSuccessful` is untouched.** Every green run still announces itself exactly as before.
+  `SoftwareRelease` is additional, never a replacement.
+- **A repository with no release pipeline publishes nothing, and the train stops there.** That is
+  not a failure mode, it is the design: an event nothing declares a trigger for is a `continue`.
+- **A declaration whose trigger carries no `version` publishes nothing**, with a WARN naming the run
+  and the event. The version belongs to the release the pipeline built and qits-ci will not invent
+  one; a file declaring artifacts against an event that carries no version was written for a trigger
+  that cannot feed it.
 
 ### What an event-triggered step container gets
 

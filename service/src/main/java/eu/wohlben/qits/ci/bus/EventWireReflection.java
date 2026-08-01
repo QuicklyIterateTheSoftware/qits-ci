@@ -1,6 +1,7 @@
 package eu.wohlben.qits.ci.bus;
 
 import eu.wohlben.qits.ci.events.BuildSuccessful;
+import eu.wohlben.qits.ci.events.SoftwareRelease;
 import eu.wohlben.qits.eventstream.control.EventEnvelope;
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -32,10 +33,17 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  *
  * <p><b>Why these types.</b> They are the whole of what crosses the wire: {@link BuildSuccessful} is
  * serialized on the way out and deserialized on the way back in (the round trip is one service),
- * {@link EventEnvelope} is the PUT body, {@link EventFrame} is what arrives on {@code
- * /events/stream}. A listener for a second event type needs its class added here, and {@code
- * EventWireReflectionTest} asserts that against the registered listener beans rather than leaving it
- * to be remembered.
+ * {@link SoftwareRelease} is serialized on the way out and never read back here — qits-ci publishes
+ * that name and subscribes to nothing under it — {@link EventEnvelope} is the PUT body, and {@link
+ * EventFrame} is what arrives on {@code /events/stream}. A listener for a second event type needs
+ * its class added here, and {@code EventWireReflectionTest} asserts that against the registered
+ * listener beans rather than leaving it to be remembered.
+ *
+ * <p><b>An event this service only publishes is exactly as dependent on this list</b>, which is
+ * worth stating because "nothing binds it back" reads like a reason to skip it. The failure is on
+ * the writing side: {@code CanonicalJson} finds a record's components by reflection, so an
+ * unregistered one serializes as a Jackson error or, worse, as a payload missing what the mix-in was
+ * supposed to hide.
  *
  * <p><b>And why a mix-in by name — this one is measured, not reasoned.</b> {@code
  * CanonicalJson$QitsEventMixin} is the private nested class that keeps {@code QitsEvent}'s four
@@ -71,7 +79,12 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * what gets built into an image, so the deployable is what tells the builder about itself.
  */
 @RegisterForReflection(
-    targets = {BuildSuccessful.class, EventEnvelope.class, EventFrame.class},
+    targets = {
+      BuildSuccessful.class,
+      SoftwareRelease.class,
+      EventEnvelope.class,
+      EventFrame.class
+    },
     classNames = "eu.wohlben.qits.eventstream.control.CanonicalJson$QitsEventMixin")
 public final class EventWireReflection {
 

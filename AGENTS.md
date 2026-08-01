@@ -400,6 +400,32 @@ freshly loaded entity in its own transaction, so the caller's copy never sees th
 `occurredAt` is a 400 from qits-events on every green build**, which is why the seam test asserts
 the timestamp rather than only the coordinates.
 
+**There are now two publishing seams and they are separate for the same reason `CdNotifier` and
+`RunAnnouncer` are.** `ReleaseAnnouncer` (`ci/control`, implemented by
+`service/…/bus/SoftwareReleaseAnnouncer`) announces one published *artifact*; `RunAnnouncer`
+announces a run that passed. One green run can go down both, and a release pipeline's does — first
+`BuildSuccessful`, then one `SoftwareRelease` per declared artifact. Folding them would put "the
+build passed" and "the registry has it" behind one name, which is precisely the conflation the
+split-release redesign exists to undo: the old single event fired at release-*push* time and every
+consumer read it as "the package exists", with an entire upstream build in the gap.
+
+Three things about that second seam are worth having in front of you:
+
+- **The fan-out is `CiRunService`'s and the port takes one artifact.** N declarations are N calls, so
+  a failure costs one announcement rather than the rest. The bus already supports siblings —
+  the outbox enqueues one row per event in its own transaction and `CausationScope.current()` is a
+  non-consuming read — and `CiEventTriggerCausationTest` asserts the parent lands on *both* of two
+  siblings rather than trusting that.
+- **`CausingEvent.parentOf` is one implementation, deliberately.** Both announcers turn the run row's
+  `triggerEventId` into the published event's parent, and it is defensive: an id that will not parse
+  costs the run its causation edge and nothing else, because throwing there would lose the
+  announcement for the sake of the edge.
+- **The version is read at completion, not at accept.** It comes out of the triggering event's
+  payload, which is on no column and exists only in the worker's closure — so it travels down into
+  `runSteps` with the declaration. Reading it later is what lets a red run announce nothing *and*
+  warn about nothing; a declaration whose trigger carries no `version` is a WARN and no event, since
+  a blank version would publish a package reference nothing can resolve.
+
 The call sits on the single-threaded run worker and it blocks. That was the trade, and it is bounded
 rather than free: `publish()` never throws, attempts the PUT inline, and gives up after
 `qits.eventstream.publish-timeout` (~5s), after which the outbox owns delivery. So an unreachable
@@ -437,7 +463,8 @@ to get right rather than the library's:
 
   **The fourth member is not a config default at all, and it is the one that failed quietly.**
   `service/…/bus/EventWireReflection` is a class with no code: a `@RegisterForReflection` naming
-  `BuildSuccessful`, `EventEnvelope`, `EventFrame` and the `CanonicalJson$QitsEventMixin`, plus a
+  `BuildSuccessful`, `SoftwareRelease`, `EventEnvelope`, `EventFrame` and the
+  `CanonicalJson$QitsEventMixin`, plus a
   private constructor. Without it the deployed binary threw Jackson's `No serializer found for class
   … BuildSuccessful … you may need to configure reflection` on **every** green build — inside
   `CanonicalJson` and therefore *before* an envelope existed, so the event never reached the outbox
@@ -543,6 +570,16 @@ follows is what biting it feels like.
   `wehn:` would silently widen the trigger to every event of that name. Unknown top-level keys and
   duplicate keys are therefore errors in a trigger file and are not in a pipeline. The `steps:`
   schema is shared verbatim (`CiConfigSchema`), because a step must not mean two things.
+- **`artifacts:` is the one key the trigger file adds rather than subtracts**, and it is what makes a
+  file a *release pipeline*: a non-empty list of `{type: npm|docker, name: …}`, strict in every
+  direction (empty list, unknown type, blank name, extra key, wrong shape — all parse errors naming
+  the file). It is a parse error in `ci-post-receive.yml` for its own reason rather than by symmetry
+  with `branches:`: what a declaration announces is the *triggering* event's version, and a push
+  carries none, so the key could only ever be inert there. The declaration is a **claim**, never an
+  observation — qits-ci cannot see what a step pushed — and it is declared rather than emitted
+  because a declaration is statically readable, which is the whole of what the parked cycle-detection
+  work needs. The daemon's return channel could not have carried an emission anyway: it is
+  `StepChunk` and `StepFinished`, and a stdout sentinel is forbidden by design.
 - **The candidate list is the feature's one acknowledged compromise.** qits-artifacts owns the
   repositories and deliberately exposes no listing of them, so `KnownCiRepos` answers with what
   qits-ci already knows: recorded runs' repo ids plus its own bare caches. A repository that has
@@ -823,7 +860,11 @@ mechanism at all — which is what every service here was before the header land
   one — a second `@TestProfile` is a second Quarkus start, and these two want the same application.
   The second class is the trigger engine's bus half: a real frame through `EventDispatcher`, a real
   `git ls-tree` of a real bare, and the `parentId` on the PUT the triggered run publishes — the
-  platform's first automatic causation edge, which nothing in the `ci` module can see. It is also
+  platform's first automatic causation edge, which nothing in the `ci` module can see. It is where
+  the release **fan-out** is proved too, and that belongs here rather than at the seam: N
+  `SoftwareRelease` events under one parent is what shows the stamp is a non-consuming read rather
+  than something the first publish spends, and their payload bytes are asserted whole because they
+  are the contract every downstream release pipeline reads. It is also
   where the stub's recorded **subscribe frame** is asserted to be `["*"]`; subscribes are not cleared
   by `reset()`, because there is one per connection and the connection outlives every test method.
 

@@ -13,7 +13,8 @@ import java.util.Set;
 /**
  * Parses a repo-committed {@code .config/qits/ci-event-*.yml}: the existing pipeline schema (shared
  * with {@link CiConfigParser} through {@link CiConfigSchema}) plus the two keys that make it a
- * trigger — {@code event:}, the exact envelope name, and {@code when:}, the selection.
+ * trigger — {@code event:}, the exact envelope name, and {@code when:}, the selection — and the
+ * optional {@code artifacts:} declaration of what the pipeline publishes.
  *
  * <pre>{@code
  * event: BuildSuccessful
@@ -23,6 +24,21 @@ import java.util.Set;
  * steps:
  *   - image: qits/build-images/node-base:latest
  *     script: ./bump-and-push.sh
+ * }</pre>
+ *
+ * <p>A <b>release pipeline</b> is the same file with the fourth key: it selects an {@code SCMRelease}
+ * naming its own repository, checks out the released tag, publishes — and declares what it published,
+ * so that a green run announces one {@code SoftwareRelease} per artifact. See {@link CiArtifact}.
+ *
+ * <pre>{@code
+ * event: SCMRelease
+ * when:
+ *   - repository: { exact: qits-spa-ui-components }
+ * artifacts:
+ *   - { type: npm, name: "@qits/ui-components" }
+ * steps:
+ *   - image: qits/build-images/node-base:latest
+ *     script: ./publish-tag.sh
  * }</pre>
  *
  * <h2>The two-way rule</h2>
@@ -35,8 +51,8 @@ import java.util.Set;
  * <h2>Strict where {@link CiConfigParser} is lenient, and that asymmetry is deliberate</h2>
  *
  * <p>{@code ci-post-receive.yml} ignores unknown top-level keys so a repository can carry config for
- * a newer qits-ci. This file does not: {@code event}, {@code when} and {@code steps} are the whole
- * vocabulary and anything else is an error. The reason is what the two files' unknown keys mean. In
+ * a newer qits-ci. This file does not: {@code event}, {@code when}, {@code steps} and {@code
+ * artifacts} are the whole vocabulary and anything else is an error. The reason is what the two files' unknown keys mean. In
  * a pipeline, an unread key costs a feature that was not there yet. In a <b>selection</b>, an unread
  * key costs <em>correctness</em> — a mistyped {@code wehn:} would parse as "no selection", and an
  * absent {@code when} means <b>unconditional</b>, so the trigger would fire on every event of that
@@ -71,7 +87,14 @@ public class CiEventTriggerParser {
    * file is strict where its sibling is lenient.
    */
   private static final Set<String> TOP_LEVEL_KEYS =
-      Set.of(CiConfigSchema.EVENT_KEY, CiConfigSchema.WHEN_KEY, CiConfigSchema.STEPS_KEY);
+      Set.of(
+          CiConfigSchema.EVENT_KEY,
+          CiConfigSchema.WHEN_KEY,
+          CiConfigSchema.STEPS_KEY,
+          CiConfigSchema.ARTIFACTS_KEY);
+
+  /** The whole of an artifact declaration. Anything else in that mapping is an error. */
+  private static final Set<String> ARTIFACT_KEYS = Set.of("type", "name");
 
   /**
    * The whole matcher vocabulary, spelled in {@link CiConfigSchema} because a step's {@code
@@ -123,7 +146,8 @@ public class CiEventTriggerParser {
         // The step schema is shared verbatim, with one key subtracted rather than redefined: see
         // CiConfigSchema#stepsRejectingBranches. A step means one thing in both files, and where it
         // cannot mean anything it is an error rather than a second meaning.
-        CiConfigSchema.stepsRejectingBranches(root, configPath));
+        CiConfigSchema.stepsRejectingBranches(root, configPath),
+        parseArtifacts(root.get(CiConfigSchema.ARTIFACTS_KEY), configPath));
   }
 
   private static void rejectUnknownTopLevelKeys(Map<?, ?> root, String configPath) {
@@ -133,7 +157,7 @@ public class CiEventTriggerParser {
             configPath
                 + ": unknown top-level key '"
                 + key
-                + "' — an event trigger declares only 'event', 'when' and 'steps'");
+                + "' — an event trigger declares only 'event', 'when', 'steps' and 'artifacts'");
       }
     }
   }
@@ -330,5 +354,103 @@ public class CiEventTriggerParser {
               + "\")");
     }
     return text;
+  }
+
+  /**
+   * The optional {@code artifacts:} declaration — what this pipeline publishes, so that a green run
+   * can announce it. Absent means the file declares none, which is the ordinary case and publishes
+   * nothing; see {@link CiArtifact} for why a declaration rather than a report.
+   *
+   * <pre>{@code
+   * artifacts:
+   *   - { type: npm, name: "@qits/ui-components" }
+   *   - { type: docker, name: qits/qits-stt }
+   * }</pre>
+   *
+   * <p>Strict in every direction, on this file's standing reason: a declaration that silently parsed
+   * to nothing would be a release nothing downstream ever hears about, which reads exactly like a
+   * train that quietly did not roll. An <b>empty list</b> is refused rather than read as "none",
+   * because omitting the key already spells that unambiguously — the same argument {@code branches:
+   * []} loses on.
+   */
+  private static List<CiArtifact> parseArtifacts(Object raw, String configPath) {
+    if (raw == null) {
+      return List.of();
+    }
+    if (!(raw instanceof List<?> list)) {
+      throw new CiConfigException(
+          configPath
+              + ": 'artifacts' must be a list of { type: …, name: … } mappings, got: "
+              + CiConfigSchema.typeOf(raw));
+    }
+    if (list.isEmpty()) {
+      throw new CiConfigException(
+          configPath
+              + ": 'artifacts' is empty — omit the key to publish nothing, or name what this"
+              + " pipeline publishes");
+    }
+    List<CiArtifact> artifacts = new ArrayList<>(list.size());
+    for (int i = 0; i < list.size(); i++) {
+      artifacts.add(parseArtifact(list.get(i), configPath, i));
+    }
+    return List.copyOf(artifacts);
+  }
+
+  private static CiArtifact parseArtifact(Object raw, String configPath, int index) {
+    if (!(raw instanceof Map<?, ?> map)) {
+      throw new CiConfigException(
+          configPath
+              + ": artifact "
+              + index
+              + " must be a mapping of { type: …, name: … }, got: "
+              + CiConfigSchema.typeOf(raw));
+    }
+    for (Object key : map.keySet()) {
+      if (!(key instanceof String name) || !ARTIFACT_KEYS.contains(name)) {
+        throw new CiConfigException(
+            configPath
+                + ": artifact "
+                + index
+                + " declares an unknown key '"
+                + key
+                + "' — an artifact is exactly { type, name }");
+      }
+    }
+    return new CiArtifact(
+        requireArtifactType(map.get("type"), configPath, index),
+        requireArtifactName(map.get("name"), configPath, index));
+  }
+
+  private static CiArtifact.Type requireArtifactType(
+      Object value, String configPath, int index) {
+    CiArtifact.Type type = value instanceof String keyword ? CiArtifact.Type.of(keyword) : null;
+    if (type == null) {
+      throw new CiConfigException(
+          configPath
+              + ": artifact "
+              + index
+              + " declares type '"
+              + value
+              + "' — this qits-ci publishes "
+              + CiArtifact.Type.vocabulary());
+    }
+    return type;
+  }
+
+  /**
+   * The exact package name, as its registry knows it. Not validated beyond non-blank: what a name
+   * may contain is npm's and the registry's business, and a rule guessed here would refuse a name
+   * that publishes fine.
+   */
+  private static String requireArtifactName(Object value, String configPath, int index) {
+    if (!(value instanceof String name) || name.isBlank()) {
+      throw new CiConfigException(
+          configPath
+              + ": artifact "
+              + index
+              + " declares no 'name' — it is the exact package name, and a scoped one needs"
+              + " quoting ('@' is a reserved YAML indicator): name: \"@qits/ui-components\"");
+    }
+    return name;
   }
 }

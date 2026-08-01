@@ -14,13 +14,18 @@ import java.util.Map;
  * ({@code timeout-seconds}, {@code docker}) is a config error ({@link CiConfigException} — recorded
  * as a {@code CONFIG_ERROR} run so a broken gate is visible rather than silently green).
  *
- * <p><b>{@code event:} and {@code when:} are the one exception to that leniency, and they are the
- * two-way rule.</b> They belong to the <em>other</em> trigger type — {@code .config/qits/ci-event-*.yml},
- * read by {@link CiEventTriggerParser} — and a repository that writes a selection into this file has
- * declared a trigger that will never fire. Ignoring them as "keys for a newer qits-ci" would be the
- * worst available answer: silent, permanent, and indistinguishable from a trigger that simply never
- * matched. So they are a config error here, exactly as their absence is a config error there. The
- * two trigger types never blur.
+ * <p><b>{@code event:}, {@code when:} and {@code artifacts:} are the one exception to that leniency,
+ * and they are the two-way rule.</b> They belong to the <em>other</em> trigger type — {@code
+ * .config/qits/ci-event-*.yml}, read by {@link CiEventTriggerParser} — and a repository that writes a
+ * selection into this file has declared a trigger that will never fire. Ignoring them as "keys for a
+ * newer qits-ci" would be the worst available answer: silent, permanent, and indistinguishable from
+ * a trigger that simply never matched. So they are a config error here, exactly as {@code event:}'s
+ * absence is a config error there. The two trigger types never blur.
+ *
+ * <p>{@code artifacts:} joined that list for its own reason rather than by symmetry. What a
+ * declaration produces is a {@code SoftwareRelease} carrying the <b>triggering event's</b> version,
+ * and a push carries no version at all — so the key could only ever be inert here, which is exactly
+ * the allow-but-inert trap {@code branches:} is refused for on the other side.
  */
 @ApplicationScoped
 public class CiConfigParser {
@@ -55,7 +60,9 @@ public class CiConfigParser {
 
   /** The half of the two-way rule this file owns; see the class javadoc for why it is loud. */
   private static void rejectEventTriggerKeys(Map<?, ?> root) {
-    for (String key : List.of(CiConfigSchema.EVENT_KEY, CiConfigSchema.WHEN_KEY)) {
+    for (String key :
+        List.of(
+            CiConfigSchema.EVENT_KEY, CiConfigSchema.WHEN_KEY, CiConfigSchema.ARTIFACTS_KEY)) {
       if (root.containsKey(key)) {
         throw new CiConfigException(
             "'"

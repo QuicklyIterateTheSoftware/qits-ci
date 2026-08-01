@@ -9,6 +9,7 @@ import eu.wohlben.qits.ci.control.CiConfigParser.CiConfigException;
 import eu.wohlben.qits.ci.control.CiEventSelection.Group;
 import eu.wohlben.qits.ci.control.CiEventSelection.Matcher;
 import eu.wohlben.qits.ci.control.CiEventSelection.PathCondition;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /** The trigger-file parser is pure — plain JUnit, no Quarkus. */
@@ -359,6 +360,159 @@ public class CiEventTriggerParserTest {
     assertThrows(
         CiConfigException.class,
         () -> parser.parse(PATH, "event: E\nsteps:\n  - image: a\n    script: x\n    docker: 1\n"));
+  }
+
+  // --- artifacts: what a release pipeline declares it publishes ---
+
+  @Test
+  public void aReleasePipelineDeclaresWhatItPublishes() {
+    CiEventTrigger trigger =
+        parser.parse(
+            PATH,
+            """
+            event: SCMRelease
+            when:
+              - repository: { exact: qits-spa-ui-components }
+            artifacts:
+              - { type: npm, name: "@qits/ui-components" }
+              - { type: docker, name: qits/qits-stt }
+            steps:
+              - image: qits/build-images/node-base:latest
+                script: ./publish-tag.sh
+            """);
+
+    assertEquals(2, trigger.artifacts().size());
+    assertEquals(CiArtifact.Type.NPM, trigger.artifacts().get(0).type());
+    // The scope survives YAML: '@' is a reserved indicator, so the name has to be quoted and the
+    // quotes are not part of it.
+    assertEquals("@qits/ui-components", trigger.artifacts().get(0).name());
+    assertEquals(CiArtifact.Type.DOCKER, trigger.artifacts().get(1).type());
+    // Unqualified, deliberately: no registry-qualified docker reference is portable between a step
+    // container and this process.
+    assertEquals("qits/qits-stt", trigger.artifacts().get(1).name());
+    // The keyword a repository writes is the value the wire carries — one vocabulary, not two.
+    assertEquals("npm", trigger.artifacts().get(0).type().declared());
+    assertEquals("docker", trigger.artifacts().get(1).type().declared());
+  }
+
+  @Test
+  public void mostTriggerFilesDeclareNoneAndThatIsNotAnError() {
+    // An ordinary event pipeline bumps a dependency and publishes nothing. Absent means empty, which
+    // is what makes the key genuinely optional rather than optional-looking.
+    assertEquals(
+        List.of(), parser.parse(PATH, "event: BuildSuccessful\nsteps: []\n").artifacts());
+  }
+
+  @Test
+  public void anEmptyArtifactListIsAParseError() {
+    // The same argument `branches: []` loses on: omitting the key already spells "publishes
+    // nothing", so `[]` is an ambiguity with a better spelling.
+    CiConfigException e =
+        assertThrows(
+            CiConfigException.class,
+            () -> parser.parse(PATH, "event: SCMRelease\nartifacts: []\nsteps: []\n"));
+    assertTrue(e.getMessage().contains(PATH), e.getMessage());
+    assertTrue(e.getMessage().contains("empty"), e.getMessage());
+  }
+
+  @Test
+  public void anUnknownArtifactTypeIsAParseError() {
+    CiConfigException e =
+        assertThrows(
+            CiConfigException.class,
+            () ->
+                parser.parse(
+                    PATH, "event: SCMRelease\nartifacts:\n  - { type: maven, name: qits-ci }\n"));
+    assertTrue(e.getMessage().contains("maven"), e.getMessage());
+    assertTrue(e.getMessage().contains("npm and docker"), e.getMessage());
+    // A missing type is the same failure: there is no default registry to fall back to.
+    assertThrows(
+        CiConfigException.class,
+        () -> parser.parse(PATH, "event: SCMRelease\nartifacts:\n  - { name: qits-ci }\n"));
+  }
+
+  @Test
+  public void aMissingOrBlankNameIsAParseError() {
+    CiConfigException e =
+        assertThrows(
+            CiConfigException.class,
+            () -> parser.parse(PATH, "event: SCMRelease\nartifacts:\n  - { type: npm }\n"));
+    assertTrue(e.getMessage().contains("name"), e.getMessage());
+    assertThrows(
+        CiConfigException.class,
+        () -> parser.parse(PATH, "event: SCMRelease\nartifacts:\n  - { type: npm, name: \"  \" }\n"));
+    assertThrows(
+        CiConfigException.class,
+        () -> parser.parse(PATH, "event: SCMRelease\nartifacts:\n  - { type: npm, name: 7 }\n"));
+  }
+
+  @Test
+  public void malformedArtifactsStructureIsAParseError() {
+    assertThrows(
+        CiConfigException.class,
+        () -> parser.parse(PATH, "event: SCMRelease\nartifacts: everything\n"));
+    assertThrows(
+        CiConfigException.class,
+        () -> parser.parse(PATH, "event: SCMRelease\nartifacts:\n  - just-a-string\n"));
+    // Strict inside the mapping too: an artifact is exactly { type, name }, so a key nobody reads is
+    // a declaration that does less than its author thinks.
+    CiConfigException e =
+        assertThrows(
+            CiConfigException.class,
+            () ->
+                parser.parse(
+                    PATH,
+                    "event: SCMRelease\nartifacts:\n  - { type: npm, name: a, version: \"1.0.0\" }\n"));
+    assertTrue(e.getMessage().contains("version"), e.getMessage());
+  }
+
+  @Test
+  public void anUnquotedScopedNameIsAYamlErrorAndTheMessageSaysHowToSpellIt() {
+    // '@' is a reserved YAML indicator, so this never reaches the artifact rules at all — but the
+    // guidance a repository needs is in the name error, which is where it will look.
+    assertThrows(
+        CiConfigException.class,
+        () ->
+            parser.parse(
+                PATH, "event: SCMRelease\nartifacts:\n  - { type: npm, name: @qits/x }\n"));
+    CiConfigException missing =
+        assertThrows(
+            CiConfigException.class,
+            () -> parser.parse(PATH, "event: SCMRelease\nartifacts:\n  - { type: npm }\n"));
+    assertTrue(missing.getMessage().contains("\"@qits/ui-components\""), missing.getMessage());
+  }
+
+  @Test
+  public void artifactsInAPostReceiveFileIsAParseError() {
+    // The third member of the two-way rule, and it earns its place for its own reason: what a
+    // declaration announces is the TRIGGERING event's version, and a push carries none — so the key
+    // could only ever be inert here.
+    CiConfigException e =
+        assertThrows(
+            CiConfigException.class,
+            () ->
+                new CiConfigParser()
+                    .parse("artifacts:\n  - { type: npm, name: \"@qits/x\" }\nsteps: []\n"));
+    assertTrue(e.getMessage().contains("artifacts"), e.getMessage());
+    assertTrue(e.getMessage().contains(CiConfigParser.CONFIG_PATH), e.getMessage());
+  }
+
+  @Test
+  public void unknownKeysStayLenientInAPipelineAndStrictHere() {
+    // The asymmetry is unchanged by the new key: a pipeline still carries config for a newer
+    // qits-ci, a trigger file still refuses to.
+    assertEquals(
+        1,
+        new CiConfigParser()
+            .parse("steps:\n  - image: a\n    script: x\nfuture-key: whatever\n")
+            .steps()
+            .size());
+    CiConfigException e =
+        assertThrows(
+            CiConfigException.class,
+            () -> parser.parse(PATH, "event: SCMRelease\nartefacts:\n  - { type: npm, name: a }\n"));
+    assertTrue(e.getMessage().contains("artefacts"), e.getMessage());
+    assertTrue(e.getMessage().contains("'artifacts'"), e.getMessage());
   }
 
   // --- which files are trigger files at all ---

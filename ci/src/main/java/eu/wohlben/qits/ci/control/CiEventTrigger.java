@@ -1,8 +1,15 @@
 package eu.wohlben.qits.ci.control;
 
+import java.util.List;
+
 /**
  * One parsed {@code .config/qits/ci-event-*.yml}: the event name it listens for, the selection over
- * that event's payload, and the pipeline to run when both hold.
+ * that event's payload, the pipeline to run when both hold, and what that pipeline publishes.
+ *
+ * <p>{@code artifacts} is empty for every trigger file that declares none, which is most of them —
+ * an ordinary event pipeline bumps a dependency and publishes nothing. A non-empty list makes this a
+ * <b>release pipeline</b>: a green run announces one {@code SoftwareRelease} per entry, carrying the
+ * version out of the event that triggered it. See {@link CiArtifact}.
  *
  * <p>{@code configPath} is the file it came from — the {@code *} is freely chosen and completely
  * ignored as a selector (it names the trigger for humans), but the path itself is <b>identity</b>:
@@ -11,4 +18,8 @@ package eu.wohlben.qits.ci.control;
  * by design; they are two declared pipelines.
  */
 public record CiEventTrigger(
-    String configPath, String eventName, CiEventSelection selection, CiPipeline pipeline) {}
+    String configPath,
+    String eventName,
+    CiEventSelection selection,
+    CiPipeline pipeline,
+    List<CiArtifact> artifacts) {}
