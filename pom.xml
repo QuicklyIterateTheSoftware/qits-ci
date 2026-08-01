@@ -38,17 +38,20 @@
     <name>qits-ci</name>
 
     <modules>
-        <!-- Listed first: `service` depends on all four. `eventstream` and `ci-events` come
+        <!-- Listed first: `service` depends on all five. `eventstream` and `ci-events` come
              before `ci` because that is the direction of the dependency arrow — ci-events depends
              on eventstream and on nothing else, eventstream depends on nothing of ours at all.
              (Maven computes the reactor order itself; the listing is documentation.)
 
-             `eventstream` is a SUBMODULE — the qits-eventstream repository, checked out here so
-             the reactor can build it in place. Its pom is parentless and carries its own groupId
-             and version; the reactor resolves it as a module all the same. A clone that has not
-             initialised its submodules has no such directory and the build fails at once, which is
-             the intended signal. (An XML comment may not contain two consecutive dashes, so the
-             git command that fixes it is spelled out in AGENTS.md rather than here.) -->
+             `eventstream` and `qits-integrations-quarkus` are SUBMODULES — other repositories,
+             checked out here so the reactor can build them in place. Their poms are parentless and
+             carry their own groupId and version; the reactor resolves them as modules all the same.
+             `qits-integrations-quarkus` is an aggregator rather than one jar, so whatever modules
+             it grows arrive without another edit here. A clone that has not initialised its
+             submodules has no such directory and the build fails at once, which is the intended
+             signal. (An XML comment may not contain two consecutive dashes, so the git command that
+             fixes it is spelled out in AGENTS.md rather than here.) -->
+        <module>qits-integrations-quarkus</module>
         <module>ci-daemon-protocol</module>
         <module>eventstream</module>
         <module>ci-events</module>
@@ -138,6 +141,11 @@
             <dependency>
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-ci-events</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-auth-core</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

@@ -14,16 +14,17 @@ bare git repos instead of using fixture submodules, the git host is a `file://` 
 as `<base>/git/<repoId>`, and the one seam that needs real docker is faked (`FakeCiStepRunner`)
 rather than skipped.
 
-**The one clause that has been bought back is "alone":** there are **two** submodules now — the
-Angular client at `service/src/main/webui` and the event bus at `eventstream/` — so the gate is
-`git submodule update --init && ./mvnw verify`. One command covers both, and it always will; what
-grows with each submodule is the number of ways a forgotten init fails. Everything else about the
-rule holds — still no monorepo, still no credentials, still no prior install — and the cost is two
-public clones, paid once. It is called out here rather than folded quietly into the sentence above
-because the failures it introduces look like broken builds rather than missing checkouts: an
-uninitialised client is Quinoa's `No package.json found in Web UI directory`, an uninitialised
-`eventstream/` is maven's `Child module … does not exist` before a line compiles. See "The Angular
-client" and "The event bus".
+**The one clause that has been bought back is "alone":** there are **three** submodules now — the
+Angular client at `service/src/main/webui`, the event bus at `eventstream/`, and the shared Quarkus
+glue at `qits-integrations-quarkus/` — so the gate is `git submodule update --init && ./mvnw
+verify`. One command covers all of them, and it always will; what grows with each submodule is the
+number of ways a forgotten init fails. Everything else about the rule holds — still no monorepo,
+still no credentials, still no prior install — and the cost is three public clones, paid once. It is
+called out here rather than folded quietly into the sentence above because the failures it
+introduces look like broken builds rather than missing checkouts: an uninitialised client is
+Quinoa's `No package.json found in Web UI directory`, an uninitialised `eventstream/` or
+`qits-integrations-quarkus/` is maven's `Child module … does not exist` before a line compiles. See
+"The Angular client", "The event bus" and "Authentication".
 
 **`service/` compiles to a GraalVM native image**, the same rule qits-gateway and
 qits-workspace-daemon carry. `.sdkmanrc` names `25.0.2-graalce`, so `sdk env` gives you a
@@ -79,6 +80,10 @@ package:
   knows nothing about `eu.wohlben.qits.ci.*`.
 - `ci-events/` — the event classes qits-ci emits, `eu.wohlben.qits.ci.events`. Under this repo's own
   namespace because it *is* this repo's vocabulary; depends on `eventstream` and nothing else.
+- `qits-integrations-quarkus/` — the platform's Quarkus glue, and a **submodule**: the
+  qits-integrations-quarkus repository, an aggregator whose `qits-auth-core` module holds both
+  identity tracks (`eu.wohlben.qits.auth`). Listed as one reactor module, so a second jar in it
+  arrives here without a pom edit. See "Authentication".
 
 The **directories** are `ci/`, `service/`, `ci-daemon-protocol/`, `eventstream/` and `ci-events/`;
 the artifactIds are `qits-ci-domain`, `qits-ci-service`, `qits-ci-daemon-protocol`,
@@ -699,7 +704,10 @@ not the guard; the constraint is, and it will reject what the enum happily write
 ## Authentication
 
 Authentication happens at `qits-gateway`. This service resolves a principal from a trusted header
-(`X-Qits-User`, read by `ci/security/ForwardAuthMechanism`) and authenticates nothing.
+(`X-Qits-User`, read by `qits-auth-core`'s `ForwardAuthMechanism`) and authenticates nothing. That
+pair used to live in `service/src/main/java/…/ci/security/`; eight services carried a copy, so it
+moved to the `qits-integrations-quarkus` submodule, unchanged down to its config keys. Its tests
+went with it — do not re-add a copy here.
 
 **`identity.isAnonymous()` is not a security state** — it means "no name for the audit row". A check
 of the form `if (identity.isAnonymous()) deny` would look like a security control and be worth
@@ -716,9 +724,9 @@ unconditionally, which is the entire reason a header can be trusted as an identi
 about users, so edge auth neither replaces it nor excuses it — `CiTokenGuardTest` stays exactly as
 load-bearing as it was.
 
-`ForwardAuthTest` sets a real `X-Qits-User` rather than reaching for `@TestSecurity`, and that is
-deliberate: the header **is** the contract under test. `@TestSecurity` installs an identity without
-going through the mechanism, so it would pass just as well against a service that shipped no
+The lib's `ForwardAuthTest` sets a real `X-Qits-User` rather than reaching for `@TestSecurity`, and
+that is deliberate: the header **is** the contract under test. `@TestSecurity` installs an identity
+without going through the mechanism, so it would pass just as well against a service that shipped no
 mechanism at all — which is what every service here was before the header landed.
 
 ## Tests
@@ -758,7 +766,7 @@ mechanism at all — which is what every service here was before the header land
   document still declares it `integer, minimum 1` via `@Parameter`, because the document describes
   the contract rather than the binding.
   Note the test runs as a `@QuarkusTest` and indexes the test classpath, so a `@Path` resource under
-  `src/test` would land in the document — that is why `IdentityEchoResource` is hidden too.
+  `src/test` would land in the document unless it carries `@Operation(hidden = true)`.
 - A `Failed to start quarkus` / `Port already bound: 8081` failure is the known flake
   (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first.
   `CiPackagedSurfaceIT` is deliberately outside that race: failsafe passes it

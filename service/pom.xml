@@ -96,13 +96,17 @@
             <artifactId>quarkus-opentelemetry</artifactId>
         </dependency>
         <dependency>
-            <!-- SecurityIdentity + the HttpAuthenticationMechanism SPI, for the single thing this
-                 service does about auth: read qits-gateway's X-Qits-User header into an identity
-                 (see security/ForwardAuthMechanism). NOT an auth variant and NOT an authorization
-                 policy — the monolith's -Dqits.variant auth/* modules do not come here at all;
-                 authentication terminates at the gateway (migration-auth-plan.md). -->
-            <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-security</artifactId>
+            <!-- The platform's two identity tracks, in one jar (qits-integrations-quarkus/README.md).
+                 USERS: the forward-auth pair that reads qits-gateway's X-Qits-User header into a
+                 SecurityIdentity — the same code eight services used to carry a copy of, moved out
+                 verbatim. Authentication still terminates at the gateway, and there is still no
+                 authorization policy here.
+                 MACHINES: MachineAuth, the claim guard on the event intake, behind the platform-wide
+                 gate qits.auth.machine.required. It brings quarkus-security transitively; the bearer
+                 that feeds it is the service's own quarkus-oidc, which the lib deliberately does
+                 not depend on. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-auth-core</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>

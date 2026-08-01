@@ -17,8 +17,7 @@ import org.junit.jupiter.api.Test;
  * up and read its own {@code /ci/q/openapi}. It asserts nothing — the assertion is the diff.
  *
  * <p>The test classpath is indexed too, so any {@code @Path} resource under {@code src/test} lands
- * in the committed document unless it is {@code @Operation(hidden = true)} — see {@code
- * IdentityEchoResource}.
+ * in the committed document unless it is {@code @Operation(hidden = true)}.
  */
 @QuarkusTest
 public class OpenApiSchemaExportTest {

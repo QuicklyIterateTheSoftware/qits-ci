@@ -11,7 +11,8 @@ runs that file's pipeline against the head of `main`. That is the release train 
 releases, the repositories that declared an interest build themselves — and every hop of it is
 recorded, with the event that caused it, on the run and in the event log.
 
-    git submodule update --init   # the Angular client at service/src/main/webui, the bus at eventstream/
+    git submodule update --init   # the Angular client at service/src/main/webui, the bus at
+                                  # eventstream/, the shared auth glue at qits-integrations-quarkus/
     mvn verify                    # green from a clone alone — no monorepo, no docker, no credentials
 
 ## Layout
@@ -23,6 +24,7 @@ recorded, with the event that caused it, on the run and in the event log.
 | `ci-daemon-protocol/` | `eu.wohlben.qits.cidaemon.protocol` — the ci-daemon wire contract, **vendored** from [qits-ci-daemon](https://github.com/QuicklyIterateTheSoftware/qits-ci-daemon) and never edited here. Framework-free; `diff -r` is the drift detector. |
 | `eventstream/` | A **submodule** — [qits-eventstream](https://github.com/QuicklyIterateTheSoftware/qits-eventstream), `eu.wohlben.qits.eventstream`, the platform's **event bus client** (publish to qits-events, listen for what it broadcasts). Its own repository now; checked out here so the reactor builds it in place. It knows nothing about CI, and nothing in it is edited from this side. |
 | `ci-events/` | `eu.wohlben.qits.ci.events` — the events this service announces: `BuildSuccessful` for every green run, `SoftwareRelease` once per artifact a release pipeline declared. Depends on `eventstream/` and nothing else, so a future consumer takes the vocabulary without taking qits-ci. |
+| `qits-integrations-quarkus/` | A **submodule** — [qits-integrations-quarkus](https://github.com/QuicklyIterateTheSoftware/qits-integrations-quarkus), the platform's Quarkus glue. Its `qits-auth-core` jar holds both identity tracks: the forward-auth pair that reads `X-Qits-User` (eight services carried a copy; this repo's was deleted when it arrived) and `MachineAuth`, the claim guard on the event intake. An aggregator, so what it grows arrives without a pom edit here. |
 
 `ci/` is a library jar. **`service/` is the application** — it carries
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary:

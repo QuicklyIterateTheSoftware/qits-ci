@@ -10,3 +10,9 @@
 	ignore = all
 	update = merge
 	branch = main
+[submodule "qits-integrations-quarkus"]
+	path = qits-integrations-quarkus
+	url = https://github.com/QuicklyIterateTheSoftware/qits-integrations-quarkus.git
+	ignore = all
+	update = merge
+	branch = main
