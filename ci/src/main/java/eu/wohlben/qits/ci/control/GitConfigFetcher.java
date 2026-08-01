@@ -6,6 +6,8 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.function.IntConsumer;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
@@ -48,6 +50,29 @@ public class GitConfigFetcher implements CiConfigSource {
    */
   private static final int MAX_TRIGGER_FILES = 32;
 
+  /**
+   * How many times one lookup runs the fetch when the tracking ref is contended (see {@link
+   * #fetchBranch}). Package-visible so the retry test asserts the bound rather than restating it.
+   */
+  static final int FETCH_ATTEMPTS = 3;
+
+  /** Base pause between contended fetch attempts; attempt {@code n} waits {@code n} times this. */
+  private static final long FETCH_RETRY_BASE_MS = 200;
+
+  /**
+   * Runs between contended fetch attempts, given the attempt number that just failed. A field so
+   * tests stage the race deterministically (release the ref lock here, count the retries) instead
+   * of sleeping against a clock; production keeps the default backoff.
+   */
+  IntConsumer fetchRetryDelay =
+      attempt -> {
+        try {
+          Thread.sleep(FETCH_RETRY_BASE_MS * attempt);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      };
+
   @ConfigProperty(name = "qits.ci.data-dir")
   String dataDir;
 
@@ -65,8 +90,16 @@ public class GitConfigFetcher implements CiConfigSource {
       return ConfigLookup.unreachable();
     }
     String localRef = "refs/qits-ci/" + branch;
-    if (!fetchBranch(cache, repoId, branch, localRef, true)) {
-      return ConfigLookup.unreachable();
+    switch (fetchBranch(cache, repoId, branch, localRef, true)) {
+      case CONTENDED -> {
+        return ConfigLookup.contended();
+      }
+      case UNREACHABLE -> {
+        return ConfigLookup.unreachable();
+      }
+      case FETCHED -> {
+        /* fall through to the reachability check */
+      }
     }
     if (!isReachable(cache, sha, localRef)) {
       return ConfigLookup.gone();
@@ -112,7 +145,10 @@ public class GitConfigFetcher implements CiConfigSource {
       return EventTriggerLookup.unreachable();
     }
     String localRef = "refs/qits-ci/" + branch;
-    if (!fetchBranch(cache, repoId, branch, localRef, false)) {
+    // CONTENDED folds into unreachable here on purpose: a candidate that could not be evaluated
+    // right now is this path's ordinary answer, and no accepted run hangs on it. The bounded retry
+    // above still ran, so reaching this is already the rare case.
+    if (fetchBranch(cache, repoId, branch, localRef, false) != FetchOutcome.FETCHED) {
       return EventTriggerLookup.unreachable();
     }
     CiProcess.Result head =
@@ -202,12 +238,33 @@ public class GitConfigFetcher implements CiConfigSource {
     return true;
   }
 
+  /** What one {@link #fetchBranch} came back with — three outcomes, because two failures differ. */
+  enum FetchOutcome {
+    /** The tracking ref holds the branch's current tip. */
+    FETCHED,
+    /** The remote could not be read — host down, repository gone, no such branch. */
+    UNREACHABLE,
+    /** The local tracking ref stayed contended past {@link #FETCH_ATTEMPTS} (see below). */
+    CONTENDED
+  }
+
   /**
    * Fetches the branch's current tip into a ci-private local ref (forced — branches move). The
    * remote is {@code <qits.ci.git-host-url>/git/<repoId>}: {@code /git} is the codebase's
    * second-level segment for the git wire protocol and belongs here, while the configured base
    * names only which service hosts it — qits-artifacts, under its gateway segment, so the fetch
    * lands on {@code /artifacts/git/<repoId>}.
+   *
+   * <p><b>A failed ref update is retried; a failed remote is not.</b> Two workers share each bare
+   * cache — {@code ci-run-worker} fetches for a push while {@code ci-trigger-worker} fetches the
+   * same repository for an arriving event — and git updates {@code refs/qits-ci/<branch>} with a
+   * compare-and-swap, so the loser of that race fails locally ({@code fetching ref … failed:
+   * incorrect old value provided} on git ≥ 2.49's batched updates; {@code cannot lock ref} on older
+   * gits) with the host never at fault. Measured live 2026-08-01: a release push landing during a
+   * trigger evaluation of the same repository lost its fetch to exactly this. The retry re-runs the
+   * whole fetch, which re-reads the old value; {@link #FETCH_ATTEMPTS} bounds it, and exhaustion is
+   * {@link FetchOutcome#CONTENDED} so the caller can keep the run rather than treat a local race as
+   * an unreachable host.
    *
    * <p><b>{@code expected} is the log level, and it is a parameter because the same failure means
    * two different things.</b> On the push path a fetch that fails is a surprise worth a WARN: a
@@ -218,30 +275,58 @@ public class GitConfigFetcher implements CiConfigSource {
    * WARN naming a long-gone repository, per green build, platform-wide, forever. A warning that
    * cannot be acted on and never stops is how a log stops being read.
    */
-  private boolean fetchBranch(
+  private FetchOutcome fetchBranch(
       Path cache, String repoId, String branch, String localRef, boolean expected) {
     String remote = gitHostUrl.replaceAll("/+$", "") + "/git/" + repoId;
-    CiProcess.Result fetch =
-        CiProcess.run(
-            cache,
-            List.of(
-                "git",
-                "fetch",
-                "-q",
-                "--no-tags",
-                remote,
-                "+refs/heads/" + branch + ":" + localRef),
-            GIT_TIMEOUT,
-            MAX_GIT_OUTPUT_CHARS);
-    if (fetch.exitCode() != 0) {
-      if (expected) {
-        LOG.warnf("ci fetch of %s from %s failed: %s", branch, remote, fetch.output());
-      } else {
-        LOG.debugf("ci fetch of %s from %s failed: %s", branch, remote, fetch.output());
+    List<String> command =
+        List.of("git", "fetch", "-q", "--no-tags", remote, "+refs/heads/" + branch + ":" + localRef);
+    for (int attempt = 1; ; attempt++) {
+      CiProcess.Result fetch = runFetch(cache, command);
+      if (fetch.exitCode() == 0) {
+        return FetchOutcome.FETCHED;
       }
+      if (!isTrackingRefContention(fetch.output())) {
+        if (expected) {
+          LOG.warnf("ci fetch of %s from %s failed: %s", branch, remote, fetch.output());
+        } else {
+          LOG.debugf("ci fetch of %s from %s failed: %s", branch, remote, fetch.output());
+        }
+        return FetchOutcome.UNREACHABLE;
+      }
+      if (attempt >= FETCH_ATTEMPTS) {
+        LOG.warnf(
+            "ci fetch of %s from %s lost the tracking ref %d times: %s",
+            branch, remote, attempt, fetch.output());
+        return FetchOutcome.CONTENDED;
+      }
+      LOG.debugf(
+          "ci fetch of %s from %s raced the tracking ref (attempt %d of %d) — retrying: %s",
+          branch, remote, attempt, FETCH_ATTEMPTS, fetch.output());
+      fetchRetryDelay.accept(attempt);
+    }
+  }
+
+  /**
+   * Whether a failed fetch lost a race on the <b>local</b> tracking ref rather than failing to read
+   * the remote. Matched on git's own wording, both generations of it: batched ref updates (git ≥
+   * 2.49) report {@code fetching ref <ref> failed: <reason>} for every transaction failure —
+   * {@code incorrect old value provided} is the measured live case — and older gits say {@code
+   * cannot lock ref} / {@code unable to update local ref}. Remote failures ({@code does not appear
+   * to be a git repository}, curl errors, a missing branch) match none of these.
+   */
+  static boolean isTrackingRefContention(String output) {
+    if (output == null) {
       return false;
     }
-    return true;
+    String text = output.toLowerCase(Locale.ROOT);
+    return (text.contains("fetching ref ") && text.contains(" failed"))
+        || text.contains("cannot lock ref")
+        || text.contains("unable to update local ref");
+  }
+
+  /** The one process call {@link #fetchBranch} makes — a seam so tests fake a lost CAS. */
+  CiProcess.Result runFetch(Path cache, List<String> command) {
+    return CiProcess.run(cache, command, GIT_TIMEOUT, MAX_GIT_OUTPUT_CHARS);
   }
 
   /** True when {@code sha} is still reachable from the freshly fetched branch tip. */

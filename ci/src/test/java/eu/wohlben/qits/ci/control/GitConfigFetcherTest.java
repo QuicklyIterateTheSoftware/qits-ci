@@ -1,8 +1,10 @@
 package eu.wohlben.qits.ci.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerFile;
@@ -10,9 +12,13 @@ import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerLookup;
 import eu.wohlben.qits.ci.error.BadRequestException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -108,6 +114,93 @@ public class GitConfigFetcherTest {
         BadRequestException.class, () -> fetcher.read("repo-1", "a/../../b", "cafebabe0000"));
   }
 
+  // --- the tracking-ref race: a local CAS lost to this process's own other worker ---
+
+  @Test
+  public void aLostTrackingRefRaceIsRetriedAndTheFetchThatLandsFindsTheConfig() throws Exception {
+    // Two workers share the bare cache, so one lookup can lose refs/qits-ci/<branch> to the other.
+    // The loser re-runs the whole fetch — and must then read the config exactly as if nothing raced.
+    String repoId = "repo-raced";
+    String sha = seedServedRepo(repoId, "steps:\n  - image: alpine:3\n    script: 'true'\n");
+    ScriptedFetcher raced = scriptedFetcher(contentionFailure(), contentionFailure());
+    List<Integer> backoffs = new ArrayList<>();
+    raced.fetchRetryDelay = backoffs::add;
+
+    ConfigLookup lookup = raced.read(repoId, BRANCH, sha);
+
+    assertEquals(ConfigLookup.Status.FOUND, lookup.status());
+    assertEquals(3, raced.attempts, "two lost races, then the fetch that lands");
+    assertEquals(List.of(1, 2), backoffs, "the backoff runs between attempts, never after the last");
+  }
+
+  @Test
+  public void aTrackingRefThatStaysContendedPastTheBoundIsContendedNeverUnreachable()
+      throws Exception {
+    // The bound is the point: past it the caller must hear CONTENDED — a local race, so the run
+    // survives — where UNREACHABLE would discard the run as if the host could not be asked.
+    String repoId = "repo-held";
+    String sha = seedServedRepo(repoId, "steps: []\n");
+    ScriptedFetcher held = scriptedFetcher(contendedEveryTime());
+
+    assertEquals(ConfigLookup.Status.CONTENDED, held.read(repoId, BRANCH, sha).status());
+    assertEquals(
+        GitConfigFetcher.FETCH_ATTEMPTS,
+        held.attempts,
+        "the retry is bounded, and this is the bound");
+  }
+
+  @Test
+  public void aRemoteFailureIsNotRetriedAndStaysUnreachable() throws Exception {
+    // The repository is right there and serving: if the remote failure were wrongly retried, the
+    // next attempt would land and this read would come back FOUND.
+    String repoId = "repo-down-once";
+    String sha = seedServedRepo(repoId, "steps: []\n");
+    ScriptedFetcher down =
+        scriptedFetcher(
+            new CiProcess.Result(
+                128,
+                "fatal: 'file:///x/git/repo-down-once' does not appear to be a git repository",
+                false,
+                false));
+
+    assertEquals(ConfigLookup.Status.UNREACHABLE, down.read(repoId, BRANCH, sha).status());
+    assertEquals(1, down.attempts, "only the local race earns a retry");
+  }
+
+  @Test
+  public void theTriggerListingFoldsExhaustedContentionIntoUnreachable() throws Exception {
+    // No accepted run hangs on a trigger evaluation, so this path keeps its ordinary "could not
+    // evaluate right now" answer — the bounded retry has still already run to get here.
+    String repoId = "repo-trigger-raced";
+    seedServedRepo(repoId, "steps: []\n", Map.of(".config/qits/ci-event-a.yml", "event: A\n"));
+
+    assertEquals(
+        EventTriggerLookup.Status.UNREACHABLE,
+        scriptedFetcher(contendedEveryTime()).readEventTriggers(repoId, BRANCH).status());
+  }
+
+  @Test
+  public void contentionIsRecognisedInGitsOwnWordingAcrossGenerations() {
+    // The measured live case: git ≥ 2.49's batched ref updates report every transaction failure
+    // this way.
+    assertTrue(
+        GitConfigFetcher.isTrackingRefContention(
+            "error: fetching ref refs/qits-ci/main failed: incorrect old value provided"));
+    // Older gits, one ref at a time.
+    assertTrue(
+        GitConfigFetcher.isTrackingRefContention(
+            "error: cannot lock ref 'refs/qits-ci/main': reference already exists"));
+    assertTrue(GitConfigFetcher.isTrackingRefContention("error: unable to update local ref"));
+    // Remote failures match none of these — they are UNREACHABLE, and must never be retried as a
+    // local race.
+    assertFalse(
+        GitConfigFetcher.isTrackingRefContention(
+            "fatal: 'http://host/git/repo' does not appear to be a git repository"));
+    assertFalse(
+        GitConfigFetcher.isTrackingRefContention("fatal: couldn't find remote ref refs/heads/main"));
+    assertFalse(GitConfigFetcher.isTrackingRefContention(null));
+  }
+
   // --- the event half: listing .config/qits/ci-event-*.yml at the branch head ---
 
   @Test
@@ -199,6 +292,50 @@ public class GitConfigFetcherTest {
     assertThrows(BadRequestException.class, () -> fetcher.readEventTriggers("../../etc", BRANCH));
     assertThrows(
         BadRequestException.class, () -> fetcher.readEventTriggers("repo-1", "--upload-pack=x"));
+  }
+
+  /** The measured live wording of a lost tracking-ref race, as one failed fetch result. */
+  private static CiProcess.Result contentionFailure() {
+    return new CiProcess.Result(
+        1,
+        "error: fetching ref refs/qits-ci/main failed: incorrect old value provided",
+        false,
+        false);
+  }
+
+  /** One staged contention failure per attempt the bound allows — the race that never clears. */
+  private static CiProcess.Result[] contendedEveryTime() {
+    CiProcess.Result[] failures = new CiProcess.Result[GitConfigFetcher.FETCH_ATTEMPTS];
+    Arrays.fill(failures, contentionFailure());
+    return failures;
+  }
+
+  /**
+   * A fetcher wired like {@link #setUp}'s, but with its fetch shell-out scripted: the staged
+   * failures answer first, and once they run out the fetch really runs. The race is staged, the git
+   * is real — so a retry that lands is a fetch that landed.
+   */
+  private ScriptedFetcher scriptedFetcher(CiProcess.Result... staged) {
+    ScriptedFetcher scripted = new ScriptedFetcher(staged);
+    scripted.dataDir = dataDir.toString();
+    scripted.gitHostUrl = "file://" + base;
+    return scripted;
+  }
+
+  private static final class ScriptedFetcher extends GitConfigFetcher {
+    private final Queue<CiProcess.Result> staged;
+    private int attempts;
+
+    ScriptedFetcher(CiProcess.Result... staged) {
+      this.staged = new ArrayDeque<>(List.of(staged));
+    }
+
+    @Override
+    CiProcess.Result runFetch(Path cache, List<String> command) {
+      attempts++;
+      CiProcess.Result failure = staged.poll();
+      return failure != null ? failure : super.runFetch(cache, command);
+    }
   }
 
   /**

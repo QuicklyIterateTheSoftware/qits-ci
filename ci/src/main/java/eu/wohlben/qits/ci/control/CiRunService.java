@@ -86,6 +86,12 @@ import org.jboss.logging.Logger;
  *       must not accumulate a row per push);
  *   <li>git host unreachable ⇒ <b>discarded</b>, warn-logged (a read failure must not invent a gate,
  *       and inventing one is exactly what leaving a red row behind would be);
+ *   <li>tracking ref contended ({@link ConfigLookup.Status#CONTENDED} — another worker's fetch of
+ *       the same repository won the local ref race past the fetcher's bounded retry) ⇒ the row goes
+ *       <b>back to {@code QUEUED}</b> and the worker takes another pass, bounded by {@link
+ *       #MAX_CONTENDED_REQUEUES}; past that it stays {@code QUEUED} for the startup sweep. Never
+ *       discarded: this is a condition of this process, not of the push, and a first delivery must
+ *       not be dropped for a race qits-ci had with itself;
  *   <li>commit no longer reachable (force-pushed away) ⇒ <b>discarded</b>, including when the
  *       discovery happens later, in a step container's own checkout — the push it belonged to no
  *       longer exists, so a red run would blame a commit whose build was never broken;
@@ -276,10 +282,20 @@ public class CiRunService {
 
   /** Puts an already-accepted (QUEUED) run on the worker. */
   private void enqueue(String runId) {
+    enqueue(runId, 0);
+  }
+
+  /**
+   * The counted form: {@code contendedRequeues} is how many times a contended config fetch has
+   * already put this run back on the queue. It travels through the closure rather than a column
+   * because a restart should reset it — the sweep re-enqueues at zero, with the contention long
+   * gone.
+   */
+  private void enqueue(String runId, int contendedRequeues) {
     worker.submit(
         () -> {
           try {
-            runQueued(runId);
+            runQueued(runId, contendedRequeues);
           } catch (RuntimeException e) {
             LOG.errorf(e, "CI run %s failed unexpectedly", runId);
           }
@@ -437,6 +453,10 @@ public class CiRunService {
    * startup sweep with nothing but an id.
    */
   void runQueued(String runId) {
+    runQueued(runId, 0);
+  }
+
+  private void runQueued(String runId, int contendedRequeues) {
     CiRun run = startQueued(runId);
     if (run == null) {
       // Somebody reached the row first — today that is only a cancellation of a still-queued run,
@@ -445,14 +465,27 @@ public class CiRunService {
       cancelled.remove(runId);
       return;
     }
+    boolean requeued = false;
     try {
-      executeQueued(run);
+      requeued = executeQueued(run, contendedRequeues);
     } finally {
-      cancelled.remove(run.id);
+      // A requeued run is still pending, so a cancellation raised during the contended pass must
+      // survive to the pass that honours it.
+      if (!requeued) {
+        cancelled.remove(run.id);
+      }
     }
   }
 
-  private void executeQueued(CiRun run) {
+  /**
+   * How many times a contended config fetch puts one run back on the queue before leaving it
+   * {@code QUEUED} for the startup sweep. Each pass already carries the fetcher's own bounded
+   * retry, so exhausting this means the contention outlived seconds of trying.
+   */
+  static final int MAX_CONTENDED_REQUEUES = 3;
+
+  /** Runs one claimed row; true when the run was put back on the queue rather than finished. */
+  private boolean executeQueued(CiRun run, int contendedRequeues) {
     String repoId = run.repoId;
     String branch = run.branch;
     String sha = run.commitSha;
@@ -465,24 +498,47 @@ public class CiRunService {
         // "no config file, no run" true of the record.
         LOG.debugf("No %s at %s@%s — no CI run", CiConfigParser.CONFIG_PATH, repoId, sha);
         discardRun(run.id);
-        return;
+        return false;
       }
       case GONE -> {
         LOG.infof("Commit %s is no longer reachable in %s — no CI run recorded", sha, repoId);
         discardRun(run.id);
-        return;
+        return false;
       }
       case UNREACHABLE -> {
         // A read failure must not invent a gate, and leaving a red row behind is precisely that:
         // the commit is very likely fine and this process simply could not ask.
         LOG.warnf("Could not fetch %s from the git host — no CI run recorded for %s", sha, repoId);
         discardRun(run.id);
-        return;
+        return false;
+      }
+      case CONTENDED -> {
+        // The fetch lost the tracking ref to another worker's fetch of the same repository, past
+        // the fetcher's own bounded retry. A condition of this process, never of the push — so the
+        // row survives: back to QUEUED, and the worker takes another pass. The row is the
+        // contract; a first delivery is never warn-and-dropped for a race qits-ci had with itself.
+        if (cancelled.contains(run.id)) {
+          finishRun(run.id, CiRunStatus.FAILED);
+          return false;
+        }
+        requeueContended(run.id);
+        if (contendedRequeues < MAX_CONTENDED_REQUEUES) {
+          LOG.infof(
+              "CI run %s: tracking ref for %s is contended — re-queued (%d of %d)",
+              run.id, repoId, contendedRequeues + 1, MAX_CONTENDED_REQUEUES);
+          enqueue(run.id, contendedRequeues + 1);
+        } else {
+          LOG.warnf(
+              "CI run %s: tracking ref for %s stayed contended through %d re-queues — the run"
+                  + " stays QUEUED (cancellable now, re-enqueued by the startup sweep)",
+              run.id, repoId, MAX_CONTENDED_REQUEUES);
+        }
+        return true;
       }
       case INVALID -> {
         LOG.infof("CI config unusable at %s@%s: %s", repoId, sha, lookup.message());
         finishRun(run.id, CiRunStatus.CONFIG_ERROR);
-        return;
+        return false;
       }
       case FOUND -> {
         /* fall through to parse + run */
@@ -495,7 +551,7 @@ public class CiRunService {
     } catch (CiConfigException e) {
       LOG.infof("CI config error at %s@%s: %s", repoId, sha, e.getMessage());
       finishRun(run.id, CiRunStatus.CONFIG_ERROR);
-      return;
+      return false;
     }
 
     // Resolved once, here: every step container of this run downloads the same daemon build. It is
@@ -513,6 +569,7 @@ public class CiRunService {
     } finally {
       runner.runClosed(run.id);
     }
+    return false;
   }
 
   /**
@@ -1013,6 +1070,17 @@ public class CiRunService {
               run.finishedAt = finishedAt;
             });
     return finishedAt;
+  }
+
+  /**
+   * Puts a contended run's row back to {@code QUEUED} — the worker's {@link #startQueued} flipped
+   * it to {@code RUNNING} before the fetch lost the local race, and the run is about to wait for
+   * another pass, so the row must say waiting again rather than running. Nothing else is touched:
+   * a requeued pass is the same run, not a new one.
+   */
+  private void requeueContended(String runId) {
+    QuarkusTransaction.requiringNew()
+        .run(() -> runs.findById(runId).status = CiRunStatus.QUEUED);
   }
 
   /** Removes a run that turned out to describe a commit that no longer exists. */

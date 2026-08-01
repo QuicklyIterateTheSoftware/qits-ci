@@ -32,12 +32,27 @@ public class FakeCiConfigSource implements CiConfigSource {
    */
   private final Map<String, EventTriggerLookup> triggersByBranch = new HashMap<>();
 
+  /** Every config {@code read} this fake was asked, in order — the requeue bound's own assertion. */
+  private final List<String> configReads = Collections.synchronizedList(new ArrayList<>());
+
   /** Every {@code readEventTriggers} this fake was asked, in order — the listing's own assertion. */
   private final List<String> triggerReads = Collections.synchronizedList(new ArrayList<>());
+
+  private final Map<String, Runnable> duringReads = new HashMap<>();
 
   /** Appends a lookup: the first {@code put} answers the first read, the second the next, … */
   public void put(String repoId, String sha, ConfigLookup lookup) {
     byCommit.computeIfAbsent(repoId + "@" + sha, k -> new ArrayDeque<>()).add(lookup);
+  }
+
+  /**
+   * Run something on the worker thread <b>while</b> this commit's config is being read, once — the
+   * read-path analogue of {@link FakeCiStepRunner#during}. It is how a test stages what only exists
+   * mid-read (a cancellation arriving while the row is {@code RUNNING} inside the fetch) without a
+   * sleep and without a race.
+   */
+  public void duringRead(String repoId, String sha, Runnable action) {
+    duringReads.put(repoId + "@" + sha, action);
   }
 
   /** Seeds the trigger files a repository's branch head carries. */
@@ -51,6 +66,10 @@ public class FakeCiConfigSource implements CiConfigSource {
     triggersByBranch.put(repoId + "@" + branch, EventTriggerLookup.unreachable());
   }
 
+  public List<String> configReads() {
+    return List.copyOf(configReads);
+  }
+
   public List<String> triggerReads() {
     return List.copyOf(triggerReads);
   }
@@ -58,11 +77,18 @@ public class FakeCiConfigSource implements CiConfigSource {
   public void reset() {
     byCommit.clear();
     triggersByBranch.clear();
+    configReads.clear();
     triggerReads.clear();
+    duringReads.clear();
   }
 
   @Override
   public ConfigLookup read(String repoId, String branch, String sha) {
+    configReads.add(repoId + "@" + sha);
+    Runnable midRead = duringReads.remove(repoId + "@" + sha);
+    if (midRead != null) {
+      midRead.run();
+    }
     Deque<ConfigLookup> queued = byCommit.get(repoId + "@" + sha);
     if (queued == null || queued.isEmpty()) {
       return ConfigLookup.absent();

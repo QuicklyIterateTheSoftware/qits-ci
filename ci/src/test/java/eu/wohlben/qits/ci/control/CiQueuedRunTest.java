@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
 import eu.wohlben.qits.ci.entity.CiRun;
@@ -314,6 +315,133 @@ public class CiQueuedRunTest extends CiTestSupport {
       forgetLoadedEntities();
       assertEquals(0, service.runsFor(repoId).size(), lookup.status().name());
     }
+  }
+
+  // --- the contended fetch: a local race, so the row survives ---
+
+  @Test
+  public void aContendedFetchRequeuesTheRunAndTheNextPassRunsIt() throws Exception {
+    // The fetch lost refs/qits-ci/<branch> to this process's own other worker, past the fetcher's
+    // bounded retry. The old behaviour dropped the run with a WARN; now the row goes back to QUEUED
+    // and a later pass — the contention gone — runs it. One row throughout, and it is the row that
+    // ran.
+    String repoId = "raced-" + UUID.randomUUID();
+    fakeConfig.put(repoId, shaOf(repoId), ConfigLookup.contended());
+    fakeConfig.put(repoId, shaOf(repoId), ConfigLookup.found(CONFIG_ONE_STEP));
+
+    service.onPostReceive(repoId, "main", "0".repeat(40), shaOf(repoId));
+    awaitRun(repoId, CiRunStatus.SUCCESS);
+
+    CiRun run = soleRun(repoId);
+    assertEquals(1, service.stepsFor(run.id).size(), "the second pass really executed the pipeline");
+  }
+
+  @Test
+  public void contentionThatOutlivesTheRequeuesLeavesTheRunQueuedForTheStartupSweep()
+      throws Exception {
+    // The requeues are bounded too: a run whose every pass comes back contended stays QUEUED —
+    // still on the record, still cancellable — and the startup sweep is what re-arms it. Driven by
+    // hand here, exactly as the restart tests drive it. The read count is the clock: one pass is one
+    // read, so MAX + 1 reads is the exhaustion instant, not a window the test hopes to catch.
+    String repoId = "held-" + UUID.randomUUID();
+    for (int pass = 0; pass <= CiRunService.MAX_CONTENDED_REQUEUES; pass++) {
+      fakeConfig.put(repoId, shaOf(repoId), ConfigLookup.contended());
+    }
+
+    service.onPostReceive(repoId, "main", "0".repeat(40), shaOf(repoId));
+    awaitReads(repoId, CiRunService.MAX_CONTENDED_REQUEUES + 1);
+    service.awaitIdle();
+    forgetLoadedEntities();
+
+    CiRun held = soleRun(repoId);
+    assertEquals(CiRunStatus.QUEUED, held.status, "exhausted, the run waits rather than dying");
+    assertNull(held.finishedAt);
+    assertEquals(0, fakeRunner.executed().size(), "no container ever launched");
+
+    // The sweep — the contention long gone by any real restart — re-enqueues it and it runs.
+    fakeConfig.put(repoId, shaOf(repoId), ConfigLookup.found(CONFIG_ONE_STEP));
+    service.sweepInterrupted();
+    awaitRun(repoId, CiRunStatus.SUCCESS);
+
+    CiRun ran = soleRun(repoId);
+    assertEquals(held.id, ran.id, "still the accepted row, never a second one");
+  }
+
+  /**
+   * Waits out a requeue chain until the run reaches {@code status}. Each requeued pass lands on the
+   * worker behind whatever a bare {@code awaitIdle} stakes out, so draining once is never enough —
+   * this drains, checks, and drains again.
+   */
+  private void awaitRun(String repoId, CiRunStatus status) throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+    for (;;) {
+      service.awaitIdle();
+      forgetLoadedEntities();
+      if (soleRun(repoId).status == status) {
+        return;
+      }
+      if (System.nanoTime() > deadline) {
+        fail("the run for " + repoId + " never reached " + status);
+      }
+      Thread.sleep(25);
+    }
+  }
+
+  /** Waits until the fake has served {@code reads} config reads for the repository. */
+  private void awaitReads(String repoId, int reads) throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+    String key = repoId + "@" + shaOf(repoId);
+    while (fakeConfig.configReads().stream().filter(key::equals).count() < reads) {
+      if (System.nanoTime() > deadline) {
+        fail("the run for " + repoId + " never made its " + reads + " config reads");
+      }
+      Thread.sleep(25);
+    }
+  }
+
+  @Test
+  public void aCancellationDuringAContendedPassEndsTheRunAndIsNotLostToTheRequeue()
+      throws Exception {
+    // Cancel lands while the worker is inside the contended read: the row is RUNNING, so the flag
+    // is raised and the runner is asked — and the pass, when its read comes back contended, must
+    // finish the run rather than re-queue a run nobody wants. The hook holds the read open so this
+    // is an instant the test controls, not a window it hopes to catch.
+    String repoId = "cancelled-contended-" + UUID.randomUUID();
+    String sha = shaOf(repoId);
+    fakeConfig.put(repoId, sha, ConfigLookup.contended());
+    CountDownLatch midRead = new CountDownLatch(1);
+    CountDownLatch cancelSent = new CountDownLatch(1);
+    fakeConfig.duringRead(
+        repoId,
+        sha,
+        () -> {
+          midRead.countDown();
+          try {
+            cancelSent.await(20, TimeUnit.SECONDS);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        });
+
+    service.onPostReceive(repoId, "main", "0".repeat(40), sha);
+    String runId = soleRun(repoId).id;
+    assertTrue(midRead.await(20, TimeUnit.SECONDS), "the worker is inside the contended read");
+    forgetLoadedEntities();
+    assertEquals(CiRunStatus.RUNNING, service.requireRun(runId).status, "claimed and mid-pass");
+
+    service.cancel(runId);
+    cancelSent.countDown();
+    service.awaitIdle();
+    forgetLoadedEntities();
+
+    CiRun run = soleRun(repoId);
+    assertEquals(CiRunStatus.FAILED, run.status);
+    assertNotNull(run.finishedAt);
+    assertEquals(0, service.stepsFor(runId).size(), "no step ever started");
+    assertTrue(
+        fakeRunner.cancelled().contains(runId),
+        "RUNNING when cancelled, so the runner was asked to die as well");
+    assertThrows(ConflictException.class, () -> service.cancel(runId));
   }
 
   // --- the restart ---

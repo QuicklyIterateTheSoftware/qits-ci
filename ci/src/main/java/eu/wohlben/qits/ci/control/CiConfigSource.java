@@ -28,6 +28,13 @@ public interface CiConfigSource {
       GONE,
       /** The git host could not be reached at all — nothing is recorded. */
       UNREACHABLE,
+      /**
+       * The fetch lost its <b>local tracking ref</b> to a concurrent fetch of the same repository,
+       * past the fetcher's own bounded retry. A condition of this process, not of the host or the
+       * commit — so unlike {@link #UNREACHABLE} the run must survive: the row stays and the read is
+       * retried. Told apart precisely so a local race can never be treated as "could not ask".
+       */
+      CONTENDED,
       /** The file exists but cannot be a valid config (e.g. absurdly large) ⇒ CONFIG_ERROR. */
       INVALID
     }
@@ -46,6 +53,10 @@ public interface CiConfigSource {
 
     public static ConfigLookup unreachable() {
       return new ConfigLookup(Status.UNREACHABLE, null, null);
+    }
+
+    public static ConfigLookup contended() {
+      return new ConfigLookup(Status.CONTENDED, null, null);
     }
 
     public static ConfigLookup invalid(String message) {
