@@ -942,6 +942,48 @@ public class CiRunService {
   }
 
   /**
+   * How many finished runs {@code GET /ci/api/runs/finished} answers with when the caller asks for no
+   * particular number. Five, because the endpoint exists for a client that draws a short stack of
+   * "what just happened" beside the runs in flight, and a default that has to be overridden to be
+   * useful is not a default.
+   */
+  public static final int DEFAULT_FINISHED_LIMIT = 5;
+
+  /**
+   * The most finished runs one call will answer with, whatever it asks for.
+   *
+   * <p>This listing is the only one on the surface that is <b>both</b> unscoped by repository and
+   * unbounded by anything else — the active list is bounded by what a single worker has accepted, and
+   * a repository's own listing is bounded by that repository. Without a cap, {@code ?limit=} is an
+   * unscoped listing of every run on the instance, which is precisely what {@code
+   * CiRunController#listRuns} refuses to offer.
+   *
+   * <p>A larger ask is <b>clamped, not rejected</b>. The parameter has always been a bound rather
+   * than a promise of n rows — {@code limit=50} over three runs answers with three and is not an
+   * error — so answering an over-large ask with the most this endpoint will give is the same
+   * contract, and a client that wants more history has a repository to scope to.
+   */
+  public static final int MAX_FINISHED_LIMIT = 100;
+
+  /**
+   * The newest finished runs across every repository, newest first — the read behind {@code GET
+   * /ci/api/runs/finished}.
+   *
+   * @param limit how many to answer with, or null for {@link #DEFAULT_FINISHED_LIMIT}. Clamped to
+   *     {@link #MAX_FINISHED_LIMIT}.
+   * @throws BadRequestException if a limit is given and is not positive — the same rule {@link
+   *     #runsFor(String, Integer)} applies, and for the same reason: zero rows is a question nobody
+   *     asks and a negative bound is a caller bug rather than an empty answer
+   */
+  public List<CiRun> finishedRuns(Integer limit) {
+    int asked = limit == null ? DEFAULT_FINISHED_LIMIT : limit;
+    if (asked <= 0) {
+      throw new BadRequestException("Invalid limit");
+    }
+    return runs.listFinishedNewestFirst(Math.min(asked, MAX_FINISHED_LIMIT));
+  }
+
+  /**
    * One row per repository this instance has recorded a run for, ascending by id: its newest run on
    * any branch, and its newest run on {@code main}.
    *

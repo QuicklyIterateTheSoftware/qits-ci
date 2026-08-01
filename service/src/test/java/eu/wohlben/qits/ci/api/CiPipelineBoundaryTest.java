@@ -412,6 +412,164 @@ public class CiPipelineBoundaryTest {
   }
 
   @Test
+  public void theFinishedRouteIsTheListingAndNotASingleRunNamedFinished() {
+    // The second literal under /runs/{runId}, and it inherits /active's hazard exactly: a ranking
+    // regression would surface as a client's rail 404ing and nothing else, so it is asserted.
+    given()
+        .when()
+        .get("/ci/api/runs/finished")
+        .then()
+        .statusCode(200)
+        .contentType(ContentType.JSON)
+        .body("$", org.hamcrest.Matchers.hasKey("runs"))
+        .body("id", org.hamcrest.Matchers.nullValue())
+        .body("commitSha", org.hamcrest.Matchers.nullValue());
+  }
+
+  @Test
+  public void theFinishedListingIsTheNewestFiveByDefaultAndCarriesNoStepOutput() throws Exception {
+    // Six, so the default is provably a bound rather than however many rows happen to exist.
+    String repoId = seedOrigin();
+    List<String> pushedInOrder = new java.util.ArrayList<>();
+    for (int n = 1; n <= 6; n += 1) {
+      String branch = "ci-fin-" + n;
+      postReceive(repoId, branch, ZERO_SHA, pushBranchWithConfig(repoId, branch, CONFIG_GREEN));
+      // Newest first, so the head of this repository's listing is the run just pushed. The row
+      // exists the moment the intake answers, which is why the wait for it to *finish* is separate.
+      pushedInOrder.add((String) awaitRunCount(repoId, n).get(0).get("id"));
+    }
+    awaitAllTerminal(repoId, 6);
+
+    List<Map<String, Object>> finished = listFinishedRuns(null);
+    assertEquals(5, finished.size(), "no limit means the newest five, not every finished run");
+
+    // These six are the newest runs on the instance, so the answer's head is the last five of them,
+    // newest first — the platform-wide ordering, across a listing nothing scoped to a repository.
+    List<String> expected =
+        List.of(
+            pushedInOrder.get(5),
+            pushedInOrder.get(4),
+            pushedInOrder.get(3),
+            pushedInOrder.get(2),
+            pushedInOrder.get(1));
+    assertEquals(expected, finished.stream().map(run -> run.get("id")).toList());
+
+    // The list shape, exactly as the other two listings: no step output, no live object.
+    assertNull(finished.get(0).get("steps"), "the finished listing must not carry step output");
+    assertNull(finished.get(0).get("live"));
+    assertNotNull(finished.get(0).get("finishedAt"), "a finished run has a finish");
+    assertTrue(
+        finished.stream().noneMatch(run -> ACTIVE.contains(run.get("status"))),
+        "nothing in flight belongs in the finished listing");
+  }
+
+  @Test
+  public void theTwoListingsPartitionTheRunsAndARunMovesFromOneToTheOther() throws Exception {
+    // The complement claim, over HTTP and at one instant: a run is in exactly one of these lists,
+    // and finishing is what moves it. Staged on a genuinely occupied worker for the same reason the
+    // active listing's test is — that is what makes RUNNING and QUEUED real at a moment we control.
+    String busy = seedOrigin();
+    String waiting = seedOrigin();
+    String busySha = pushBranchWithConfig(busy, "ci-part-1", CONFIG_GREEN);
+    String waitingSha = pushBranchWithConfig(waiting, "ci-part-2", CONFIG_GREEN);
+
+    CompletableFuture<String> inStepZero = new CompletableFuture<>();
+    CountDownLatch release = new CountDownLatch(1);
+    fakeRunner.during(
+        0,
+        spec -> {
+          inStepZero.complete(spec.runId());
+          try {
+            release.await(30, TimeUnit.SECONDS);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        });
+
+    postReceive(busy, "ci-part-1", ZERO_SHA, busySha);
+    String runningId = inStepZero.get(30, TimeUnit.SECONDS);
+    postReceive(waiting, "ci-part-2", ZERO_SHA, waitingSha);
+
+    String queuedId;
+    try {
+      List<Map<String, Object>> active = listActiveRuns();
+      queuedId = (String) runIn(active, waiting).get("id");
+      List<String> finishedIds = ids(listFinishedRuns("100"));
+
+      assertFalse(finishedIds.contains(runningId), "a RUNNING run has not finished");
+      assertFalse(finishedIds.contains(queuedId), "a QUEUED run has not finished");
+      // Nothing is in both lists, which is what "complement" has to mean to be worth relying on.
+      assertTrue(
+          ids(active).stream().noneMatch(finishedIds::contains),
+          "no run is both in flight and finished");
+    } finally {
+      release.countDown();
+    }
+
+    awaitTerminalRun(busy);
+    awaitTerminalRun(waiting);
+
+    // Both have crossed over: gone from the active listing, arrived in the finished one.
+    List<String> nowFinished = ids(listFinishedRuns("100"));
+    assertTrue(nowFinished.contains(runningId), "a finished run arrives in the finished listing");
+    assertTrue(nowFinished.contains(queuedId));
+    assertTrue(
+        ids(listActiveRuns()).stream().noneMatch(id -> id.equals(runningId) || id.equals(queuedId)),
+        "a terminal run leaves the active listing");
+  }
+
+  @Test
+  public void theFinishedLimitIsBoundedAboveAndRejectedBelow() {
+    // Same parser and same envelope as the run listing's limit — one rule on one surface. "abc" is
+    // again the one that would be a 404 if the parameter were bound to an Integer.
+    for (String bad : List.of("0", "-1", "abc", "1.5", "9999999999999999999")) {
+      given()
+          .when()
+          .get("/ci/api/runs/finished?limit=" + bad)
+          .then()
+          .statusCode(400)
+          .body("message", org.hamcrest.Matchers.equalTo("Invalid limit"));
+    }
+
+    // An empty value reads as absent, exactly as it does on the run listing.
+    assertTrue(listFinishedRuns("").size() <= 5, "an empty value reads as absent, so the default");
+    // An over-large ask is capped rather than refused — this endpoint is unscoped, so an unbounded
+    // limit would be the listing of every run on the instance that the surface deliberately lacks.
+    assertTrue(listFinishedRuns("1000").size() <= 100, "the answer is capped at a hundred");
+    assertEquals(1, listFinishedRuns("1").size(), "a limit under the row count is the bound");
+  }
+
+  private static List<String> ids(List<Map<String, Object>> runs) {
+    return runs.stream().map(run -> (String) run.get("id")).toList();
+  }
+
+  /** Deadline-polls until a repository holds {@code expected} runs and none of them is in flight. */
+  private void awaitAllTerminal(String repoId, int expected) throws Exception {
+    long deadline = System.currentTimeMillis() + 30_000;
+    while (System.currentTimeMillis() < deadline) {
+      List<Map<String, Object>> runs = listRuns(repoId);
+      if (runs.size() == expected && runs.stream().noneMatch(r -> ACTIVE.contains(r.get("status")))) {
+        return;
+      }
+      Thread.sleep(100);
+    }
+    fail("no " + expected + " finished CI runs for " + repoId + " within the deadline");
+  }
+
+  /** {@code limit} null omits the parameter entirely; {@code ""} sends it with no value. */
+  private List<Map<String, Object>> listFinishedRuns(String limit) {
+    return given()
+        .when()
+        .get("/ci/api/runs/finished" + (limit == null ? "" : "?limit=" + limit))
+        .then()
+        .statusCode(200)
+        .contentType(ContentType.JSON)
+        .extract()
+        .jsonPath()
+        .getList("runs");
+  }
+
+  @Test
   public void theRepositorySummaryCarriesTheNewestRunAndTheNewestMainRun() throws Exception {
     String bothBranches = seedOrigin();
     String featureOnly = seedOrigin();

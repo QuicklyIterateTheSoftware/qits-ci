@@ -139,6 +139,46 @@ public class CiRunController {
   }
 
   /**
+   * The newest finished runs — anything that is neither {@code QUEUED} nor {@code RUNNING} — across
+   * every repository, newest first. Step output is not carried, exactly as the two listings above.
+   *
+   * <p><b>The sibling of {@code /active}, and it exists because that one cannot answer this.</b> A
+   * client drawing "what is CI doing, and what did it just finish" had no way to ask the second half:
+   * the active list holds only the two non-terminal statuses, the repository listing demands a
+   * repository, and a per-repository fan-out is the n+1 {@code
+   * CiRepositoryController#listRepositorySummaries} exists to spare a client — and it would still be
+   * wrong, since two of the newest five finished runs can belong to one repository. The two lists are
+   * complements over the same table, so a run that leaves one arrives in the other.
+   *
+   * <p>It <b>does</b> carry {@code ?limit=} where {@code /active} does not, and the asymmetry is the
+   * whole difference between them: what is active is bounded by what one single-threaded worker has
+   * accepted, while what is finished grows for as long as the instance has been up. Absent means
+   * {@link CiRunService#DEFAULT_FINISHED_LIMIT} rather than unbounded — the opposite of the
+   * repository listing's default, because there is no repository here to make "all of them" a bounded
+   * question. It is parsed by the same {@link #parseLimit} for the same 400-not-404 reason, and an
+   * ask above {@link CiRunService#MAX_FINISHED_LIMIT} is answered with that many rather than refused.
+   *
+   * <p>{@code /finished} is a literal segment, so JAX-RS matches it before {@link #getRun}'s
+   * template — the same ranking {@code /active} relies on, asserted rather than assumed in {@code
+   * CiPipelineBoundaryTest}. It adds no Vert.x route of its own, so {@code
+   * quarkus.quinoa.ignored-path-prefixes} is unchanged: {@code /api} already covers it.
+   */
+  @GET
+  @Path("/finished")
+  @Operation(summary = "The newest finished CI runs, all repositories, newest first")
+  @APIResponse(responseCode = "200", description = "The finished runs, without step output")
+  @APIResponse(responseCode = "400", description = "The limit is not a positive integer")
+  public ListRunsResponse listFinishedRuns(
+      @Parameter(
+              description = "Return the newest n finished runs; omit for 5, capped at 100",
+              schema = @Schema(type = SchemaType.INTEGER, minimum = "1", maximum = "100"))
+          @QueryParam("limit")
+          String limit) {
+    return new ListRunsResponse(
+        runService.finishedRuns(parseLimit(limit)).stream().map(mapper::toDto).toList());
+  }
+
+  /**
    * One run with its steps, exit codes and captured output — plus, while it is running, the {@code
    * live} object holding the step in flight and what it has printed so far.
    *

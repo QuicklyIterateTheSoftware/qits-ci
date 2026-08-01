@@ -245,13 +245,26 @@ is FIFO and a restart must not reorder a backlog.
 suite inherits it.** So a resource's `@Path` is relative to `/ci/api` and must never repeat `ci`.
 Tests address the absolute path, which is what makes them catch a prefix regression.
 
-**`/ci/api/runs/active` sits under `/ci/api/runs/{runId}`, and only JAX-RS' sorting rule keeps them
-apart.** A literal segment outranks a template, so the listing wins — but a regression there would
-show up as the client's rail 404ing and nothing else, so `CiPipelineBoundaryTest` asserts the route
-resolves to the listing envelope rather than to a lookup for a run named `active`. Same for
-`/ci/api/repositories/summary` under `/ci/api/repositories`, which is the easier case (that one has
-no template to lose to). Neither adds a literal Vert.x route, so
-`quarkus.quinoa.ignored-path-prefixes` is unchanged — `/api` already covers both.
+**`/ci/api/runs/active` and `/ci/api/runs/finished` sit under `/ci/api/runs/{runId}`, and only
+JAX-RS' sorting rule keeps them apart.** A literal segment outranks a template, so the listing wins —
+but a regression there would show up as the client's rail 404ing and nothing else, so
+`CiPipelineBoundaryTest` asserts each route resolves to the listing envelope rather than to a lookup
+for a run named `active` or `finished`. Same for `/ci/api/repositories/summary` under
+`/ci/api/repositories`, which is the easier case (that one has no template to lose to). None of them
+adds a literal Vert.x route, so `quarkus.quinoa.ignored-path-prefixes` is unchanged — `/api` already
+covers them.
+
+**The two run listings are complements, and the predicate is written that way on purpose.**
+`/active` is `status in (QUEUED, RUNNING)` and `/finished` is `status NOT in (QUEUED, RUNNING)` —
+not `in (SUCCESS, FAILED, CONFIG_ERROR)`, which reads the same today and rots silently: a sixth
+value added to `ck_ci_run_status` would be finished in fact and invisible to both lists, so a run
+would leave one and never arrive in the other. Written as a complement they partition the table by
+construction. `/finished` carries `?limit=` where `/active` does not, and the asymmetry is the whole
+difference between them: what is active is bounded by what one single-threaded worker has accepted,
+what is finished grows with the instance's uptime. Absent means **5**, not unbounded — the opposite
+of the repository listing's default, because there is no repository here to make "all of them" a
+bounded question — and an ask above **100** is clamped rather than refused, since this is the one
+listing that is both unscoped and otherwise unbounded.
 
 **`CiTokenFilter` matches on `UriInfo.getPath()`, which is relative to `quarkus.rest.path`.** It
 matches the literal `events`. Move or rename `CiEventController`'s `@Path` and the guard stops
@@ -691,7 +704,8 @@ mechanism at all — which is what every service here was before the header land
   /ci/api/runs/{runId}/cancel`, the one operation here a person invokes on purpose), because no
   client read anything. **qits-spa-ci changed the answer, not the criterion**: it reads `GET
   /ci/api/repositories`, `GET /ci/api/repositories/summary`, `GET /ci/api/runs`, `GET
-  /ci/api/runs/active` and `GET /ci/api/runs/{runId}` on every page it draws, so those are the JSON
+  /ci/api/runs/active`, `GET /ci/api/runs/finished` and `GET /ci/api/runs/{runId}` on every page it
+  draws, so those are the JSON
   API a first-party client consumes and none of them carries `@Operation(hidden = true)`.
   Keeping them hidden would have meant this file omitted the entire contract that client depends on,
   and a breaking change to `CiRunDto` would have landed with an **empty diff** — which is the exact

@@ -185,6 +185,28 @@ paths:
                 $ref: "#/components/schemas/ListRunsResponse"
       tags:
       - Ci Run Controller
+  /ci/api/runs/finished:
+    get:
+      summary: "The newest finished CI runs, all repositories, newest first"
+      parameters:
+      - description: "Return the newest n finished runs; omit for 5, capped at 100"
+        schema:
+          type: integer
+          maximum: 100
+          minimum: 1
+        name: limit
+        in: query
+      responses:
+        "200":
+          description: "The finished runs, without step output"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListRunsResponse"
+        "400":
+          description: The limit is not a positive integer
+      tags:
+      - Ci Run Controller
   /ci/api/runs/{runId}:
     get:
       summary: "One CI run with its steps, output and — while it runs — its live step"
