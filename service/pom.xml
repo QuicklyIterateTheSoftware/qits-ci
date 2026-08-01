@@ -109,6 +109,16 @@
             <artifactId>qits-auth-core</artifactId>
         </dependency>
         <dependency>
+            <!-- Validates the machine bearers qits-idp issues, so MachineAuth has something to read.
+                 It sits BESIDE forward-auth rather than instead of it: a request with no
+                 Authorization header falls through to the header mechanism and stays user traffic.
+                 Configured in application.properties, where discovery is off and no connection is
+                 made until a bearer actually arrives — this service must boot with no qits-idp
+                 anywhere, which is what the rollout gate is for. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-oidc</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-rest-jackson</artifactId>
         </dependency>
