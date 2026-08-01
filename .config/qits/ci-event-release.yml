@@ -1,0 +1,101 @@
+# The release pipeline: this repository reacts to its OWN release and pushes the image under the
+# released VERSION.
+#
+# THE SELECTION NAMES THIS REPOSITORY, WHICH READS LIKE A LOOP AND IS NOT. `SCMRelease` says only
+# "source control has this version" — qits-workspaces publishes it the instant the release push is
+# accepted, and nothing in this file publishes it. So a repository listening for its own SCMRelease
+# is exactly the release pipeline the split-release design asks each repository to own: the SCM half
+# fires, this half builds the tagged commit and pushes it, and qits-ci turns the green run into one
+# `SoftwareRelease` per entry under `artifacts:` below. The event that could loop is
+# SoftwareRelease, and this file neither listens for it nor publishes it.
+#
+# THE VERSION TAG IS A NEW COORDINATE BESIDE THE SHA, NOT A REPLACEMENT FOR IT.
+# ci-post-receive.yml's `:$QITS_CI_SHA` push is the whole contract with qits-cd and is untouched;
+# every deployment still comes from a sha. What this adds is a name a human and a downstream
+# consumer can say out loud, on the same image content.
+#
+# `artifacts:` IS A DECLARATION, NOT A REPORT. qits-ci never learns how to publish anything, so it
+# cannot see what the step below pushed; it announces `{repository, version, packageType,
+# packageName}` on the strength of these two lines. Keep them true.
+#
+# THE NAME IS UNQUALIFIED ON PURPOSE. No registry-qualified docker reference is portable here — the
+# registry is `qits-artifacts:8080` inside a step container and `localhost:8081` to qits-ci and
+# qits-cd — and an OCI reference cannot carry a path prefix. So the declaration carries
+# `qits/<application>` and the reader supplies its own host, exactly as the push below composes one
+# from environment.
+#
+# THE BUILD BELOW IS ci-post-receive.yml's, AND THE TWO MUST STAY MATCHED. Both pipelines publish
+# the same image content under two coordinates, so a fix to one build belongs in the other. That
+# file is where the two halves, the submodule fetches, the lockfile origin swap and the
+# `npm_config_*` environment are explained at length; this one carries the short form and points
+# there rather than keeping a second copy of the reasoning to drift.
+#
+# THIS REPOSITORY IS ALSO THE ENGINE. A green run here ends by replacing the process that ran it,
+# and it is this process that turns the run into `SoftwareRelease` — the announcement is made at the
+# run's finish, before cd swaps anything, so the event is published by the instance that built it.
+# What a redeploy does interrupt is any other build still RUNNING, which is the ordinary reason this
+# repository is deployed with the queue quiet.
+#
+# THIS FILE IS INERT UNTIL qits-workspaces PUBLISHES SCMRelease, and it lands first on purpose: the
+# bus is at-most-once with no catch-up and no replay, so a trigger file must be in place before the
+# event it selects exists. The other order loses a release and looks like a train that quietly did
+# not roll.
+event: SCMRelease
+when:
+  - repository: { exact: qits-ci }
+artifacts:
+  - { type: docker, name: qits/qits-ci }
+steps:
+    # node-docker-base, the image ci-post-receive.yml already uses: node, npm and git for half one,
+    # the docker CLI for half two — and node is also what reads the event payload, which is JSON.
+  - image: qits/build-images/node-docker-base:latest
+    docker: true
+    timeout-seconds: 3600
+    script: |
+      # The daemon runs this with `bash -c` and no -e, so without this a failed docker build is
+      # swallowed: the push fails, `docker rmi || true` answers 0, and the run reports SUCCESS — and
+      # a green release run is what makes qits-ci announce the artifact. -u makes an unset registry
+      # variable stop the step too.
+      set -eu
+
+      # THE EVENT, READ AS DATA. The payload reaches the container verbatim as one string in
+      # $QITS_EVENT_PAYLOAD; there is no per-field projection.
+      version=$(node -p 'JSON.parse(process.env.QITS_EVENT_PAYLOAD).version')
+      echo "releasing qits/qits-ci:$version"
+
+      # THE TAG IS THE CHECKOUT TARGET, and it is the only reason this run needs one. An
+      # event-triggered run is cloned at the head of main, which is where the release commit is
+      # *now* — a later push moves that, and the tag does not, so a busy main cannot make this
+      # pipeline ship a different tree than the one that was released. The clone is shallow and
+      # carries no tags, hence the explicit refspec; the URL rather than `origin` because every
+      # address a step needs arrives as environment. `checkout --detach` peels the annotated tag to
+      # its commit — and it is what makes the submodule fetches below land on the gitlinks the
+      # release recorded rather than on main's.
+      git fetch "$QITS_CI_REPOSITORY_URL" "refs/tags/$version:refs/tags/$version"
+      git checkout --detach "$version"
+
+      # --- half one: the bundle -----------------------------------------------------------------
+      # Two submodules, each failing the image build in its own way if it is missing: Quinoa refuses
+      # an empty service/src/main/webui, and the maven reactor refuses an empty eventstream/. Named
+      # one per line rather than left to a bare `--init`, so a third never starts being fetched
+      # silently. See ci-post-receive.yml for why the lockfile origins are rewritten and why the
+      # registry is passed as environment rather than as a file.
+      git submodule update --init --depth 1 service/src/main/webui
+      git submodule update --init --depth 1 eventstream
+
+      cd service/src/main/webui
+      npm_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
+      sed -i -E "s#(\"resolved\": \")https?://[^/\"]+#\1$npm_origin#" package-lock.json
+
+      env npm_config_registry="$QITS_NPM_PROXY_URL" \
+          "npm_config_@qits:registry=$QITS_NPM_REGISTRY_URL" \
+          npm ci --no-audit --no-fund
+
+      npm run build
+      cd -
+
+      # --- half two: the image ------------------------------------------------------------------
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-ci:$version"
+      docker build -t "$ref" -f docker/Dockerfile .
+      docker push "$ref"
+      docker rmi "$ref" || true
