@@ -95,7 +95,7 @@ rest of qits it reaches over a URL it is configured with:
 
 | Direction | Surface | Config |
 |---|---|---|
-| in | `POST /ci/api/events/post-receive` — `{repoId, branch, oldSha, newSha}`, one per updated branch ref | guarded by `qits.ci.token` (`X-CI-Token`) |
+| in | `POST /ci/api/events/post-receive` — `{repoId, branch, oldSha, newSha}`, one per updated branch ref | guarded by a qits-idp bearer (`aud=qits-ci`, `project` covering the repoId) once `qits.auth.machine.required=true` |
 | in | `GET /ci/api/runs?repositoryId={repoId}[&limit={n}]`, `GET /ci/api/runs/{runId}` | not token-guarded; they carry build logs, so a deployment must keep them behind its auth policy |
 | in | `GET /ci/api/runs/active` → `{"runs": [...]}` — every `QUEUED` or `RUNNING` run on the instance, all repositories, newest first, no parameters | same; unscoped, because "what is CI doing right now" has no repository to scope to |
 | in | `GET /ci/api/repositories` → `{"repositoryIds": [...]}` — the distinct repo ids this instance has runs for, ascending | same; it is the one read here that is not scoped to a repository, because it answers *which* |
@@ -687,12 +687,16 @@ a repository's own listing will show.
   which serves it under its own gateway segment, so the value is `http://qits-artifacts:8080/artifacts`
   and a fetch lands on `/artifacts/git/<repoId>`. The container-side alias only resolves on the
   network ci itself is on, so `qits.ci.network` must be set together with it.
-- Set `qits.ci.token` and configure the git host's notifier with the same value. Blank is the
-  dev/test default and means *no guard*.
+- Guard the event intake with machine tokens once qits-idp is deployed: `QITS_AUTH_MACHINE_REQUIRED=true`
+  here, and at the idp a secret plus the claim for the caller — the git host serves every project's
+  repositories, so `QITS_IDP_CLIENT_QITS_ARTIFACTS_CLAIMS_PROJECT='*'`. Off (the shipped default)
+  the intake is open, which is what lets this code deploy before the idp exists. `qits.auth.machine.audience`
+  is already `qits-ci` and is not a deployment fact.
 - Allow-list `/ci/api/events/` for unauthenticated access — the caller is the git host's hook, a
-  different process with no user session. That allowlist is qits-gateway's `PublicPaths`.
-- Keep the run **read** surface behind the deployment's auth policy. It is not token-guarded, and it
-  returns build logs.
+  different process with no user session. That allowlist is qits-gateway's `PublicPaths`. It says
+  "no *user* session"; the bearer above is a separate question and rides the same request.
+- Keep the run **read** surface behind the deployment's auth policy. No machine guard touches it, and
+  it returns build logs.
 - Set `qits.artifacts.registry-host` / `qits.artifacts.image-repository` to qits-artifacts' registry
   as reachable **from the docker host** — the daemon on the far side of the mounted socket is what
   resolves that name and performs the push, not this process and not the step's CLI. While the

@@ -136,10 +136,11 @@ String` with zero interpolation; a step script never appears in an argv.
 Three things bite:
 
 - **`@WebSocket(path = "/ci/daemon")` is a literal that does not follow `quarkus.rest.path`**, so it
-  carries the `/ci` segment itself — and it is outside `CiTokenFilter`'s reach by construction, since
-  that filter matches `UriInfo.getPath()` relative to `quarkus.rest.path`. Correct rather than an
-  oversight: the callers are containers holding no intake token, and the authentication is the
-  per-container secret.
+  carries the `/ci` segment itself — and no machine guard reaches it, since the guard is a call
+  inside the intake's resource method. Correct rather than an oversight: the callers are step
+  containers holding no idp client, and the authentication is the per-container secret. Phase 2 of
+  qits-idp replaces that secret with a real client; until then, do not extend the intake's guard
+  here.
 - **The path is a cross-repo contract.** `qits.ci.container-daemon-url` (default
   `ws://qits-ci:8080/ci/daemon`) is injected as `$QITS_CI_DAEMON_URL` and dialled verbatim. Move one,
   move both. It is not a gateway route and must not become one: one process per container with a
@@ -271,12 +272,13 @@ of the repository listing's default, because there is no repository here to make
 bounded question — and an ask above **100** is clamped rather than refused, since this is the one
 listing that is both unscoped and otherwise unbounded.
 
-**`CiTokenFilter` matches on `UriInfo.getPath()`, which is relative to `quarkus.rest.path`.** It
-matches the literal `events`. Move or rename `CiEventController`'s `@Path` and the guard stops
-matching — and it fails *open*, because a request the filter does not recognise is simply not
-checked. `CiTokenGuardTest` is what stands between that and shipping: it POSTs the intake's real
-address with no token and demands a 401, so a filter that quietly stopped guarding shows up as a
-202. Change the two together and keep that test on the absolute path.
+**The intake's guard is a call in the resource method, not a path-matching filter.** It used to be
+`CiTokenFilter`, which matched the literal `events` in `UriInfo.getPath()` and therefore failed
+*open* when the path moved. `machineAuth.requireProject(...)` cannot: a write that forgets it is a
+missing line at the call site, and moving the `@Path` carries the guard with the method. Add a write
+under `/ci/api` and it needs its own call — nothing guards it by address any more.
+`MachineGuardTest` still POSTs the intake's absolute address, because the *test* proves the wiring
+rather than the path match.
 
 ## The Angular client
 
@@ -720,9 +722,39 @@ gateway authenticates every human request (OIDC, with the variant fixed at **bui
 result as headers. `X-Qits-*` is its reserved namespace and is stripped from every inbound request
 unconditionally, which is the entire reason a header can be trusted as an identity here.
 
-`qits.ci.token` is not part of any of this. It guards one machine-to-machine path and knows nothing
-about users, so edge auth neither replaces it nor excuses it — `CiTokenGuardTest` stays exactly as
-load-bearing as it was.
+### Machines
+
+None of the above is about machines, and the two tracks never meet. A machine caller arrives with a
+bearer token minted by **qits-idp** — `aud=qits-ci`, plus the structured claims it was granted — and
+`qits-auth-core`'s `MachineAuth` is what reads it. `quarkus-oidc` validates; this service decides.
+
+**One gate, `qits.auth.machine.required`, default `false`.** Off, every `require*` call returns at
+once and the guarded endpoint behaves exactly as it did under network trust. That is what lets this
+code deploy before qits-idp exists, and there is no third state — turning it on without
+`qits.auth.machine.audience` fails the deploy rather than accepting a token minted for another
+service. Do not branch on `enforced()`; log the posture with it if you must.
+
+**The one guarded call is the event intake**, `machineAuth.requireProject(event.repoId())`. The
+`project` claim is matched against a *repository id* — a deliberate decision, argued in full in
+`CiEventController`'s javadoc, because this service has no project entity and never learns one. The
+git host holds `project=*`, which covers any value.
+
+This replaces `qits.ci.token` / `X-CI-Token` and its filter, both deleted. A blank token meaning
+"open" was the same idea as the gate, made once per service and unable to say *who* was calling;
+the gate says it once for the platform and the claim answers "who".
+
+Warnings like `OIDC server is not available at 'http://qits-idp:8080/idp'` at boot are the expected
+posture wherever the idp is not deployed. Startup never blocks on it and the suite prints them on
+every run.
+
+**The `%dev`/`%test` dev user shadows every bearer, and a gate-on test must switch it off.**
+`ForwardAuthMechanism` answers any request without an `X-Qits-User` header with the synthetic `dev`
+identity, so it authenticates first and no other mechanism is asked — a machine token arriving under
+those profiles is never even looked at. `MachineGuardTest`'s profile therefore blanks
+`qits.auth.forward.dev-user`, which is not a convenience but the production shape: a deployment has
+no dev user, forward auth abstains, and the bearer is what the request is judged on. Write a
+gate-on test without that override and every case answers 401 for the wrong reason — including the
+ones that assert 401.
 
 The lib's `ForwardAuthTest` sets a real `X-Qits-User` rather than reaching for `@TestSecurity`, and
 that is deliberate: the header **is** the contract under test. `@TestSecurity` installs an identity

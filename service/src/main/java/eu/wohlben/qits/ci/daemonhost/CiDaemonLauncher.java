@@ -99,8 +99,8 @@ public class CiDaemonLauncher {
   String containerDaemonUrl;
 
   /**
-   * {@code Optional} for the same reason {@code qits.ci.token} is: the shipped default is blank, and
-   * SmallRye reads a blank value as unset rather than as an empty string. Blank means this
+   * {@code Optional} because the shipped default is blank, and SmallRye reads a blank value as unset
+   * rather than as an empty string — a plain {@code String} injection would fail. Blank means this
    * deployment has not pinned a daemon binary, which yields a url that 404s and the honest
    * never-registered failure state — not a boot failure, and not a default this class invents.
    */

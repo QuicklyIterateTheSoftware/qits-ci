@@ -163,6 +163,15 @@
             <artifactId>rest-assured</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <!-- @TestSecurity + @OidcSecurity: installs the identity quarkus-oidc would have built
+                 from a validated bearer, without a running qits-idp. What MachineGuardTest asserts
+                 is this service's DECISION on a token's claims — signature and expiry checking is
+                 the extension's job and has its own tests upstream. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-test-security-oidc</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

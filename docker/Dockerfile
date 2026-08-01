@@ -66,8 +66,10 @@
 #                               host.docker.internal default assumes host-run docker.
 #   QITS_CI_NETWORK             the network step containers join; it has to be the one the alias
 #                               above resolves on.
-#   QITS_CI_TOKEN               blank means the event intake — which triggers repo-controlled code —
-#                               is unauthenticated. Must match the git host's notifier.
+#   QITS_AUTH_MACHINE_REQUIRED  false (the default) means the event intake — which triggers
+#                               repo-controlled code — takes any caller on the network. true demands
+#                               a qits-idp bearer, and needs a reachable idp that grants the git
+#                               host's client a project claim.
 #
 # See README.md, "Deploying it", for the whole surface.
 #
