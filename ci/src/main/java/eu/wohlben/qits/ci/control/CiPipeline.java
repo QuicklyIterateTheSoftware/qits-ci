@@ -1,5 +1,6 @@
 package eu.wohlben.qits.ci.control;
 
+import eu.wohlben.qits.ci.control.CiEventSelection.Matcher;
 import java.util.List;
 
 /**
@@ -12,7 +13,8 @@ public record CiPipeline(List<CiStepDecl> steps) {
 
   /**
    * One step: the container {@code image} it runs in, the bash {@code script} it executes, an
-   * optional {@code timeout-seconds}, and whether it asked for a docker daemon.
+   * optional {@code timeout-seconds}, whether it asked for a docker daemon, and the branches it is
+   * bound to.
    *
    * <p>{@code timeoutSeconds} is null when the config does not declare one, which means exactly
    * today's behaviour — the deployment-wide {@code qits.ci.step-timeout-seconds}. It is resolved by
@@ -26,6 +28,56 @@ public record CiPipeline(List<CiStepDecl> steps) {
    * script is {@code docker build && docker push}) and is also <b>root-equivalent on the host</b> —
    * the socket is the daemon and the daemon is root. That is why the flag is declared in the
    * repository's own config: it shows up in a config diff, and no step acquires it silently.
+   *
+   * <p>{@code branches} is the step's own {@code branches:} filter, {@link #runsOnBranch evaluated}
+   * before the container launches. <b>Empty means the config declared none</b>, and the empty list
+   * has exactly one origin: {@code branches: []} in a file is a parse error, because both readings
+   * of it already have an unambiguous spelling (omit the key; delete the step).
    */
-  public record CiStepDecl(String image, String script, Integer timeoutSeconds, boolean docker) {}
+  public record CiStepDecl(
+      String image,
+      String script,
+      Integer timeoutSeconds,
+      boolean docker,
+      List<BranchFilter> branches) {
+
+    /**
+     * Whether this step's declaration binds it to the branch a run is on. An undeclared filter binds
+     * every branch — today's behaviour, byte for byte — and a declared one binds when <b>any</b>
+     * entry matches.
+     */
+    public boolean runsOnBranch(String branch) {
+      if (branches == null || branches.isEmpty()) {
+        return true;
+      }
+      for (BranchFilter filter : branches) {
+        if (filter.matches(branch)) {
+          return true;
+        }
+      }
+      return false;
+    }
+  }
+
+  /**
+   * One entry of a step's {@code branches:}: every matcher in it must hold. Entries are OR'd and a
+   * mapping's keys are AND'd — the {@code when:} DSL's composition rule minus the path level,
+   * because the subject is one scalar rather than a payload.
+   *
+   * <p>It carries {@link Matcher} rather than a second matcher type: one matcher implementation on
+   * this platform, not two. The vocabulary a branch filter may spell is narrower, and that is the
+   * parser's rule rather than this record's — {@code exists} over a value that is always present
+   * could only ever say yes.
+   */
+  public record BranchFilter(List<Matcher> matchers) {
+
+    public boolean matches(String branch) {
+      for (Matcher matcher : matchers) {
+        if (!CiEventSelectionEvaluator.matchesScalar(matcher, branch)) {
+          return false;
+        }
+      }
+      return true;
+    }
+  }
 }

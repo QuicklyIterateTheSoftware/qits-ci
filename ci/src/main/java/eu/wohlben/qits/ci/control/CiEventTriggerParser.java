@@ -44,7 +44,10 @@ import java.util.Set;
  * mode this file cannot have.
  *
  * <p>The step list keeps its own leniency unchanged, because it is the same pipeline schema and a
- * step must not mean different things in the two files.
+ * step must not mean different things in the two files. <b>The one key it subtracts is {@code
+ * branches:}</b>, and subtracting is the point: an event-triggered run always builds the head of
+ * {@code main}, so a branch filter there is either inert decoration or a step that can never run,
+ * and both of those are silent. See {@link CiConfigSchema#stepsRejectingBranches}.
  *
  * <h2>Failures are per file</h2>
  *
@@ -71,14 +74,16 @@ public class CiEventTriggerParser {
       Set.of(CiConfigSchema.EVENT_KEY, CiConfigSchema.WHEN_KEY, CiConfigSchema.STEPS_KEY);
 
   /**
-   * The whole matcher vocabulary. {@code regex} is deliberately absent; adding one is a decision
-   * about the DSL, not a convenience, and it belongs in the plan before it belongs here.
+   * The whole matcher vocabulary, spelled in {@link CiConfigSchema} because a step's {@code
+   * branches:} filter reads two of the same three words. {@code regex} is deliberately absent;
+   * adding one is a decision about the DSL, not a convenience, and it belongs in the plan before it
+   * belongs here.
    */
-  private static final String EXACT = "exact";
+  private static final String EXACT = CiConfigSchema.EXACT;
 
-  private static final String PREFIX = "prefix";
+  private static final String PREFIX = CiConfigSchema.PREFIX;
 
-  private static final String EXISTS = "exists";
+  private static final String EXISTS = CiConfigSchema.EXISTS;
 
   /**
    * Whether a repository-tree path is one of this parser's files. The {@code *} is freely chosen and
@@ -115,7 +120,10 @@ public class CiEventTriggerParser {
         configPath,
         requireEventName(root, configPath),
         parseWhen(root.get(CiConfigSchema.WHEN_KEY), configPath),
-        CiConfigSchema.steps(root));
+        // The step schema is shared verbatim, with one key subtracted rather than redefined: see
+        // CiConfigSchema#stepsRejectingBranches. A step means one thing in both files, and where it
+        // cannot mean anything it is an error rather than a second meaning.
+        CiConfigSchema.stepsRejectingBranches(root, configPath));
   }
 
   private static void rejectUnknownTopLevelKeys(Map<?, ?> root, String configPath) {

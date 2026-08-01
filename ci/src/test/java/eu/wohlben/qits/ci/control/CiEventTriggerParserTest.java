@@ -75,6 +75,38 @@ public class CiEventTriggerParserTest {
   }
 
   @Test
+  public void aStepDeclaringBranchesIsAParseErrorNamingTheFile() {
+    // Allow-but-inert is the trap this refuses. An event-triggered run always builds the head of
+    // main, so `exact: main` here would be decoration and anything else a step that is ALWAYS
+    // skipped — indistinguishable at a glance from one that never got its turn. The same asymmetry
+    // argument the two-way rule makes at the top level, one level down.
+    CiConfigException e =
+        assertThrows(
+            CiConfigException.class,
+            () ->
+                parser.parse(
+                    PATH,
+                    """
+                    event: SoftwareRelease
+                    steps:
+                      - image: alpine:3
+                        script: "true"
+                        branches:
+                          - prefix: maintenance/
+                    """));
+    assertTrue(e.getMessage().contains(PATH), e.getMessage());
+    assertTrue(e.getMessage().contains("branches"), e.getMessage());
+    // Even the inert spelling: it is refused for what it cannot mean, not for what it happens to say.
+    assertThrows(
+        CiConfigException.class,
+        () ->
+            parser.parse(
+                PATH,
+                "event: SoftwareRelease\nsteps:\n  - image: alpine:3\n    script: \"true\"\n"
+                    + "    branches:\n      - exact: main\n"));
+  }
+
+  @Test
   public void aBlankOrNonStringEventIsAParseError() {
     assertThrows(CiConfigException.class, () -> parser.parse(PATH, "event: \"\"\n"));
     assertThrows(CiConfigException.class, () -> parser.parse(PATH, "event: 7\n"));

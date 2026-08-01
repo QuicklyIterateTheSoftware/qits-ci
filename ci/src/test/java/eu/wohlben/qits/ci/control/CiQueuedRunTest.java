@@ -272,7 +272,9 @@ public class CiQueuedRunTest extends CiTestSupport {
             ".config/qits/ci-event-upstream.yml",
             "BuildSuccessful",
             null, // the selection already matched; nothing below this seam reads it
-            new CiPipeline(List.of(new CiPipeline.CiStepDecl("alpine:3", "echo bump", null, false)))),
+            new CiPipeline(
+                List.of(
+                    new CiPipeline.CiStepDecl("alpine:3", "echo bump", null, false, List.of())))),
         eventId,
         "BuildSuccessful",
         Instant.parse("2026-07-31T12:46:03Z"),

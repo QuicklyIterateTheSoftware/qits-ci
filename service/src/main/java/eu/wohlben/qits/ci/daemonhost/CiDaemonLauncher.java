@@ -163,6 +163,17 @@ public class CiDaemonLauncher {
   String artifactsNpmProxyUrl;
 
   /**
+   * qits-workspaces' root, injected into every step container so the release train's maintenance
+   * step names no deployment fact of its own. Scheme, host and port only — the path is the caller's,
+   * and a step spells {@code /workspaces/api/branches/release} itself.
+   *
+   * <p>Dialled by the step container, like the npm pair and unlike {@code registry-host}: an
+   * ordinary HTTP call over qits-net, no socket and no host daemon in the path.
+   */
+  @ConfigProperty(name = "qits.ci.workspaces-url")
+  String workspacesUrl;
+
+  /**
    * Everything one step container is started with. Ids and names only — never entities.
    *
    * <p>{@code docker} is the step's own declaration, arriving from the repository's config by way of
@@ -355,6 +366,10 @@ public class CiDaemonLauncher {
    * local stack's {@code localhost:8081}) must <b>not</b> be substituted for these: a step container
    * has no such address. Two variables, two opposite readings of "reachable from where" — which is
    * why both are commented where they are shipped.
+   *
+   * <p><b>{@code QITS_WORKSPACES_URL} joins them on the same reading.</b> It is the door a step
+   * knocks on to release its own repository after green tests — the release train's maintenance leg
+   * — and it is an ordinary HTTP call from the container over qits-net.
    */
   List<String> buildArgv(LaunchSpec spec) {
     List<String> argv = new ArrayList<>();
@@ -411,6 +426,9 @@ public class CiDaemonLauncher {
     // container, on this network — a publish here is an ordinary HTTP step needing no socket.
     env(argv, "QITS_NPM_REGISTRY_URL", artifactsNpmHostedUrl);
     env(argv, "QITS_NPM_PROXY_URL", artifactsNpmProxyUrl);
+    // And where a step asks for its own repository to be released — same network, same reading of
+    // "reachable from where" as the npm pair.
+    env(argv, "QITS_WORKSPACES_URL", workspacesUrl);
     // Run-scoped extras, LAST and in sorted key order. Last because everything above is the fixed
     // contract the daemon boots on and nothing may shadow it — today these are the four QITS_EVENT_*
     // of an event-triggered run and the map is empty on every push, but "the platform's variables are

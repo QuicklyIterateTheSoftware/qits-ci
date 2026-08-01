@@ -1,6 +1,8 @@
 package eu.wohlben.qits.ci.control;
 
 import eu.wohlben.qits.ci.control.CiConfigParser.CiConfigException;
+import eu.wohlben.qits.ci.control.CiEventSelection.Matcher;
+import eu.wohlben.qits.ci.control.CiPipeline.BranchFilter;
 import eu.wohlben.qits.ci.control.CiPipeline.CiStepDecl;
 import java.util.ArrayList;
 import java.util.List;
@@ -37,6 +39,20 @@ final class CiConfigSchema {
   static final String WHEN_KEY = "when";
 
   static final String STEPS_KEY = "steps";
+
+  /** The per-step branch filter — legal in a pipeline file, an error in a trigger file. */
+  static final String BRANCHES_KEY = "branches";
+
+  /**
+   * The matcher vocabulary, spelled once for everything that reads one. {@code regex} is
+   * deliberately absent; adding one is a decision about the DSL, not a convenience, and it belongs
+   * in a plan before it belongs here.
+   */
+  static final String EXACT = "exact";
+
+  static final String PREFIX = "prefix";
+
+  static final String EXISTS = "exists";
 
   private CiConfigSchema() {}
 
@@ -75,10 +91,30 @@ final class CiConfigSchema {
   }
 
   /**
-   * The {@code steps:} list, shared verbatim by both trigger types. An absent or empty list yields an
-   * empty pipeline — the opt-in file is visible, which is what a trivially green run records.
+   * The {@code steps:} list of a pipeline file, where a step may bind itself to branches. An absent
+   * or empty list yields an empty pipeline — the opt-in file is visible, which is what a trivially
+   * green run records.
    */
   static CiPipeline steps(Map<?, ?> root) {
+    return steps(root, null);
+  }
+
+  /**
+   * The same list read from a trigger file, where {@code branches:} on a step is a <b>parse
+   * error</b> naming {@code configPath}.
+   *
+   * <p>The key is refused rather than ignored because on that path it has only two possible
+   * behaviours and both are silent. An event-triggered run always builds the head of {@code main},
+   * so {@code exact: main} would be inert decoration and anything else a step that is <em>always</em>
+   * skipped — indistinguishable at a glance from one that never got its turn. Allow-but-inert is the
+   * trap; this is the two-way rule's own argument, moved down one level from the top-level keys to
+   * the step.
+   */
+  static CiPipeline stepsRejectingBranches(Map<?, ?> root, String configPath) {
+    return steps(root, configPath);
+  }
+
+  private static CiPipeline steps(Map<?, ?> root, String rejectBranchesIn) {
     Object rawSteps = root.get(STEPS_KEY);
     if (rawSteps == null) {
       return new CiPipeline(List.of());
@@ -97,7 +133,8 @@ final class CiConfigSchema {
               requireString(step, "image", i),
               requireString(step, "script", i),
               optionalTimeoutSeconds(step, i),
-              optionalDocker(step, i)));
+              optionalDocker(step, i),
+              optionalBranches(step, i, rejectBranchesIn)));
     }
     return new CiPipeline(List.copyOf(steps));
   }
@@ -144,6 +181,122 @@ final class CiConfigSchema {
           "Step " + index + ": 'docker' must be a boolean, got: " + typeOf(value));
     }
     return docker;
+  }
+
+  /**
+   * The optional per-step {@code branches}: the branches this step is bound to, as a list of matcher
+   * mappings — entries OR'd, a mapping's keys AND'd.
+   *
+   * <p>Absent means <b>the step runs on every branch</b>, which is the whole backward-compatibility
+   * clause: every pipeline written before this key existed keeps its behaviour byte for byte. An
+   * <b>empty list is a config error</b> rather than either reading of it, because both readings
+   * already have an unambiguous spelling — omit the key for "every branch", delete the step for
+   * "none" — and an ambiguity with two better spellings is a parse error.
+   *
+   * <p>Held to the {@code timeout-seconds}/{@code docker} standard, for the sharper of the two
+   * standing reasons: a silently mis-parsed filter would either run a scoped step everywhere or skip
+   * it forever, and both directions are silent. Unknown per-step keys stay ignored, unchanged.
+   */
+  private static List<BranchFilter> optionalBranches(
+      Map<?, ?> step, int index, String rejectBranchesIn) {
+    Object value = step.get(BRANCHES_KEY);
+    if (value == null) {
+      return List.of();
+    }
+    if (rejectBranchesIn != null) {
+      throw new CiConfigException(
+          rejectBranchesIn
+              + ": step "
+              + index
+              + " declares '"
+              + BRANCHES_KEY
+              + "' — an event-triggered run always builds the head of "
+              + CiRunService.MAIN_BRANCH
+              + ", so a branch filter there is either inert or a step that can never run. A"
+              + " condition over the event's payload is what 'when' already is.");
+    }
+    if (!(value instanceof List<?> list)) {
+      throw new CiConfigException(
+          "Step " + index + ": 'branches' must be a list of matchers, got: " + typeOf(value));
+    }
+    if (list.isEmpty()) {
+      throw new CiConfigException(
+          "Step "
+              + index
+              + ": 'branches' is empty — omit the key to run the step on every branch, or delete"
+              + " the step to run it on none");
+    }
+    List<BranchFilter> filters = new ArrayList<>(list.size());
+    for (Object entry : list) {
+      filters.add(branchFilter(entry, index));
+    }
+    return List.copyOf(filters);
+  }
+
+  /** One entry: a mapping of matchers over the run's branch, AND'd. */
+  private static BranchFilter branchFilter(Object raw, int index) {
+    if (!(raw instanceof Map<?, ?> map) || map.isEmpty()) {
+      throw new CiConfigException(
+          "Step "
+              + index
+              + ": each 'branches' entry must carry a matcher such as { prefix: maintenance/ },"
+              + " got: "
+              + typeOf(raw));
+    }
+    List<Matcher> matchers = new ArrayList<>(map.size());
+    for (Map.Entry<?, ?> entry : map.entrySet()) {
+      matchers.add(branchMatcher(entry.getKey(), entry.getValue(), index));
+    }
+    return new BranchFilter(List.copyOf(matchers));
+  }
+
+  /**
+   * One matcher over the branch. The vocabulary is {@code exact} and {@code prefix} and nothing
+   * else: the branch is always present, so {@code exists} could only ever say yes, and {@code regex}
+   * stays out because {@code prefix: maintenance/} spells the requirement that asked for it with no
+   * anchoring, escaping or ReDoS question.
+   */
+  private static Matcher branchMatcher(Object key, Object value, int index) {
+    if (!(key instanceof String matcher)) {
+      throw new CiConfigException(
+          "Step " + index + ": 'branches' has a non-string matcher key: " + typeOf(key));
+    }
+    return switch (matcher) {
+      case EXACT -> Matcher.exact(requireBranchValue(value, index, EXACT));
+      case PREFIX -> Matcher.prefix(requireBranchValue(value, index, PREFIX));
+      default ->
+          throw new CiConfigException(
+              "Step "
+                  + index
+                  + ": 'branches' declares an unknown matcher '"
+                  + matcher
+                  + "' — a branch filter knows "
+                  + EXACT
+                  + " and "
+                  + PREFIX
+                  + " (a branch is always there, so '"
+                  + EXISTS
+                  + "' could only ever say yes)");
+    };
+  }
+
+  /** The compared value, always a non-blank string — the same rule a selection's matchers carry. */
+  private static String requireBranchValue(Object value, int index, String matcher) {
+    if (!(value instanceof String text) || text.isBlank()) {
+      throw new CiConfigException(
+          "Step "
+              + index
+              + ": 'branches' declares '"
+              + matcher
+              + "' with "
+              + typeOf(value)
+              + " — matcher values are non-empty strings (quote it: "
+              + matcher
+              + ": \""
+              + value
+              + "\")");
+    }
+    return text;
   }
 
   private static String requireString(Map<?, ?> step, String key, int index) {

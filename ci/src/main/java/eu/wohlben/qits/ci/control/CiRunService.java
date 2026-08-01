@@ -486,8 +486,34 @@ public class CiRunService {
   }
 
   /**
+   * Prefixed onto the output of a step the run's branch did not bind. Public because it is the
+   * documented form of the row — the explorer shows it, {@code AGENTS.md} and {@code README.md}
+   * quote it, and a test reads it back.
+   */
+  public static final String NOT_BOUND_NOTE_PREFIX = "[step not bound to branch ";
+
+  /** The whole note, for the branch a run is on. */
+  public static String notBoundNote(String branch) {
+    return NOT_BOUND_NOTE_PREFIX + branch + "]";
+  }
+
+  /**
    * The sequential loop. Each iteration blocks on one container's whole lifetime and then writes
    * exactly one terminal row; whatever the loop did not reach is written {@code SKIPPED} at the end.
+   *
+   * <p><b>A step the run's branch does not bind is written {@code SKIPPED} before any container
+   * exists, and nothing else moves</b>: {@code failed} is untouched, the loop continues, and later
+   * steps run. It launches nothing and is a non-event to the run's verdict — precisely unlike a
+   * {@code FAILED} step, whose {@code failed = !ok} is what stops the loop and turns the run red. So
+   * a run whose every step is branch-skipped finishes green, which is the existing "config present
+   * with no steps" precedent rather than a new rule, and it notifies cd and publishes like any other
+   * green run.
+   *
+   * <p><b>The two kinds of {@code SKIPPED} stay apart by the output field</b>, which is the smallest
+   * honest form: skipped-because-an-earlier-step-failed keeps its {@code null} output (the trailing
+   * remainder loop below is untouched), and skipped-by-branch carries {@link #notBoundNote} — the
+   * same bracketed convention {@link #annotate}/{@link #note} already use for every other "why this
+   * row reads this way" sentence. No new status, no new column, no migration.
    */
   private void runSteps(
       CiRun run, CiPipeline pipeline, DaemonPin pin, Map<String, String> env) {
@@ -498,6 +524,21 @@ public class CiRunService {
     try {
       while (index < declared.size() && !failed && !cancelled.contains(run.id)) {
         CiPipeline.CiStepDecl decl = declared.get(index);
+        if (!decl.runsOnBranch(run.branch)) {
+          // Recorded rather than passed over: the run shows that the pipeline considered this step
+          // and why it did not run. No timestamps, because nothing started.
+          insertStep(
+              run.id,
+              index,
+              decl.image(),
+              CiStepStatus.SKIPPED,
+              null,
+              notBoundNote(run.branch),
+              null,
+              null);
+          index++;
+          continue;
+        }
         Stamps stamps = new Stamps();
         StepResult result =
             runner.run(

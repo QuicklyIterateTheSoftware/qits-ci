@@ -223,6 +223,8 @@ steps:
   - image: qits/build-images/ci-base:latest
     docker: true                               # optional, default false — see the warning below
     timeout-seconds: 3600                      # optional — else qits.ci.step-timeout-seconds
+    branches:                                  # optional — else the step runs on every branch
+      - exact: main
     script: |
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-gateway:$QITS_CI_SHA"
       docker build -t "$ref" -f docker/Dockerfile .
@@ -231,8 +233,50 @@ steps:
 ```
 
 Unknown keys — top level or per step — are never read, so a repo may carry config for a newer
-qits-ci. Keys that *are* known and unreadable (`timeout-seconds: soon`, `docker: yes-please`) are a
-`CONFIG_ERROR` run instead: a repo that meant to bound a step or to ask for a socket must find out.
+qits-ci. Keys that *are* known and unreadable (`timeout-seconds: soon`, `docker: yes-please`,
+`branches: []`) are a `CONFIG_ERROR` run instead: a repo that meant to bound a step, to ask for a
+socket or to scope a step must find out.
+
+### Binding a step to branches
+
+`branches:` is a **list of matcher mappings**: entries are **OR**'d, and a mapping's keys are
+**AND**'d — the `when:` DSL's composition rule minus the path level, because the subject is one
+scalar, the branch the run is on. The whole vocabulary is **`exact`** and **`prefix`**. There is no
+`exists` (a branch is always there, so it could only ever say yes) and no `regex` (`prefix:
+maintenance/` spells the requirement that asked for this feature, with no anchoring, escaping or
+ReDoS question).
+
+```yaml
+steps:
+  - image: qits/build-images/node-base:latest   # no branches: — runs on every push
+    script: npm ci && npm test
+  - image: qits/build-images/node-base:latest
+    branches:
+      - prefix: maintenance/                    # …this one only on a maintenance push
+    script: ./release.sh
+```
+
+- **Absent means the step runs on every branch** — exactly the behaviour every pipeline had before
+  this key existed.
+- **An empty list is a config error.** Both readings of `[]` already have an unambiguous spelling:
+  omit the key for "every branch", delete the step for "none".
+- **A step the branch does not bind is recorded `SKIPPED` and stops nothing.** No container is
+  launched, the run's verdict is untouched, and the steps after it run. A run whose every step is
+  branch-skipped is a trivially green run, like a pipeline with no steps.
+- **"Release only if the tests passed" needs no machinery** — it is step order. A failing step still
+  stops the loop, so a later scoped step is never reached.
+
+The two kinds of `SKIPPED` are told apart **by the step's output**:
+
+| Output | Why the step was skipped |
+|---|---|
+| `[step not bound to branch <branch>]` | its `branches:` did not bind this run's branch |
+| *empty* | the loop never reached it — an earlier step failed, or the run was cancelled |
+
+`branches:` on a step in a **`ci-event-*.yml` is a parse error**, naming the file and the reason:
+an event-triggered run always builds the head of `main`, so `exact: main` there is decoration and
+anything else is a step that can never run, which reads exactly like one that never got its turn.
+A condition over the *event* is what `when:` already is.
 
 **Publishing an image is not a feature here, it is a step.** Steps are sequential, so a push runs
 only after the build steps went green; a failed push is a failed step is a **failed run**, so the CD
@@ -294,6 +338,14 @@ env npm_config_registry="$QITS_NPM_PROXY_URL" \
     pnpm install --frozen-lockfile
 ```
 
+**`$QITS_WORKSPACES_URL` is injected on the same reading**, and it is qits-workspaces' root —
+scheme, host and port, no path. A step that asks for its own repository to be released after the
+tests it follows went green POSTs to
+`$QITS_WORKSPACES_URL/workspaces/api/branches/release?repositoryId=$QITS_CI_REPO_ID`; the path is
+the caller's to spell, and the address is never a literal in a pipeline. Like the npm pair and
+unlike `$QITS_REGISTRY`, it is dialled by the step container itself over the shared network, so the
+in-network alias is the value that is right for it.
+
 ## The other file a repository commits: `.config/qits/ci-event-*.yml`
 
 A push is not the only thing that can run a pipeline. A repository may also commit **event
@@ -322,7 +374,8 @@ steps:                          # exactly the schema ci-post-receive.yml uses
 - **The two trigger types never blur.** A `ci-post-receive.yml` containing `event:` or `when:` is a
   config error, and a `ci-event-*.yml` without `event:` is one too.
 - `steps:` is the same schema, `docker: true` and `timeout-seconds:` included, with the same
-  meanings and the same warnings.
+  meanings and the same warnings. The one key it subtracts is **`branches:`**, which is a parse
+  error here — see "Binding a step to branches" for why refusing it beats ignoring it.
 
 ### The selection
 
@@ -363,11 +416,21 @@ repository's others.**
 > **A `when:` that matches an event your own build publishes is an unbounded build loop.** A green
 > run publishes `BuildSuccessful`; a trigger in the same repository selecting that event runs a
 > build, which publishes another `BuildSuccessful`, and so on forever. Each hop is a *new* event id,
-> so the at-most-once dedupe never engages — it stops replays, not descendants. **Review is the only
-> guard.** Cycle and self-reference detection is a separate future feature that builds the graph of
-> trigger declarations across repositories and finds cycles there, with its own UX; nothing in this
-> feature guesses at it. The provenance columns a triggered run records are the trail it will
-> consume.
+> so the at-most-once dedupe never engages — it stops replays, not descendants. A `SoftwareRelease`
+> trigger has the same shape and one extra trap: an `exact:` on the upstream's repo id is the whole
+> defense, and widening it to `prefix: qits-spa-` would close the circle by matching the repository's
+> own releases.
+>
+> **The second shape needs no bus at all, and it is new with `branches:`.** A step bound to `prefix:
+> maintenance/` whose script force-pushes a `maintenance/*` ref re-triggers its own pipeline through
+> post-receive — a loop with no event, no trigger file and no dedupe anywhere near it. The release
+> train's own step cannot: it pushes only through qits-workspaces' release door, which targets
+> `main`.
+>
+> **Review is the only guard for both.** Cycle and self-reference detection is a separate future
+> feature that builds the graph of trigger declarations across repositories and finds cycles there,
+> with its own UX; nothing in this feature guesses at it. The provenance columns a triggered run
+> records are the trail it will consume.
 
 ### What an event-triggered step container gets
 
@@ -549,6 +612,9 @@ a repository's own listing will show.
   `qits.ci.network`, so the shipped defaults are already the right values and the host-published
   address used for `registry-host` is exactly the wrong one to copy here. Override them only when
   qits-artifacts moves off the alias.
+- Leave `qits.ci.workspaces-url` alone for the same reason: it is qits-workspaces' root as reached
+  **from a step container**, and the shipped `http://qits-workspaces:8080` is already right on
+  qits-net. Scheme, host and port, **no path** — a step appends `/workspaces/api/…` itself.
 - Give the process a persistent `~/.qits/data/ci` (or override `quarkus.datasource.ci.jdbc.url` and
   `qits.ci.data-dir`). The H2 there is a plain **single-writer file** — no `AUTO_SERVER`, so nothing
   else may open it while ci runs, and nothing listens on a database port.

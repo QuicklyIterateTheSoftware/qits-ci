@@ -80,10 +80,27 @@ public final class CiEventSelectionEvaluator {
 
   private static boolean matcherMatches(Matcher matcher, JsonNode at) {
     boolean present = at != null;
+    if (matcher.kind() == Matcher.Kind.EXISTS) {
+      return present == matcher.expected();
+    }
+    return present && matchesScalar(matcher, asString(at));
+  }
+
+  /**
+   * One matcher against a value that is always there — the shape a <b>step's {@code branches:}</b>
+   * filter has, where the subject is the run's branch rather than a path into a payload.
+   *
+   * <p>Public and here rather than private and duplicated: a platform with two implementations of
+   * "{@code prefix} means starts-with" has one that will drift. {@code EXISTS} answers its own
+   * {@code expected} because a present value exists; a branch filter never parses one (the parser
+   * refuses it, since a matcher that can only say yes is a trap wearing a feature's name), so that
+   * arm is reachable only from the payload side, which never calls this with it.
+   */
+  public static boolean matchesScalar(Matcher matcher, String value) {
     return switch (matcher.kind()) {
-      case EXISTS -> present == matcher.expected();
-      case EXACT -> present && asString(at).equals(matcher.value());
-      case PREFIX -> present && asString(at).startsWith(matcher.value());
+      case EXISTS -> matcher.expected();
+      case EXACT -> value.equals(matcher.value());
+      case PREFIX -> value.startsWith(matcher.value());
     };
   }
 

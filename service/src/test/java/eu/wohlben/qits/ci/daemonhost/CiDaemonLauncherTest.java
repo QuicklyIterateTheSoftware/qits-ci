@@ -36,6 +36,7 @@ public class CiDaemonLauncherTest {
     launcher.artifactsImageRepository = "qits";
     launcher.artifactsNpmHostedUrl = "http://qits-artifacts:8080/artifacts/npm/npm/";
     launcher.artifactsNpmProxyUrl = "http://qits-artifacts:8080/artifacts/npm/npmjs/";
+    launcher.workspacesUrl = "http://qits-workspaces:8080";
     return launcher;
   }
 
@@ -121,6 +122,8 @@ public class CiDaemonLauncherTest {
             "QITS_NPM_REGISTRY_URL=http://qits-artifacts:8080/artifacts/npm/npm/",
             "--env",
             "QITS_NPM_PROXY_URL=http://qits-artifacts:8080/artifacts/npm/npmjs/",
+            "--env",
+            "QITS_WORKSPACES_URL=http://qits-workspaces:8080",
             "--entrypoint",
             "/bin/sh",
             "maven:3.9",
@@ -190,6 +193,18 @@ public class CiDaemonLauncherTest {
       assertTrue(
           argv.contains("QITS_NPM_PROXY_URL=http://qits-artifacts:8080/artifacts/npm/npmjs/"),
           argv.toString());
+    }
+  }
+
+  @Test
+  public void everyStepIsToldWhereToAskForItsOwnRepositoryToBeReleased() {
+    // The release train's maintenance step POSTs to qits-workspaces after the tests it follows went
+    // green. Unconditional and container-dialled for the same reasons as the npm pair: the file
+    // states no deployment fact, and the in-network alias is what a step container can reach.
+    for (LaunchSpec each : List.of(spec, publishing())) {
+      assertTrue(
+          launcher().buildArgv(each).contains("QITS_WORKSPACES_URL=http://qits-workspaces:8080"),
+          launcher().buildArgv(each).toString());
     }
   }
 

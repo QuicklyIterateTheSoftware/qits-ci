@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.ci.control.CiConfigParser.CiConfigException;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /** The parser is pure — plain JUnit, no Quarkus. */
@@ -152,6 +153,132 @@ public class CiConfigParserTest {
             .steps()
             .get(0)
             .docker());
+  }
+
+  // --- the per-step branch filter ---
+
+  @Test
+  public void anAbsentBranchesKeyRunsTheStepOnEveryBranch() {
+    // The whole backward-compatibility clause: every pipeline written before this key existed keeps
+    // its behaviour byte for byte, and "byte for byte" is asserted rather than described.
+    CiPipeline.CiStepDecl step =
+        parser.parse("steps:\n  - image: alpine:3\n    script: \"true\"\n").steps().get(0);
+    assertEquals(List.of(), step.branches());
+    assertTrue(step.runsOnBranch("main"));
+    assertTrue(step.runsOnBranch("maintenance/qits-spa-ui-components"));
+    assertTrue(step.runsOnBranch("task/anything"));
+  }
+
+  @Test
+  public void aDeclaredBranchFilterBindsTheStepAndLeavesItsNeighboursAlone() {
+    // The release train's own shape: the tests run on every push, the release step only on the
+    // branch a bump pipeline force-pushed.
+    CiPipeline pipeline =
+        parser.parse(
+            """
+            steps:
+              - image: node-base:latest
+                script: npm test
+              - image: node-base:latest
+                branches:
+                  - prefix: maintenance/
+                script: ./release.sh
+            """);
+    assertTrue(pipeline.steps().get(0).runsOnBranch("main"), "an unscoped step binds every branch");
+    assertTrue(pipeline.steps().get(1).runsOnBranch("maintenance/qits-spa-ui-components"));
+    assertFalse(pipeline.steps().get(1).runsOnBranch("main"));
+    assertFalse(pipeline.steps().get(1).runsOnBranch("maintenance"), "a prefix is not a substring");
+  }
+
+  @Test
+  public void entriesAreOrdAndAMappingsKeysAreAnded() {
+    // The when: DSL's composition rule, minus the path level, because the subject is one scalar.
+    CiPipeline.CiStepDecl ord =
+        parser
+            .parse(
+                """
+                steps:
+                  - image: alpine:3
+                    script: "true"
+                    branches:
+                      - exact: main
+                      - prefix: maintenance/
+                """)
+            .steps()
+            .get(0);
+    assertTrue(ord.runsOnBranch("main"));
+    assertTrue(ord.runsOnBranch("maintenance/x"));
+    assertFalse(ord.runsOnBranch("task/x"));
+
+    CiPipeline.CiStepDecl anded =
+        parser
+            .parse(
+                """
+                steps:
+                  - image: alpine:3
+                    script: "true"
+                    branches:
+                      - prefix: maintenance/
+                        exact: maintenance/qits-spa-angular
+                """)
+            .steps()
+            .get(0);
+    assertTrue(anded.runsOnBranch("maintenance/qits-spa-angular"));
+    assertFalse(anded.runsOnBranch("maintenance/other"), "both matchers in a mapping must hold");
+  }
+
+  @Test
+  public void anEmptyBranchesListIsAConfigError() {
+    // Both readings of `[]` already have an unambiguous spelling — omit the key, delete the step —
+    // and an ambiguity with two better spellings is a parse error rather than a guess.
+    CiConfigException e =
+        assertThrows(
+            CiConfigException.class,
+            () -> parser.parse("steps:\n  - image: alpine:3\n    script: \"true\"\n    branches: []\n"));
+    assertTrue(e.getMessage().contains("branches"), e.getMessage());
+  }
+
+  @Test
+  public void aMalformedBranchFilterIsAConfigErrorRatherThanIgnored() {
+    // Known key, same standard as timeout-seconds and docker, and the sharpest reason of the three:
+    // a silently mis-parsed filter either runs a scoped step everywhere or skips it forever, and
+    // both directions are silent.
+    for (String branches :
+        List.of(
+            "branches: maintenance/", // not a list
+            "branches:\n      - maintenance/", // an entry that is not a matcher mapping
+            "branches:\n      - {}", // an entry that asserts nothing
+            "branches:\n      - regex: main.*", // a matcher this vocabulary does not have
+            "branches:\n      - exists: true", // excluded: a branch is always there
+            "branches:\n      - exact: 3", // matcher values are strings
+            "branches:\n      - prefix: \"\"")) { // and non-empty ones
+      assertThrows(
+          CiConfigException.class,
+          () -> parser.parse("steps:\n  - image: alpine:3\n    script: \"true\"\n    " + branches + "\n"),
+          branches);
+    }
+  }
+
+  @Test
+  public void anUnknownKeyBesideABranchFilterIsStillIgnored() {
+    // The leniency this key joins rather than replaces: `branches` is known and strict, everything
+    // the parser does not know stays unread.
+    CiPipeline.CiStepDecl step =
+        parser
+            .parse(
+                """
+                steps:
+                  - image: alpine:3
+                    script: "true"
+                    branches:
+                      - exact: main
+                    name: lint
+                    needs: [something]
+                """)
+            .steps()
+            .get(0);
+    assertTrue(step.runsOnBranch("main"));
+    assertFalse(step.runsOnBranch("task/x"));
   }
 
   @Test
