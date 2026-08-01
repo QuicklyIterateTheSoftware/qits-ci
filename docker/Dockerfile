@@ -70,6 +70,9 @@
 #                               repo-controlled code — takes any caller on the network. true demands
 #                               a qits-idp bearer, and needs a reachable idp that grants the git
 #                               host's client a project claim.
+#   QUARKUS_OIDC_CLIENT_CLIENT_ENABLED / QUARKUS_OIDC_CLIENT_CREDENTIALS_SECRET
+#                               the other direction: present a bearer to qits-cd. A separate switch,
+#                               so either end of the platform can be turned on first.
 #
 # See README.md, "Deploying it", for the whole surface.
 #

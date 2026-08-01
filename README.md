@@ -105,7 +105,7 @@ rest of qits it reaches over a URL it is configured with:
 | out | where the git host answers, for ci's **own** `git fetch` of the pushed ref — ci appends `/git/<repoId>` | `qits.ci.git-host-url` |
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + `qits.ci.daemon-version` |
-| out | `POST /cd/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.cd.intake-url`; no token — cd's intake is not gateway-allowlisted, the call stays on qits-net |
+| out | `POST /cd/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.cd.intake-url`; a bearer (`aud=qits-cd`) once `quarkus.oidc-client.client-enabled=true`, bare until then |
 | out | `PUT /events/api/events/{uuid}` — one `BuildSuccessful` per **green** run, idempotent (the `RunAnnouncer` seam) | `qits.events.url`, `qits.eventstream.enabled` |
 | out | the same route — one `SoftwareRelease` per artifact a green **release pipeline** declared (the `ReleaseAnnouncer` seam) | the same two keys |
 | out | `ws://…/events/stream` — dialled out and held open, carrying what qits-events broadcasts back | the same two keys; the address is derived, never configured twice |
@@ -692,6 +692,10 @@ a repository's own listing will show.
   repositories, so `QITS_IDP_CLIENT_QITS_ARTIFACTS_CLAIMS_PROJECT='*'`. Off (the shipped default)
   the intake is open, which is what lets this code deploy before the idp exists. `qits.auth.machine.audience`
   is already `qits-ci` and is not a deployment fact.
+- Present a machine token to qits-cd with `QUARKUS_OIDC_CLIENT_CLIENT_ENABLED=true` and
+  `QUARKUS_OIDC_CLIENT_CREDENTIALS_SECRET=<qits-ci's secret at the idp>`. A separate switch from the
+  one above and deliberately so — turn either end on first. Off (the default) the build-succeeded
+  POST goes out with no credential, as it always has.
 - Allow-list `/ci/api/events/` for unauthenticated access — the caller is the git host's hook, a
   different process with no user session. That allowlist is qits-gateway's `PublicPaths`. It says
   "no *user* session"; the bearer above is a separate question and rides the same request.

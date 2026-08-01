@@ -119,6 +119,14 @@
             <artifactId>quarkus-oidc</artifactId>
         </dependency>
         <dependency>
+            <!-- The other direction: qits-ci ASKS qits-idp for a token, to present to qits-cd
+                 (notify/CdBearer). Off by default — quarkus.oidc-client.client-enabled=false in
+                 application.properties — so the extension builds a disabled client, boots without a
+                 secret and never dials anything. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-oidc-client</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-rest-jackson</artifactId>
         </dependency>

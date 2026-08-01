@@ -743,6 +743,13 @@ This replaces `qits.ci.token` / `X-CI-Token` and its filter, both deleted. A bla
 "open" was the same idea as the gate, made once per service and unable to say *who* was calling;
 the gate says it once for the platform and the claim answers "who".
 
+**Outbound is a separate switch**, `quarkus.oidc-client.client-enabled`, shipped `false`.
+`notify/CdBearer` fetches a token (`aud=qits-cd`) for `CdBuildNotifier`, which sends it as a bearer;
+off, the POST goes out bare exactly as it always did. The two switches are independent on purpose —
+this service can present a token before it demands one, or the reverse, so the platform is turned on
+one hop at a time. The fetch is a `Uni` and never a blocking `await`: the caller is the
+single-threaded run worker.
+
 Warnings like `OIDC server is not available at 'http://qits-idp:8080/idp'` at boot are the expected
 posture wherever the idp is not deployed. Startup never blocks on it and the suite prints them on
 every run.

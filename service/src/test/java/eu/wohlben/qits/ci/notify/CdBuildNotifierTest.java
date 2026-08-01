@@ -7,10 +7,11 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import io.smallrye.mutiny.Uni;
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -19,17 +20,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The wire half of the CD announcement: what actually leaves the process — method, payload, token
- * header — against a local server standing in for qits-cd. Plain JUnit over a directly-constructed
- * notifier: the seam's <em>semantics</em> (green announces, red does not) are held in the ci
- * module's {@code CdNotifySeamTest}; this test pins the contract cd's intake parses.
+ * The wire half of the CD announcement: what actually leaves the process — method, payload,
+ * credential — against a local server standing in for qits-cd. Plain JUnit over a
+ * directly-constructed notifier: the seam's <em>semantics</em> (green announces, red does not) are
+ * held in the ci module's {@code CdNotifySeamTest}; this test pins the contract cd's intake parses.
  *
  * <p>Delivery is fire-and-forget, so assertions wait on a queue the fixture fills rather than on
  * the call returning.
  */
 class CdBuildNotifierTest {
 
-  private record Received(String path, String token, Map<String, Object> body) {}
+  private record Received(String path, String authorization, Map<String, Object> body) {}
 
   private HttpServer server;
   private BlockingQueue<Received> received;
@@ -48,7 +49,7 @@ class CdBuildNotifierTest {
             received.add(
                 new Received(
                     exchange.getRequestURI().getPath(),
-                    exchange.getRequestHeaders().getFirst("X-CD-Token"),
+                    exchange.getRequestHeaders().getFirst("Authorization"),
                     parsed));
           } finally {
             exchange.sendResponseHeaders(202, -1);
@@ -80,7 +81,7 @@ class CdBuildNotifierTest {
   }
 
   @Test
-  void thePayloadCarriesTheRunsCoordinatesAndNoToken() throws Exception {
+  void thePayloadCarriesTheRunsCoordinatesAndNoTokenByDefault() throws Exception {
     notifier().onRunSucceeded("run-1", "repo-1", "epic/some-epic", "a".repeat(40));
 
     Received event = await();
@@ -92,9 +93,46 @@ class CdBuildNotifierTest {
             "branch", "epic/some-epic",
             "commitSha", "a".repeat(40)),
         event.body());
-    // Deliberate: cd's intake is not gateway-allowlisted, so no machine token exists to send —
-    // see the notifier's own comment. This pins that none quietly grows back on the wire.
-    assertNull(event.token());
+    // The shipped posture: no client credentials configured, so the call is exactly what it was
+    // before qits-idp existed. This pins that a credential does not quietly grow onto the wire.
+    assertNull(event.authorization());
+  }
+
+  @Test
+  void aConfiguredCredentialTravelsAsABearer() throws Exception {
+    CdBuildNotifier notifier = notifier();
+    notifier.bearer = bearerOf("minted-by-qits-idp");
+
+    notifier.onRunSucceeded("run-2", "repo-2", "main", "b".repeat(40));
+
+    assertEquals("Bearer minted-by-qits-idp", await().authorization());
+  }
+
+  @Test
+  void aCredentialThatCannotBeFetchedSkipsTheNotification() {
+    CdBuildNotifier notifier = notifier();
+    notifier.bearer =
+        new CdBearer(true, null) {
+          @Override
+          public Uni<Optional<String>> bearer() {
+            return Uni.createFrom().failure(new IllegalStateException("qits-idp is down"));
+          }
+        };
+
+    // Skipped, not sent bare: a guarded intake would refuse an unauthenticated POST anyway, and
+    // sending one would turn a credential problem into a mystery in another service's log.
+    notifier.onRunSucceeded("run-3", "repo-3", "main", "c".repeat(40));
+    assertNull(received.poll());
+  }
+
+  /** A stand-in for the real thing — what CdBearer answers once a deployment configures a client. */
+  private static CdBearer bearerOf(String accessToken) {
+    return new CdBearer(true, null) {
+      @Override
+      public Uni<Optional<String>> bearer() {
+        return Uni.createFrom().item(Optional.of("Bearer " + accessToken));
+      }
+    };
   }
 
   @Test
