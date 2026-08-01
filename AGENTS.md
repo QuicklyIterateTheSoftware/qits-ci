@@ -750,9 +750,11 @@ this service can present a token before it demands one, or the reverse, so the p
 one hop at a time. The fetch is a `Uni` and never a blocking `await`: the caller is the
 single-threaded run worker.
 
-Warnings like `OIDC server is not available at 'http://qits-idp:8080/idp'` at boot are the expected
-posture wherever the idp is not deployed. Startup never blocks on it and the suite prints them on
-every run.
+**Validation follows the gate**: `quarkus.oidc.tenant-enabled=${qits.auth.machine.required:false}`.
+Gate off, there is no OIDC tenant at all — nothing fetches a JWKS, nothing waits on a host named
+qits-idp, and a clone-alone build needs no issuer. Gate on and the idp not yet reachable, the boot
+fetch fails to a `OIDC server is not available at '...'` warning and startup continues; the keys are
+fetched when a bearer first arrives. qits-cd and qits-artifacts carry the same line.
 
 **The `%dev`/`%test` dev user shadows every bearer, and a gate-on test must switch it off.**
 `ForwardAuthMechanism` answers any request without an `X-Qits-User` header with the synthetic `dev`
