@@ -207,9 +207,10 @@ and this process simply could not ask.
 
 **`QUEUED` survives a restart.** `sweepInterrupted` re-enqueues those rows, oldest first, so a
 redeploy landing between acceptance and execution no longer eats either a push-triggered or an
-event-triggered build. `RUNNING` still dies: those rows are marked `FAILED`, because their in-flight step went with the process and the launch
-table is memory. Nothing here adds durability beyond the row, which is what keeps the rest of the
-restart story free.
+event-triggered build. A `RUNNING` push row is still marked `FAILED`; arbitrary push work may not be
+safe to repeat. A `RUNNING` event row is reset and restarted from its snapshot because the live,
+at-most-once bus cannot redeliver it. Event-trigger scripts are therefore an at-least-once boundary
+and must be idempotent. Nothing here adds durability beyond the row.
 
 An event run stores the original timestamp, canonical payload and exact trigger-file content on its
 row. Recovery reparses that immutable snapshot: it neither reads a moved branch nor depends on the
