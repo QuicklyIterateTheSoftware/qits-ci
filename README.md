@@ -457,6 +457,7 @@ when:
   - repository: { exact: qits-spa-ui-components }   # its OWN id, exact — see the loop warning
 artifacts:
   - { type: npm, name: "@qits/ui-components" }
+  - { type: maven, name: "eu.wohlben.qits:qits-eventstream" }
   - { type: docker, name: qits/qits-stt }
 steps:
   - image: qits/build-images/node-base:latest
@@ -474,12 +475,15 @@ triggering surface is unchanged — a tag push is not a CI trigger and deliberat
 
 `artifacts:` is a **non-empty list of mappings**, each exactly `{type, name}`:
 
-- **`type`** is `npm` or `docker`, and nothing else. The keyword is also the value on the wire.
+- **`type`** is `npm`, `maven` or `docker`, and nothing else. The keyword is also the value on the
+  wire.
 - **`name`** is the **exact package name**, non-blank. A scoped npm name has to be quoted — `@` is
   a reserved YAML indicator, so `name: "@qits/ui-components"`. A docker name is **unqualified**
   (`qits/qits-stt`, no registry host): the registry is `qits-artifacts:8080` inside a step container
   and `localhost:8081` to qits-ci and qits-cd, so no qualified reference is portable and the
   consumer is the one that knows which address it stands at.
+  A Maven name is an unqualified `groupId:artifactId` GAV prefix; the event's `version` supplies
+  the third coordinate and the consumer supplies the repository URL.
 - Everything about it is strict, the way the rest of this file is: an empty list, an unknown type, a
   missing or blank name, an extra key in the mapping, or a wrong shape is a parse error naming the
   file. Omitting the key entirely is how a pipeline says it publishes nothing.
@@ -499,7 +503,7 @@ When a run whose trigger file declared artifacts goes **green**, qits-ci publish
 |---|---|
 | `repository` | the repository whose pipeline published it — this repo, not the upstream |
 | `version` | read out of the **triggering** event's payload `version` field |
-| `packageType` | `npm` or `docker`, as declared |
+| `packageType` | `npm`, `maven` or `docker`, as declared |
 | `packageName` | the declared name, verbatim |
 
 Each one carries the triggering event as its `parentId`, so N artifacts are N siblings under one

@@ -375,24 +375,28 @@ public class CiEventTriggerParserTest {
               - repository: { exact: qits-spa-ui-components }
             artifacts:
               - { type: npm, name: "@qits/ui-components" }
+              - { type: maven, name: "eu.wohlben.qits:qits-eventstream" }
               - { type: docker, name: qits/qits-stt }
             steps:
               - image: qits/build-images/node-base:latest
                 script: ./publish-tag.sh
             """);
 
-    assertEquals(2, trigger.artifacts().size());
+    assertEquals(3, trigger.artifacts().size());
     assertEquals(CiArtifact.Type.NPM, trigger.artifacts().get(0).type());
     // The scope survives YAML: '@' is a reserved indicator, so the name has to be quoted and the
     // quotes are not part of it.
     assertEquals("@qits/ui-components", trigger.artifacts().get(0).name());
-    assertEquals(CiArtifact.Type.DOCKER, trigger.artifacts().get(1).type());
+    assertEquals(CiArtifact.Type.MAVEN, trigger.artifacts().get(1).type());
+    assertEquals("eu.wohlben.qits:qits-eventstream", trigger.artifacts().get(1).name());
+    assertEquals(CiArtifact.Type.DOCKER, trigger.artifacts().get(2).type());
     // Unqualified, deliberately: no registry-qualified docker reference is portable between a step
     // container and this process.
-    assertEquals("qits/qits-stt", trigger.artifacts().get(1).name());
+    assertEquals("qits/qits-stt", trigger.artifacts().get(2).name());
     // The keyword a repository writes is the value the wire carries — one vocabulary, not two.
     assertEquals("npm", trigger.artifacts().get(0).type().declared());
-    assertEquals("docker", trigger.artifacts().get(1).type().declared());
+    assertEquals("maven", trigger.artifacts().get(1).type().declared());
+    assertEquals("docker", trigger.artifacts().get(2).type().declared());
   }
 
   @Test
@@ -422,9 +426,9 @@ public class CiEventTriggerParserTest {
             CiConfigException.class,
             () ->
                 parser.parse(
-                    PATH, "event: SCMRelease\nartifacts:\n  - { type: maven, name: qits-ci }\n"));
-    assertTrue(e.getMessage().contains("maven"), e.getMessage());
-    assertTrue(e.getMessage().contains("npm and docker"), e.getMessage());
+                    PATH, "event: SCMRelease\nartifacts:\n  - { type: rubygems, name: qits-ci }\n"));
+    assertTrue(e.getMessage().contains("rubygems"), e.getMessage());
+    assertTrue(e.getMessage().contains("npm, maven and docker"), e.getMessage());
     // A missing type is the same failure: there is no default registry to fall back to.
     assertThrows(
         CiConfigException.class,

@@ -27,7 +27,8 @@ import java.util.UUID;
  * and {@code localhost:8081} to qits-ci and qits-cd, so no qualified reference is portable and the
  * name travels unqualified ({@code qits/qits-stt}) for the consumer to qualify.
  *
- * <p><b>{@code packageType} is a plain String and its values are {@code npm} and {@code docker}</b>,
+ * <p><b>{@code packageType} is a plain String and its values are {@code npm}, {@code maven}, and
+ * {@code docker}</b>,
  * spelled where a repository writes them — {@code CiArtifact.Type} in the {@code ci} module — rather
  * than a second time here as an enum. The declared keyword <em>is</em> the wire value, so one
  * vocabulary cannot drift from the other; this module depends on the event bus and on nothing else,

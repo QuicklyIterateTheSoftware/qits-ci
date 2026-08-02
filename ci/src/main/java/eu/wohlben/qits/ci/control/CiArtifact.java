@@ -5,9 +5,10 @@ package eu.wohlben.qits.ci.control;
  * "@qits/ui-components"}}.
  *
  * <p><b>Declared, not observed</b>, and that is the decision rather than a shortcut. qits-ci never
- * learns how to publish anything — every {@code npm publish} and {@code docker push} on this
- * platform lives in a step script inside the repository's own container — so what a run published is
- * not a thing this process can see. It could have been reported back, and it deliberately is not:
+ * learns how to publish anything — every {@code npm publish}, {@code mvn deploy}, and {@code docker
+ * push} on this platform lives in a step script inside the repository's own container — so what a
+ * run published is not a thing this process can see. It could have been reported back, and it
+ * deliberately is not:
  * the daemon's return channel carries only {@code StepChunk} and {@code StepFinished}, a stdout
  * sentinel is forbidden by design, and an emit-based scheme would have been a two-repo protocol
  * change. A declaration costs none of that and buys the thing an emission never could — it can be
@@ -27,12 +28,13 @@ public record CiArtifact(Type type, String name) {
    * {@code SoftwareRelease} — so the vocabulary exists once and cannot drift between the parser and
    * the event.
    *
-   * <p>Maven is deliberately absent. A maven project's release pipeline builds and pushes a docker
-   * image and nothing else today; adding a constant here plus the registry route is an extension of
-   * this list rather than a reopening of it.
+   * <p>Maven names a published GAV, for example {@code eu.wohlben.qits:qits-eventstream}. The
+   * repository host is omitted for the same portability reason as docker's: the consumer supplies
+   * the address from its own environment.
    */
   public enum Type {
     NPM("npm"),
+    MAVEN("maven"),
     DOCKER("docker");
 
     private final String declared;
@@ -58,7 +60,7 @@ public record CiArtifact(Type type, String name) {
 
     /** The vocabulary as a message fragment, so an error names what this qits-ci knows. */
     static String vocabulary() {
-      return NPM.declared + " and " + DOCKER.declared;
+      return NPM.declared + ", " + MAVEN.declared + " and " + DOCKER.declared;
     }
   }
 }

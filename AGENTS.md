@@ -560,7 +560,7 @@ follows is what biting it feels like.
   duplicate keys are therefore errors in a trigger file and are not in a pipeline. The `steps:`
   schema is shared verbatim (`CiConfigSchema`), because a step must not mean two things.
 - **`artifacts:` is the one key the trigger file adds rather than subtracts**, and it is what makes a
-  file a *release pipeline*: a non-empty list of `{type: npm|docker, name: …}`, strict in every
+  file a *release pipeline*: a non-empty list of `{type: npm|maven|docker, name: …}`, strict in every
   direction (empty list, unknown type, blank name, extra key, wrong shape — all parse errors naming
   the file). It is a parse error in `ci-post-receive.yml` for its own reason rather than by symmetry
   with `branches:`: what a declaration announces is the *triggering* event's version, and a push
