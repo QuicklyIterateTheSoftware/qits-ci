@@ -38,8 +38,8 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * <p>A separate resource rather than a second method on {@code CiRunController}, because {@code
  * @Path("/runs")} is about runs. It is an ordinary JAX-RS resource under {@code quarkus.rest.path},
  * so it adds <b>no literal route</b> and {@code quarkus.quinoa.ignored-path-prefixes} is unchanged —
- * {@code /api} already covers it. And it is a GET outside {@code events}, so {@link CiTokenFilter}
- * leaves it alone exactly as it leaves the run reads alone.
+ * {@code /api} already covers it. And it is a read, so it calls no machine guard — exactly like the
+ * run reads.
  */
 @Path("/repositories")
 @Produces(MediaType.APPLICATION_JSON)

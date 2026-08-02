@@ -120,6 +120,11 @@ components:
           $ref: "#/components/schemas/CiRunDto"
         lastMainRun:
           $ref: "#/components/schemas/CiRunDto"
+  securitySchemes:
+    SecurityScheme:
+      type: openIdConnect
+      openIdConnectUrl: http://qits-idp:8080/idp/.well-known/openid-configuration
+      description: Authentication
 paths:
   /ci/api/repositories:
     get:

@@ -21,11 +21,10 @@ import org.jboss.logging.Logger;
  * <p><b>The path literal carries {@code /ci} itself.</b> A {@code @WebSocket} path registers
  * straight onto the router and does <em>not</em> follow {@code quarkus.rest.path}, so the segment
  * that every route of this service must serve has to be spelled here. {@code daemon} is a
- * second-level segment beside {@code api} because this is not a JSON API. It is also outside {@code
- * CiTokenFilter}'s reach by construction — that filter matches {@code UriInfo.getPath()}, which is
- * relative to {@code quarkus.rest.path} — and that is correct rather than an oversight: this
- * socket's callers are containers holding no intake token, and its authentication is the
- * per-container secret below.
+ * second-level segment beside {@code api} because this is not a JSON API. No machine guard reaches
+ * it — the intake's guard is a call inside a resource method, not a filter over a path — and that is
+ * correct rather than an oversight: this socket's callers are step containers holding no idp client,
+ * and its authentication is the per-container secret below.
  *
  * <p><b>The address is a cross-repo contract.</b> {@code CiDaemonLauncher} injects {@code
  * qits.ci.container-daemon-url} (default {@code ws://qits-ci:8080/ci/daemon}) as {@code

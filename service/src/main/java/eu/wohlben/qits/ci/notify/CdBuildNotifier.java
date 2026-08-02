@@ -2,6 +2,7 @@ package eu.wohlben.qits.ci.notify;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.ci.control.CdNotifier;
+import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.net.URI;
@@ -10,6 +11,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Optional;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
@@ -24,6 +26,11 @@ import org.jboss.logging.Logger;
  * that idiom is the documented hazard: a path mismatch with cd's {@code
  * /cd/api/events/build-succeeded} raises no error anywhere and deployments simply stop, which is
  * why both repos pin the literal and both suites assert their own absolute address.
+ *
+ * <p>It carries a machine bearer ({@code aud=qits-cd}) when a deployment has given this service
+ * client credentials at qits-idp, and nothing when it has not — see {@link CdBearer}. Both ends move
+ * independently: qits-cd decides whether it demands one, this side decides whether it presents one,
+ * and the unconfigured default is the call as it always was.
  *
  * <p>It lives in {@code service/} because the {@code ci} module is web-free; the seam it implements
  * is {@link CdNotifier} in {@code ci/control}, and zero implementations is a supported
@@ -43,14 +50,17 @@ public class CdBuildNotifier implements CdNotifier {
   private final HttpClient client =
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
 
-  // No token accompanies the POST: cd's intake is not on the gateway's token-free allowlist (this
-  // notifier dials it directly on qits-net, where callers are trusted), so unlike the git host's
-  // X-CI-Token there is no guard on the other end asking for one. If cd's intake is ever
-  // allowlisted at the gateway, the guard and a token here land in the same change.
   @ConfigProperty(name = "qits.cd.intake-url")
   String intakeUrl;
 
   @Inject ObjectMapper objectMapper;
+
+  /**
+   * The machine credential, when a deployment has configured one — see {@link CdBearer}. Left null
+   * by the plain-JUnit fixture, which is the "no credentials configured" case and the shape this
+   * call has always had.
+   */
+  @Inject CdBearer bearer;
 
   @Override
   public void onRunSucceeded(String runId, String repoId, String branch, String commitSha) {
@@ -65,11 +75,28 @@ public class CdBuildNotifier implements CdNotifier {
     String body =
         objectMapper.writeValueAsString(
             Map.of("runId", runId, "repoId", repoId, "branch", branch, "commitSha", commitSha));
+    // Two async steps, not one: fetching the token must not park the run worker any more than
+    // sending must. With no credential configured the first step is already-resolved and the send
+    // happens on this thread, which is exactly the behaviour this call has always had.
+    credential()
+        .subscribe()
+        .with(
+            authorization -> send(body, authorization, repoId, branch),
+            failure ->
+                LOG.debugf("CD notification for %s@%s has no token: %s", repoId, branch, failure));
+  }
+
+  private Uni<Optional<String>> credential() {
+    return bearer == null ? Uni.createFrom().item(Optional.empty()) : bearer.bearer();
+  }
+
+  private void send(String body, Optional<String> authorization, String repoId, String branch) {
     HttpRequest.Builder request =
         HttpRequest.newBuilder(URI.create(intakeUrl))
             .timeout(Duration.ofSeconds(10))
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(body));
+    authorization.ifPresent(value -> request.header("Authorization", value));
     client
         .sendAsync(request.build(), HttpResponse.BodyHandlers.discarding())
         .whenComplete(

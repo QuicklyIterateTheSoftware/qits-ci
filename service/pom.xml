@@ -96,13 +96,35 @@
             <artifactId>quarkus-opentelemetry</artifactId>
         </dependency>
         <dependency>
-            <!-- SecurityIdentity + the HttpAuthenticationMechanism SPI, for the single thing this
-                 service does about auth: read qits-gateway's X-Qits-User header into an identity
-                 (see security/ForwardAuthMechanism). NOT an auth variant and NOT an authorization
-                 policy — the monolith's -Dqits.variant auth/* modules do not come here at all;
-                 authentication terminates at the gateway (migration-auth-plan.md). -->
+            <!-- The platform's two identity tracks, in one jar (qits-integrations-quarkus/README.md).
+                 USERS: the forward-auth pair that reads qits-gateway's X-Qits-User header into a
+                 SecurityIdentity — the same code eight services used to carry a copy of, moved out
+                 verbatim. Authentication still terminates at the gateway, and there is still no
+                 authorization policy here.
+                 MACHINES: MachineAuth, the claim guard on the event intake, behind the platform-wide
+                 gate qits.auth.machine.required. It brings quarkus-security transitively; the bearer
+                 that feeds it is the service's own quarkus-oidc, which the lib deliberately does
+                 not depend on. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-auth-core</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Validates the machine bearers qits-idp issues, so MachineAuth has something to read.
+                 It sits BESIDE forward-auth rather than instead of it: a request with no
+                 Authorization header falls through to the header mechanism and stays user traffic.
+                 Configured in application.properties, where discovery is off and no connection is
+                 made until a bearer actually arrives — this service must boot with no qits-idp
+                 anywhere, which is what the rollout gate is for. -->
             <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-security</artifactId>
+            <artifactId>quarkus-oidc</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The other direction: qits-ci ASKS qits-idp for a token, to present to qits-cd
+                 (notify/CdBearer). Off by default — quarkus.oidc-client.client-enabled=false in
+                 application.properties — so the extension builds a disabled client, boots without a
+                 secret and never dials anything. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-oidc-client</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>
@@ -147,6 +169,15 @@
         <dependency>
             <groupId>io.rest-assured</groupId>
             <artifactId>rest-assured</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- @TestSecurity + @OidcSecurity: installs the identity quarkus-oidc would have built
+                 from a validated bearer, without a running qits-idp. What MachineGuardTest asserts
+                 is this service's DECISION on a token's claims — signature and expiry checking is
+                 the extension's job and has its own tests upstream. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-test-security-oidc</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
