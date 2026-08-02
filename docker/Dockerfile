@@ -191,7 +191,7 @@ RUN d=service/src/main/webui/dist/qits-spa-ci/browser; \
       echo "in service/src/main/webui first — this stage cannot, see the Quinoa flags above." >&2; \
       exit 1; }; \
     cp -a "$d" "$d.layer" && rm -rf "$d" && mv "$d.layer" "$d" && \
-    ./mvnw -B -ntp -s docker/maven-settings.xml -pl service -am package -Dnative -DskipTests \
+    ./mvnw -B -ntp -s .qits-maven-settings.xml -pl service -am package -Dnative -DskipTests \
       -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
       -Dquarkus.native.native-image-xmx=4g \
       -Dquarkus.quinoa.package-manager-install=true \
