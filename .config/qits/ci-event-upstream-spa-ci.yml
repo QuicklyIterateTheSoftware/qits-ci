@@ -11,7 +11,7 @@ steps:
       git submodule update --init --depth 1 service/src/main/webui
       git -C service/src/main/webui fetch "$frontend_url" "refs/tags/$version:refs/tags/$version"
       git -C service/src/main/webui checkout --detach "$version"
-      git add service/src/main/webui
+      git add -f service/src/main/webui
       git diff --cached --quiet && exit 0
       git -c user.name="qits release train" -c user.email="release-train@qits.local" commit -q \\
         -m "bump(qits-spa-ci@$version): follow qits-spa-ci"
