@@ -77,7 +77,8 @@ steps:
       # --- half one: the bundle -----------------------------------------------------------------
       # Initialise the Angular client explicitly. See ci-post-receive.yml for why the lockfile
       # origins are rewritten and why the registry is passed as environment rather than as a file.
-      git submodule update --init --depth 1 service/src/main/webui
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-ci"
+      git -c submodule.qits-spa-ci.url="$frontend_url" submodule update --init service/src/main/webui
 
       cd service/src/main/webui
       npm_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
@@ -91,7 +92,7 @@ steps:
       cd -
 
       # --- half two: the image ------------------------------------------------------------------
-      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-ci:$version"
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-ci:$QITS_CI_SHA"
       docker build --network qits-net \
         --build-arg QITS_MAVEN_REPOSITORY_URL=http://qits-artifacts:8080/artifacts/maven/maven \
         -t "$ref" -f docker/Dockerfile .

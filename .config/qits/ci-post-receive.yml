@@ -34,7 +34,8 @@ steps:
       set -eu
 
       # The daemon's clone does not recurse, so initialise the Angular client explicitly.
-      git submodule update --init --depth 1 service/src/main/webui
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-ci"
+      git -c submodule.qits-spa-ci.url="$frontend_url" submodule update --init service/src/main/webui
 
       # THE LOCKFILE is the one file this step edits, and npm leaves no alternative. Same problem
       # and same fix as qits-gateway's pipeline; the recipe is maintained in qits-spa-home's own
