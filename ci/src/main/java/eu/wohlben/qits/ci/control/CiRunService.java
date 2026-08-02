@@ -104,9 +104,11 @@ import org.jboss.logging.Logger;
  *
  * <h2>What a restart costs now</h2>
  *
- * <p>{@link #sweepInterrupted} still fails every {@code RUNNING} row — its in-flight step died with
- * the process and the launch table is memory — but every {@code QUEUED} row is <b>re-enqueued</b>,
- * oldest first, because the work never started.
+ * <p>{@link #sweepInterrupted} fails a push-triggered {@code RUNNING} row — its in-flight step died
+ * with the process and replaying repository-authored work after it began is not safe. A running
+ * event pipeline is different: the event bus is at-most-once and the complete input snapshot is on
+ * the row, so its partial step records are cleared and the run is restarted. Event pipelines must
+ * therefore be idempotent. Every {@code QUEUED} row is re-enqueued oldest first.
  *
  * <p>An event-triggered row also stores its event envelope and exact trigger-file content. The
  * worker reparses that immutable snapshot, so a queued event run is recoverable without consulting
@@ -186,8 +188,9 @@ public class CiRunService {
    * Reconciles what a previous process left behind, and the two halves pull in opposite directions
    * on purpose.
    *
-   * <p>A run left {@code RUNNING} can never make progress — its step's container is gone, its
-   * launch table was memory — so it would show as forever-executing, and it is failed once here.
+   * <p>A push run left {@code RUNNING} cannot make progress and is failed once here. An event run
+   * left running is reset and restarted from its durable snapshot because its at-most-once source
+   * cannot redeliver it; trigger scripts are consequently an at-least-once/idempotent boundary.
    *
    * <p>A run left {@code QUEUED} never started. Its row is the whole of it, so it is <b>put back on
    * the worker</b> in {@code createdAt} order rather than failed: this is the point of the status
@@ -206,8 +209,8 @@ public class CiRunService {
     sweepInterrupted();
   }
 
-  /** What one sweep found: the ids to put back on the worker and the failed in-flight count. */
-  private record Sweep(List<String> requeue, int failed) {}
+  /** What one sweep found: work to restart and counts worth exposing in the startup log. */
+  private record Sweep(List<String> requeue, int failed, int restartedEvents) {}
 
   /**
    * The sweep itself — package-private because {@link #onStart} skips test mode, so this is what a
@@ -229,6 +232,11 @@ public class CiRunService {
       LOG.infof(
           "Marked %d CI run(s) left RUNNING by a previous shutdown as FAILED", sweep.failed());
     }
+    if (sweep.restartedEvents() > 0) {
+      LOG.infof(
+          "Restarting %d event-triggered CI run(s) interrupted by the previous shutdown",
+          sweep.restartedEvents());
+    }
     if (!sweep.requeue().isEmpty()) {
       LOG.infof("Re-enqueued %d CI run(s) left QUEUED by a previous shutdown", sweep.requeue().size());
       sweep.requeue().forEach(this::enqueue);
@@ -237,17 +245,28 @@ public class CiRunService {
 
   private Sweep reconcile() {
     List<CiRun> orphans = runs.list("status = ?1", CiRunStatus.RUNNING);
+    int failed = 0;
+    int restartedEvents = 0;
     for (CiRun orphan : orphans) {
-      failIncompleteSteps(orphan.id);
-      orphan.status = CiRunStatus.FAILED;
-      orphan.finishedAt = Instant.now();
+      if (orphan.triggerType == CiTriggerType.EVENT && orphan.triggerConfig != null) {
+        steps.delete("runId = ?1", orphan.id);
+        orphan.status = CiRunStatus.QUEUED;
+        orphan.finishedAt = null;
+        orphan.daemonVersion = null;
+        restartedEvents++;
+      } else {
+        failIncompleteSteps(orphan.id);
+        orphan.status = CiRunStatus.FAILED;
+        orphan.finishedAt = Instant.now();
+        failed++;
+      }
     }
 
     List<String> requeue = new ArrayList<>();
     for (CiRun queued : runs.listQueuedOldestFirst()) {
       requeue.add(queued.id);
     }
-    return new Sweep(requeue, orphans.size());
+    return new Sweep(requeue, failed, restartedEvents);
   }
 
   /**

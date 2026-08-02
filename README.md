@@ -660,8 +660,11 @@ post-receive again by hand.
 
 On boot:
 
-- runs left `RUNNING` are still marked `FAILED` — their in-flight step died with the process, the
-  launch table is memory, and no re-run could be honest about a step that had already started;
+- push-triggered runs left `RUNNING` are marked `FAILED` — their in-flight step died with the
+  process and CI cannot assume arbitrary repository-authored work is safe to repeat;
+- event-triggered runs left `RUNNING` have partial step rows cleared and restart from their stored
+  event/trigger snapshot. The event stream is live and at-most-once, so event pipelines are an
+  at-least-once boundary and their scripts must be idempotent;
 - runs left `QUEUED` are **re-enqueued**, oldest first, because they never started and the row says
   everything needed to start them. Nothing is lost and nothing has to be replayed;
 - containers carrying the `qits.ci.run` label are removed, and a daemon from a previous life that

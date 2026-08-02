@@ -11,6 +11,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
 import eu.wohlben.qits.ci.entity.CiRun;
 import eu.wohlben.qits.ci.entity.CiRunStatus;
+import eu.wohlben.qits.ci.entity.CiStep;
+import eu.wohlben.qits.ci.entity.CiStepStatus;
 import eu.wohlben.qits.ci.entity.CiTriggerType;
 import eu.wohlben.qits.ci.error.ConflictException;
 import io.quarkus.narayana.jta.QuarkusTransaction;
@@ -453,7 +455,8 @@ public class CiQueuedRunTest extends CiTestSupport {
   // --- the restart ---
 
   @Test
-  public void aRestartFailsRunningRunsAndRePutsQueuedPushesOnTheWorker() throws Exception {
+  public void aRestartFailsRunningPushesButRestartsRunningAndQueuedEventsExactlyOnce()
+      throws Exception {
     // The sweep is what onStart calls; onStart itself is skipped in test mode, so this drives it
     // directly. Three rows, three different answers.
     String interruptedRepo = "swept-run-" + UUID.randomUUID();
@@ -468,6 +471,15 @@ public class CiQueuedRunTest extends CiTestSupport {
     String requeued = insertQueuedPush(repoId);
     String eventRepo = "swept-evt-" + UUID.randomUUID();
     insertRow(eventRepo, "f".repeat(40), CiRunStatus.QUEUED, CiTriggerType.EVENT, Instant.now());
+    String runningEventRepo = "swept-running-evt-" + UUID.randomUUID();
+    String runningEvent =
+        insertRow(
+            runningEventRepo,
+            "e".repeat(40),
+            CiRunStatus.RUNNING,
+            CiTriggerType.EVENT,
+            Instant.now());
+    insertStaleStep(runningEvent);
 
     service.sweepInterrupted();
     service.awaitIdle();
@@ -495,6 +507,26 @@ public class CiQueuedRunTest extends CiTestSupport {
             .orElseThrow();
     assertEquals("{\"version\":\"2026.802.154030\"}", recoveredEvent.env().get("QITS_EVENT_PAYLOAD"));
     assertEquals("2026-08-02T15:40:31Z", recoveredEvent.env().get("QITS_EVENT_OCCURRED_AT"));
+
+    CiRun restarted = service.requireRun(runningEvent);
+    assertEquals(CiRunStatus.SUCCESS, restarted.status);
+    assertEquals("fake-daemon", restarted.daemonVersion, "the dead process's daemon pin was reset");
+    assertEquals(1, service.stepsFor(runningEvent).size(), "partial prior-attempt steps were cleared");
+    assertEquals(
+        1,
+        fakeRunner.executed().stream()
+            .filter(spec -> spec.repoId().equals(runningEventRepo))
+            .count(),
+        "one startup sweep restarts the interrupted event once");
+
+    service.sweepInterrupted();
+    service.awaitIdle();
+    assertEquals(
+        1,
+        fakeRunner.executed().stream()
+            .filter(spec -> spec.repoId().equals(runningEventRepo))
+            .count(),
+        "a completed recovered run is idempotent across later startup sweeps");
   }
 
   @Test
@@ -526,6 +558,24 @@ public class CiQueuedRunTest extends CiTestSupport {
     return insertRow(repoId, shaOf(repoId), CiRunStatus.QUEUED, CiTriggerType.POST_RECEIVE, createdAt);
   }
 
+  private void insertStaleStep(String runId) {
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              CiStep step = new CiStep();
+              step.id = UUID.randomUUID().toString();
+              step.runId = runId;
+              step.stepIndex = 0;
+              step.image = "dead-attempt:latest";
+              step.status = CiStepStatus.SUCCESS;
+              step.exitCode = 0;
+              step.startedAt = Instant.now().minusSeconds(2);
+              step.finishedAt = Instant.now().minusSeconds(1);
+              step.output = "partial attempt";
+              steps.persist(step);
+            });
+  }
+
   private String insertRow(
       String repoId,
       String sha,
@@ -544,6 +594,9 @@ public class CiQueuedRunTest extends CiTestSupport {
               run.status = status;
               run.createdAt = createdAt;
               run.triggerType = triggerType;
+              if (status == CiRunStatus.RUNNING) {
+                run.daemonVersion = "dead-daemon";
+              }
               run.configPath =
                   triggerType == CiTriggerType.POST_RECEIVE
                       ? CiConfigParser.CONFIG_PATH
