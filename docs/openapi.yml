@@ -270,4 +270,4 @@ paths:
       - Ci Run Controller
 info:
   title: qits-ci API
-  version: 2026.802.160617
+  version: 2026.802.191321
