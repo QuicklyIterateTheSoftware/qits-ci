@@ -1,0 +1,18 @@
+event: SCMRelease
+when:
+  - repository: { exact: qits-spa-ci }
+steps:
+  - image: qits/build-images/node-base:latest
+    timeout-seconds: 600
+    script: |
+      set -eu
+      version=$(node -p 'JSON.parse(process.env.QITS_EVENT_PAYLOAD).version')
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-ci"
+      git submodule update --init --depth 1 service/src/main/webui
+      git -C service/src/main/webui fetch "$frontend_url" "refs/tags/$version:refs/tags/$version"
+      git -C service/src/main/webui checkout --detach "$version"
+      git add service/src/main/webui
+      git diff --cached --quiet && exit 0
+      git -c user.name="qits release train" -c user.email="release-train@qits.local" commit -q \\
+        -m "bump(qits-spa-ci@$version): follow qits-spa-ci"
+      git push --force "$QITS_CI_REPOSITORY_URL" HEAD:refs/heads/maintenance/qits-spa-ci
