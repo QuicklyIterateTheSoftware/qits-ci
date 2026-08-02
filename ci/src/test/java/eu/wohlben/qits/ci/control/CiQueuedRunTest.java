@@ -280,7 +280,13 @@ public class CiQueuedRunTest extends CiTestSupport {
         eventId,
         "BuildSuccessful",
         Instant.parse("2026-07-31T12:46:03Z"),
-        "{}");
+        "{}",
+        """
+        event: BuildSuccessful
+        steps:
+          - image: alpine:3
+            script: echo bump
+        """);
   }
 
   // --- the accept-time row on the paths that used to record nothing at all ---
@@ -478,11 +484,17 @@ public class CiQueuedRunTest extends CiTestSupport {
     assertEquals(CiRunStatus.SUCCESS, ran.status);
     assertEquals(1, service.stepsFor(requeued).size(), "the re-enqueued run really executed");
 
-    // An event-triggered run's payload and parsed pipeline are not on the row, so it cannot be
-    // re-run truthfully. Discarded, which leaves the dedupe constraint clear for a redelivery.
-    assertTrue(
-        service.runsFor(eventRepo).isEmpty(),
-        "an event-triggered queued run is discarded, not failed and not re-run");
+    // Its event envelope and exact trigger file are durable too. Recovery reparses that snapshot
+    // and preserves the environment instead of waiting for an at-most-once event redelivery.
+    CiRun eventRan = service.runsFor(eventRepo).get(0);
+    assertEquals(CiRunStatus.SUCCESS, eventRan.status);
+    CiStepRunner.StepSpec recoveredEvent =
+        fakeRunner.executed().stream()
+            .filter(spec -> spec.repoId().equals(eventRepo))
+            .findFirst()
+            .orElseThrow();
+    assertEquals("{\"version\":\"2026.802.154030\"}", recoveredEvent.env().get("QITS_EVENT_PAYLOAD"));
+    assertEquals("2026-08-02T15:40:31Z", recoveredEvent.env().get("QITS_EVENT_OCCURRED_AT"));
   }
 
   @Test
@@ -539,6 +551,15 @@ public class CiQueuedRunTest extends CiTestSupport {
               if (triggerType == CiTriggerType.EVENT) {
                 run.triggerEventId = UUID.randomUUID().toString();
                 run.triggerEventName = "BuildSuccessful";
+                run.triggerEventOccurredAt = Instant.parse("2026-08-02T15:40:31Z");
+                run.triggerEventPayload = "{\"version\":\"2026.802.154030\"}";
+                run.triggerConfig =
+                    """
+                    event: BuildSuccessful
+                    steps:
+                      - image: alpine:3
+                        script: echo recovered
+                    """;
               }
               runs.persist(run);
             });

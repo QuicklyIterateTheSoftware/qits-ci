@@ -104,19 +104,13 @@ import org.jboss.logging.Logger;
  *
  * <h2>What a restart costs now</h2>
  *
- * <p>The trap is half dead. {@link #sweepInterrupted} still fails every {@code RUNNING} row — its
- * in-flight step died with the process and the launch table is memory — but a {@code QUEUED}
- * post-receive row is <b>re-enqueued</b> instead, oldest first, because the work never started and
- * the row describes all of it: a repository, a branch and a sha.
+ * <p>{@link #sweepInterrupted} still fails every {@code RUNNING} row — its in-flight step died with
+ * the process and the launch table is memory — but every {@code QUEUED} row is <b>re-enqueued</b>,
+ * oldest first, because the work never started.
  *
- * <p><b>An event-triggered {@code QUEUED} row is discarded rather than re-enqueued</b>, and that is
- * a bounded, deliberate gap. An {@link EventRun} carries the event's payload and its already-parsed
- * pipeline, neither of which is on the row — the payload reaches the step containers as {@code
- * QITS_EVENT_PAYLOAD}, so re-enqueueing from the row alone would run the pipeline against an empty
- * one, which is a different run than the one that was accepted. Discarding restores exactly the
- * pre-queue behaviour (the closure died, nothing was recorded) and leaves the dedupe constraint
- * clear, so a redelivery of that event runs it properly. Persisting the payload is what would close
- * it, and it is a schema change rather than a line here.
+ * <p>An event-triggered row also stores its event envelope and exact trigger-file content. The
+ * worker reparses that immutable snapshot, so a queued event run is recoverable without consulting
+ * a branch that may have moved and without relying on an at-most-once event redelivery.
  */
 @ApplicationScoped
 public class CiRunService {
@@ -140,6 +134,7 @@ public class CiRunService {
 
   @Inject CiConfigSource configSource;
   @Inject CiConfigParser parser;
+  @Inject CiEventTriggerParser triggerParser;
   @Inject CiStepRunner runner;
   @Inject CiRunRepository runs;
   @Inject CiStepRepository steps;
@@ -197,8 +192,8 @@ public class CiRunService {
    * <p>A run left {@code QUEUED} never started. Its row is the whole of it, so it is <b>put back on
    * the worker</b> in {@code createdAt} order rather than failed: this is the point of the status
    * existing, and it is what closes the cutover loss for builds that were accepted while qits-ci was
-   * redeploying itself. The exception is an event-triggered one, which is discarded — see the class
-   * javadoc for why its row is not enough to run it.
+   * redeploying itself. Event-triggered rows contain their envelope and trigger snapshot too, so
+   * both trigger types take the same recovery path.
    *
    * <p>The container half of the same reconciliation is {@code CiDaemonLauncher.onStart}, which
    * reaps what the {@code RUNNING} runs left behind; it is a second observer because it needs docker
@@ -211,8 +206,8 @@ public class CiRunService {
     sweepInterrupted();
   }
 
-  /** What one sweep found: the ids to put back on the worker, and the two counts worth logging. */
-  private record Sweep(List<String> requeue, int failed, int abandoned) {}
+  /** What one sweep found: the ids to put back on the worker and the failed in-flight count. */
+  private record Sweep(List<String> requeue, int failed) {}
 
   /**
    * The sweep itself — package-private because {@link #onStart} skips test mode, so this is what a
@@ -234,12 +229,6 @@ public class CiRunService {
       LOG.infof(
           "Marked %d CI run(s) left RUNNING by a previous shutdown as FAILED", sweep.failed());
     }
-    if (sweep.abandoned() > 0) {
-      LOG.infof(
-          "Discarded %d event-triggered CI run(s) left QUEUED by a previous shutdown — an event's"
-              + " payload is not persisted, so a redelivery of the event is what runs them",
-          sweep.abandoned());
-    }
     if (!sweep.requeue().isEmpty()) {
       LOG.infof("Re-enqueued %d CI run(s) left QUEUED by a previous shutdown", sweep.requeue().size());
       sweep.requeue().forEach(this::enqueue);
@@ -255,17 +244,10 @@ public class CiRunService {
     }
 
     List<String> requeue = new ArrayList<>();
-    int abandoned = 0;
     for (CiRun queued : runs.listQueuedOldestFirst()) {
-      if (queued.triggerType == CiTriggerType.POST_RECEIVE) {
-        requeue.add(queued.id);
-      } else {
-        steps.delete("runId = ?1", queued.id);
-        runs.delete(queued);
-        abandoned++;
-      }
+      requeue.add(queued.id);
     }
-    return new Sweep(requeue, orphans.size(), abandoned);
+    return new Sweep(requeue, orphans.size());
   }
 
   /**
@@ -295,7 +277,12 @@ public class CiRunService {
     worker.submit(
         () -> {
           try {
-            runQueued(runId, contendedRequeues);
+            CiRun queued = QuarkusTransaction.requiringNew().call(() -> runs.findById(runId));
+            if (queued != null && queued.triggerType == CiTriggerType.EVENT) {
+              runQueuedEventRun(runId, reconstructEventRun(queued));
+            } else {
+              runQueued(runId, contendedRequeues);
+            }
           } catch (RuntimeException e) {
             LOG.errorf(e, "CI run %s failed unexpectedly", runId);
           }
@@ -320,7 +307,8 @@ public class CiRunService {
       String eventId,
       String eventName,
       Instant occurredAt,
-      String payload) {}
+      String payload,
+      String triggerConfig) {}
 
   /**
    * The async entry the trigger engine calls. Like the intake's, the row is written before this
@@ -340,18 +328,22 @@ public class CiRunService {
     if (run == null) {
       return;
     }
-    worker.submit(
-        () -> {
-          try {
-            runQueuedEventRun(run.id, request);
-          } catch (RuntimeException e) {
-            LOG.errorf(
-                e,
-                "Event-triggered CI run for %s (%s) failed unexpectedly",
-                request.repoId(),
-                request.eventId());
-          }
-        });
+    enqueue(run.id);
+  }
+
+  /** Rebuilds an accepted event run solely from its durable row. */
+  private EventRun reconstructEventRun(CiRun run) {
+    CiEventTrigger trigger = triggerParser.parse(run.configPath, run.triggerConfig);
+    return new EventRun(
+        run.repoId,
+        run.branch,
+        run.commitSha,
+        trigger,
+        run.triggerEventId,
+        run.triggerEventName,
+        run.triggerEventOccurredAt,
+        run.triggerEventPayload,
+        run.triggerConfig);
   }
 
   /**
@@ -371,11 +363,11 @@ public class CiRunService {
 
   /**
    * The worker half of an event-triggered run: claim the queued row, then run the pipeline that
-   * travelled here with the request.
+   * reconstructed from the durable row.
    *
    * <p>No config lookup, unlike the push path — {@code CiEventTriggerService} had to read and parse
    * the trigger file to know there was anything to run at all, so the pipeline arrives parsed. That
-   * is also why this run cannot be reconstructed from its row after a restart.
+   * The row stores that file's exact content so a restart parses the same declaration again.
    */
   private void runQueuedEventRun(String runId, EventRun request) {
     CiRun run = startQueued(runId);
@@ -423,11 +415,9 @@ public class CiRunService {
    * artifacts it declared, and the payload the version is read out of. Null when the file declared
    * none, which is every ordinary event pipeline and every push.
    *
-   * <p><b>This is the whole reason the payload travels down into {@link #runSteps}.</b> It is on no
-   * column — an event-triggered run cannot be reconstructed from its row, which is why a {@code
-   * QUEUED} one is discarded at restart rather than re-enqueued — so the only place it exists at run
-   * completion is the closure the worker is already holding. Reading it here rather than at accept
-   * time is deliberate too: a red run must announce nothing and warn about nothing.
+   * <p>The payload is reconstructed from the run row and travels through to {@link #runSteps}.
+   * Reading it here rather than at accept time remains deliberate: a red run must announce nothing
+   * and warn about nothing.
    */
   private static DeclaredRelease declaredRelease(EventRun request) {
     List<CiArtifact> artifacts = request.trigger().artifacts();
@@ -947,6 +937,9 @@ public class CiRunService {
     run.configPath = configPath;
     run.triggerEventId = request.eventId();
     run.triggerEventName = request.eventName();
+    run.triggerEventOccurredAt = request.occurredAt();
+    run.triggerEventPayload = request.payload();
+    run.triggerConfig = request.triggerConfig();
     boolean inserted;
     try {
       inserted =

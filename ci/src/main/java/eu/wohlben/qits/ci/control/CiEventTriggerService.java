@@ -176,7 +176,8 @@ public class CiEventTriggerService {
               arrival.eventId(),
               arrival.eventName(),
               arrival.occurredAt(),
-              arrival.payload()));
+              arrival.payload(),
+              file.content()));
     }
   }
 

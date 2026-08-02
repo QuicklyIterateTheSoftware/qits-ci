@@ -205,21 +205,15 @@ opt-in stops meaning anything. And an unreachable git host must not leave a red 
 must not invent a gate**, and a red row is exactly an invented gate — the commit is very likely fine
 and this process simply could not ask.
 
-**The trap this closes is half of one, and say exactly that.** `QUEUED` survives a restart:
-`sweepInterrupted` re-enqueues those rows, oldest first, so a redeploy landing between a push and its
-build no longer eats the build and no longer needs a hand-replayed post-receive. `RUNNING` still dies:
-those rows are marked `FAILED`, because their in-flight step went with the process and the launch
+**`QUEUED` survives a restart.** `sweepInterrupted` re-enqueues those rows, oldest first, so a
+redeploy landing between acceptance and execution no longer eats either a push-triggered or an
+event-triggered build. `RUNNING` still dies: those rows are marked `FAILED`, because their in-flight step went with the process and the launch
 table is memory. Nothing here adds durability beyond the row, which is what keeps the rest of the
 restart story free.
 
-**The one gap is an event-triggered run left `QUEUED`, and it is discarded rather than re-enqueued.**
-An `EventRun` carries the event's payload and its already-parsed pipeline; neither is on the row, and
-the payload reaches the step containers as `$QITS_EVENT_PAYLOAD`. Re-enqueueing from the row alone
-would run a re-read pipeline against an empty payload — a different run than the one that was
-accepted, recorded as though it were the same one. Discarding restores exactly the pre-queue
-behaviour (the closure died, nothing was recorded) and leaves the unique constraint clear, so a
-redelivery of that event runs it properly. Persisting the payload is what would close it; it is a
-schema change, not a line in the sweep.
+An event run stores the original timestamp, canonical payload and exact trigger-file content on its
+row. Recovery reparses that immutable snapshot: it neither reads a moved branch nor depends on the
+live-only event stream redelivering an occurrence.
 
 **`onStart` skips test mode, so `sweepInterrupted` is package-private and the suite drives it.** A
 claim about a restart is made by seeding the rows a dead process would have left and calling it —

@@ -658,7 +658,7 @@ every read surface, and gone with the process. That was the lossy intake: a rede
 the push and the build lost the build with no row anywhere to say so, and the fix was to POST the
 post-receive again by hand.
 
-**The trap is half dead, and the halves are worth stating exactly.** On boot:
+On boot:
 
 - runs left `RUNNING` are still marked `FAILED` — their in-flight step died with the process, the
   launch table is memory, and no re-run could be honest about a step that had already started;
@@ -667,12 +667,10 @@ post-receive again by hand.
 - containers carrying the `qits.ci.run` label are removed, and a daemon from a previous life that
   dials in presents a secret this process does not know and is closed 1008.
 
-The one exception is an **event-triggered** run left `QUEUED`: it is discarded rather than
-re-enqueued. Its pipeline arrives already parsed and its event payload reaches the step containers as
-`$QITS_EVENT_PAYLOAD`, and neither is on the row — so re-running it from the row would run a
-different pipeline against an empty payload. Discarding restores exactly the pre-queue behaviour and
-leaves the dedupe constraint clear, so a redelivery of that event runs it properly. Persisting the
-payload is what would close it, and it is a schema change rather than a line of code.
+For an event-triggered run the row includes the original event timestamp, its canonical payload and
+the exact trigger-file content that matched. Recovery reparses that snapshot, preserving both the
+pipeline and `$QITS_EVENT_*` environment even if `main` moved while CI was down. It does not depend
+on the live-only event stream redelivering the event.
 
 No durability is added beyond the row by design — the launch table is still memory, and that is what
 keeps the rest of the restart story free.

@@ -87,6 +87,21 @@ public class CiRun extends PanacheEntityBase {
   @Column(name = "trigger_event_name", length = 255)
   public String triggerEventName;
 
+  /** The triggering event's original timestamp, needed to reconstruct its step environment. */
+  @Column(name = "trigger_event_occurred_at")
+  public Instant triggerEventOccurredAt;
+
+  /** The triggering event's canonical JSON payload, preserved verbatim across a restart. */
+  @Column(name = "trigger_event_payload", columnDefinition = "clob")
+  public String triggerEventPayload;
+
+  /**
+   * The exact trigger file that matched this event. Parsing this snapshot, rather than the current
+   * branch head, makes a recovered run execute the pipeline it originally accepted.
+   */
+  @Column(name = "trigger_config", columnDefinition = "clob")
+  public String triggerConfig;
+
   /**
    * Which committed file declared this run's pipeline: {@code CiConfigParser.CONFIG_PATH} on a push,
    * the matching {@code .config/qits/ci-event-*.yml} on an event. Never null — it is the third column
