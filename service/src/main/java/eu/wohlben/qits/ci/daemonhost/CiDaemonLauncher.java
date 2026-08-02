@@ -163,6 +163,14 @@ public class CiDaemonLauncher {
   String artifactsNpmProxyUrl;
 
   /**
+   * qits-artifacts' hosted Maven repository root. Dialled by the step container over qits-net, like
+   * the npm roots above, and injected so Maven release pipelines and dependency bump handlers never
+   * hard-code a deployment address.
+   */
+  @ConfigProperty(name = "qits.artifacts.maven.registry-url")
+  String artifactsMavenRegistryUrl;
+
+  /**
    * qits-workspaces' root, injected into every step container so the release train's maintenance
    * step names no deployment fact of its own. Scheme, host and port only — the path is the caller's,
    * and a step spells {@code /workspaces/api/branches/release} itself.
@@ -358,7 +366,8 @@ public class CiDaemonLauncher {
    * daemon's — a deployment must make the host reach it, and list it in {@code insecure-registries}
    * while the registry speaks plain HTTP.
    *
-   * <p><b>The npm roots go into every container too, and their caveat is the exact inverse.</b>
+   * <p><b>The package registry roots go into every container too, and their caveat is the exact
+   * inverse.</b> {@code QITS_MAVEN_REGISTRY_URL} follows the same rule as the npm pair below.
    * {@code QITS_NPM_REGISTRY_URL} and {@code QITS_NPM_PROXY_URL} are dialled by the <b>step
    * container itself</b> — an npm CLI speaking plain HTTP to a service alias on the shared network,
    * needing no socket, no privilege and no {@code docker: true}. So the value that is right here is
@@ -426,6 +435,7 @@ public class CiDaemonLauncher {
     // container, on this network — a publish here is an ordinary HTTP step needing no socket.
     env(argv, "QITS_NPM_REGISTRY_URL", artifactsNpmHostedUrl);
     env(argv, "QITS_NPM_PROXY_URL", artifactsNpmProxyUrl);
+    env(argv, "QITS_MAVEN_REGISTRY_URL", artifactsMavenRegistryUrl);
     // And where a step asks for its own repository to be released — same network, same reading of
     // "reachable from where" as the npm pair.
     env(argv, "QITS_WORKSPACES_URL", workspacesUrl);

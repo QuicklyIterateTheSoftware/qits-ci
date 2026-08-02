@@ -108,6 +108,7 @@ rest of qits it reaches over a URL it is configured with:
 | out | `ws://…/events/stream` — dialled out and held open, carrying what qits-events broadcasts back | the same two keys; the address is derived, never configured twice |
 | out | the registry a publishing step pushes to, as `$QITS_REGISTRY` and `$QITS_IMAGE_REPOSITORY` in **every** step container — dialled by the *host's docker daemon*, never by this process | `qits.artifacts.registry-host`, `qits.artifacts.image-repository` |
 | out | the npm registry roots, as `$QITS_NPM_REGISTRY_URL` (hosted, `@qits/*` publishes) and `$QITS_NPM_PROXY_URL` (the npmjs pull-through cache) in **every** step container — dialled by the *step container itself* on the shared network | `qits.artifacts.npm.hosted-url`, `qits.artifacts.npm.proxy-url` |
+| out | the hosted Maven repository root, as `$QITS_MAVEN_REGISTRY_URL` in **every** step container — also dialled by the step container on the shared network | `qits.artifacts.maven.registry-url` |
 
 The run listing takes the repository as a **query filter, not a path segment**. ci does not own
 repositories, so `/repositories/{repoId}/runs` asserted a containment this context does not have —
@@ -323,6 +324,11 @@ registry=${QITS_NPM_PROXY_URL}
 ${QITS_NPM_REGISTRY_URL#http:}:_authToken=qits-ci
 EOF
 ```
+
+Maven has the same network posture. `$QITS_MAVEN_REGISTRY_URL` is the hosted repository root a
+release step passes to `mvn deploy` (for example with `-DaltDeploymentRepository`), and it is
+injected into every step so neither publishers nor downstream version handlers spell the
+qits-artifacts address.
 
 Two lines there are worth reading twice. The `#http:` strip is parameter expansion, not a comment:
 it turns the url into the `//host/path/` form npm keys credentials by, which is the one non-obvious
@@ -700,7 +706,8 @@ a repository's own listing will show.
   registry speaks plain HTTP the daemon also needs it in `insecure-registries`. Same class of fact as
   the socket mount, and now the same socket serves both. qits-cd ships the same two keys and derives
   its pull references from them, so the two services must agree.
-- Leave `qits.artifacts.npm.hosted-url` / `qits.artifacts.npm.proxy-url` alone on a deployment where
+- Leave `qits.artifacts.npm.hosted-url` / `qits.artifacts.npm.proxy-url` and
+  `qits.artifacts.maven.registry-url` alone on a deployment where
   qits-artifacts answers to its usual alias: they are reached **from a step container**, on
   `qits.ci.network`, so the shipped defaults are already the right values and the host-published
   address used for `registry-host` is exactly the wrong one to copy here. Override them only when

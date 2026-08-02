@@ -36,6 +36,7 @@ public class CiDaemonLauncherTest {
     launcher.artifactsImageRepository = "qits";
     launcher.artifactsNpmHostedUrl = "http://qits-artifacts:8080/artifacts/npm/npm/";
     launcher.artifactsNpmProxyUrl = "http://qits-artifacts:8080/artifacts/npm/npmjs/";
+    launcher.artifactsMavenRegistryUrl = "http://qits-artifacts:8080/artifacts/maven/maven";
     launcher.workspacesUrl = "http://qits-workspaces:8080";
     return launcher;
   }
@@ -123,6 +124,8 @@ public class CiDaemonLauncherTest {
             "--env",
             "QITS_NPM_PROXY_URL=http://qits-artifacts:8080/artifacts/npm/npmjs/",
             "--env",
+            "QITS_MAVEN_REGISTRY_URL=http://qits-artifacts:8080/artifacts/maven/maven",
+            "--env",
             "QITS_WORKSPACES_URL=http://qits-workspaces:8080",
             "--entrypoint",
             "/bin/sh",
@@ -192,6 +195,17 @@ public class CiDaemonLauncherTest {
           argv.toString());
       assertTrue(
           argv.contains("QITS_NPM_PROXY_URL=http://qits-artifacts:8080/artifacts/npm/npmjs/"),
+          argv.toString());
+    }
+  }
+
+  @Test
+  public void everyStepIsToldWhereMavenPackagesComeFromAndGoTo() {
+    for (LaunchSpec each : List.of(spec, publishing())) {
+      List<String> argv = launcher().buildArgv(each);
+      assertTrue(
+          argv.contains(
+              "QITS_MAVEN_REGISTRY_URL=http://qits-artifacts:8080/artifacts/maven/maven"),
           argv.toString());
     }
   }
