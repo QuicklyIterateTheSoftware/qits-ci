@@ -61,7 +61,7 @@ public class CiRunRepository implements PanacheRepositoryBase<CiRun, String> {
    *
    * <p>Unscoped by repository on purpose, and it is the one read on this surface that is: the
    * question it answers is "what is CI doing right now", which has no repository to scope to. It is
-   * bounded by what a single-threaded worker can have accepted rather than by a limit, so it does
+   * bounded by accepted work and the configured worker pool rather than by a limit, so it does
    * not carry one.
    */
   public List<CiRun> listActiveNewestFirst() {

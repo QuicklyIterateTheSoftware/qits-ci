@@ -10,7 +10,7 @@ package eu.wohlben.qits.ci.control;
  * POST behind {@code qits.cd.intake-url}. It is resolved via {@code Instance} and absent is a
  * supported configuration — a deployment without qits-cd runs CI exactly as before.
  *
- * <p><b>An implementation must never block the caller.</b> It runs on the single-threaded run
+ * <p><b>An implementation must never block the caller.</b> It runs on a run
  * worker, between one run and the next; anything slower than queueing an async send delays every
  * pipeline on the instance (the no-untimed-wait rule, one package over).
  */

@@ -23,7 +23,7 @@ import java.time.Instant;
  * sole production implementation is {@code service/…/bus/SoftwareReleaseAnnouncer}, and zero
  * implementations is a supported configuration. <b>The same must-not-block rule as
  * {@link RunAnnouncer}</b>, with the same reason and one sharper edge: this runs on the
- * single-threaded run worker and a release pipeline may declare several artifacts, so an unreachable
+ * run worker and a release pipeline may declare several artifacts, so an unreachable
  * qits-events costs the publish timeout <em>per artifact</em>.
  */
 public interface ReleaseAnnouncer {

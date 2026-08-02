@@ -22,7 +22,8 @@ import org.jboss.logging.Logger;
  * container lifecycle, and its bootstrap is a constant with nothing interpolated into it.
  *
  * <p><b>Every wait has a deadline, and each covers a different thing so a hang is attributable.</b>
- * The run worker is single-threaded, so a wait that never returns wedges not this run but all of CI.
+ * Each pipeline occupies one run worker, so a wait that never returns permanently consumes one of
+ * the configured build slots.
  * Register covers the image pull and the daemon download; initialize covers the daemon's own clone
  * and checkout; the step's own deadline is enforced <em>inside</em> the container and the wait here
  * sits a grace period behind it, so in the normal case the daemon reports its own timeout and the

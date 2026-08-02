@@ -20,7 +20,7 @@ import org.jboss.logging.Logger;
  * POST per {@code SUCCESS} run — the {@code CiPostReceiveNotifier} shape, one hop further down the
  * chain (the git host announces pushes to ci the same way ci announces green builds to cd).
  *
- * <p>Fire-and-forget: the caller is the single-threaded run worker, between one run and the next,
+ * <p>Fire-and-forget: the caller is a run worker, between one run and the next,
  * so this must never block or throw — failures are swallowed at debug (a missed event means one
  * deployment does not happen; the next green build carries the branch forward). The flip side of
  * that idiom is the documented hazard: a path mismatch with cd's {@code

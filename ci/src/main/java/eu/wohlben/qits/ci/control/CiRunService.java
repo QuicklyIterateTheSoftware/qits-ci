@@ -19,6 +19,7 @@ import eu.wohlben.qits.ci.persistence.CiStepRepository;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.runtime.LaunchMode;
 import io.quarkus.runtime.StartupEvent;
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -35,15 +36,16 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.hibernate.exception.ConstraintViolationException;
 import org.jboss.logging.Logger;
 
 /**
  * The pipeline orchestrator: a post-receive event → read the config from the pushed commit → run
- * its steps sequentially → record per-step pass/fail. Runs execute on a single-threaded daemon
- * worker (the intake returns immediately; runs across all repos are serialized — parallelism is an
- * explicit follow-up), with each DB transition in its own {@link QuarkusTransaction#requiringNew()}
+ * its steps sequentially → record per-step pass/fail. Runs execute on a bounded pool of daemon
+ * workers (the intake returns immediately; {@code qits.ci.concurrent-builds} controls how many runs
+ * may execute at once), with each DB transition in its own {@link QuarkusTransaction#requiringNew()}
  * bracket so the slow container work never holds a transaction (worker threads have no request
  * context; the {@code BlobService}/{@code GitHostRoutes} stance).
  *
@@ -168,6 +170,10 @@ public class CiRunService {
   @ConfigProperty(name = "qits.ci.step-timeout-seconds")
   int stepTimeoutSeconds;
 
+  /** The instance-wide upper bound on runs executing at the same time. */
+  @ConfigProperty(name = "qits.ci.concurrent-builds")
+  int concurrentBuilds;
+
   /**
    * Runs a user asked to stop. In memory and deliberately so: a cancellation is only meaningful
    * while the run it addresses is executing in <em>this</em> process, and a restart fails every
@@ -175,13 +181,26 @@ public class CiRunService {
    */
   private final Set<String> cancelled = ConcurrentHashMap.newKeySet();
 
-  private final ExecutorService worker =
-      Executors.newSingleThreadExecutor(
-          r -> {
-            Thread t = new Thread(r, "ci-run-worker");
-            t.setDaemon(true);
-            return t;
-          });
+  private ExecutorService worker;
+
+  @PostConstruct
+  void initializeWorkers() {
+    worker = createWorkerPool(concurrentBuilds);
+  }
+
+  static ExecutorService createWorkerPool(int concurrentBuilds) {
+    if (concurrentBuilds < 1) {
+      throw new IllegalArgumentException("qits.ci.concurrent-builds must be at least 1");
+    }
+    AtomicInteger workerNumber = new AtomicInteger();
+    return Executors.newFixedThreadPool(
+        concurrentBuilds,
+        r -> {
+          Thread t = new Thread(r, "ci-run-worker-" + workerNumber.incrementAndGet());
+          t.setDaemon(true);
+          return t;
+        });
+  }
 
   @PreDestroy
   void shutdown() {

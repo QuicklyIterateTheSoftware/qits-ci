@@ -25,7 +25,7 @@ import java.time.Instant;
  *
  * <p><b>It blocks, briefly, and that was the trade.</b> {@link QitsEventBus#publish} attempts the
  * PUT inline, never throws, and gives up after the publish timeout — after which the outbox owns
- * delivery. The caller is the single-threaded run worker, so a qits-events that is down costs every
+ * delivery. The caller is a run worker, so a qits-events that is down costs one build slot on every
  * green build those few seconds once and nothing after; see {@link RunAnnouncer}.
  *
  * <p><b>This is where the platform's first automatic causation edge is drawn</b>, and {@link

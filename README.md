@@ -146,8 +146,9 @@ objects about *runs*, and neither claims ci owns a repository.
 across all repositories, newest first, no parameters. It is the only read here that is not scoped to
 a repository *and* not a listing of them — "what is CI doing right now" has no repository to scope to,
 and asking per repository would mean knowing the repositories first and still seeing a different
-instant in each answer. It needs no `?limit=`: what is active is bounded by what one single-threaded
-worker has accepted, not by uptime. It became answerable only when a queued run became a row (below).
+instant in each answer. It needs no `?limit=`: what is active is bounded by accepted work and the
+configured worker pool, not by uptime. It became answerable only when a queued run became a row
+(below).
 
 The event sender is the git host's post-receive hook, which lives in
 [qits-artifacts](https://github.com/QuicklyIterateTheSoftware/qits-artifacts) (`CiPostReceiveNotifier`).
@@ -692,6 +693,9 @@ a repository's own listing will show.
 
 ## Deploying it
 
+- Set `qits.ci.concurrent-builds` to the maximum number of pipelines this qits-ci instance may run
+  at once (default **4**, minimum **1**). Steps remain sequential within one pipeline. Size this
+  together with the host's CPU and memory and the per-container `qits.ci.cpus`/`memory-limit` caps.
 - Set `qits.ci.git-host-url` / `qits.ci.container-git-url` to the git host as reachable from the ci
   host and from a step container respectively. **Both end at the service, not at `/git`** — ci
   appends `/git/<repoId>` itself, because `/git` is the codebase's segment for the smart-HTTP wire

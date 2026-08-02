@@ -130,8 +130,8 @@ public class CiRunController {
    * in each answer. It became answerable only when a queued run became a row — before that, half of
    * this list lived in an executor's queue where nothing could read it.
    *
-   * <p>It carries no {@code ?limit=} because it needs none: what is active is bounded by what one
-   * single-threaded worker has accepted, not by how long the instance has been up.
+   * <p>It carries no {@code ?limit=} because it needs none: what is active is bounded by accepted
+   * work and the configured worker pool, not by how long the instance has been up.
    *
    * <p>{@code /active} is a literal segment and {@link #getRun}'s is a template, so JAX-RS matches
    * this one first — a run whose id is the string {@code active} is not addressable, and no run id
@@ -158,8 +158,8 @@ public class CiRunController {
    * complements over the same table, so a run that leaves one arrives in the other.
    *
    * <p>It <b>does</b> carry {@code ?limit=} where {@code /active} does not, and the asymmetry is the
-   * whole difference between them: what is active is bounded by what one single-threaded worker has
-   * accepted, while what is finished grows for as long as the instance has been up. Absent means
+   * whole difference between them: what is active is bounded by accepted work and the configured
+   * worker pool, while what is finished grows for as long as the instance has been up. Absent means
    * {@link CiRunService#DEFAULT_FINISHED_LIMIT} rather than unbounded — the opposite of the
    * repository listing's default, because there is no repository here to make "all of them" a bounded
    * question. It is parsed by the same {@link #parseLimit} for the same 400-not-404 reason, and an

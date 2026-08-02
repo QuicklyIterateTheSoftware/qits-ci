@@ -128,7 +128,7 @@ Three things bite:
   `ws://qits-ci:8080/ci/daemon`) is injected as `$QITS_CI_DAEMON_URL` and dialled verbatim. Move one,
   move both. It is not a gateway route and must not become one: one process per container with a
   lifetime of one step has no stable address worth configuring.
-- **No untimed wait may enter this package.** The single-threaded run worker parks here instead of on
+- **No untimed wait may enter this package.** A run worker parks here instead of on
   a process, so anything that never returns wedges *all* of CI. That covers three kinds of wait, not
   one: the lifecycle futures (`CiDaemonRegistry.await`), writing a frame (`send`), and closing a
   socket (`closeBounded`). `CiDaemonRegistryTimeoutTest` holds it behaviourally *and* by grepping
@@ -244,7 +244,7 @@ not `in (SUCCESS, FAILED, CONFIG_ERROR)`, which reads the same today and rots si
 value added to `ck_ci_run_status` would be finished in fact and invisible to both lists, so a run
 would leave one and never arrive in the other. Written as a complement they partition the table by
 construction. `/finished` carries `?limit=` where `/active` does not, and the asymmetry is the whole
-difference between them: what is active is bounded by what one single-threaded worker has accepted,
+difference between them: what is active is bounded by accepted work and the configured worker pool,
 what is finished grows with the instance's uptime. Absent means **5**, not unbounded — the opposite
 of the repository listing's default, because there is no repository here to make "all of them" a
 bounded question — and an ask above **100** is clamped rather than refused, since this is the one
@@ -410,7 +410,7 @@ Three things about that second seam are worth having in front of you:
   warn about nothing; a declaration whose trigger carries no `version` is a WARN and no event, since
   a blank version would publish a package reference nothing can resolve.
 
-The call sits on the single-threaded run worker and it blocks. That was the trade, and it is bounded
+The call sits on a run worker and it blocks. That was the trade, and it is bounded
 rather than free: `publish()` never throws, attempts the PUT inline, and gives up after
 `qits.eventstream.publish-timeout` (~5s), after which the outbox owns delivery. So an unreachable
 qits-events costs each green build a few seconds and nothing else. Anything slower than that does
