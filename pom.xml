@@ -47,7 +47,7 @@
 
     <properties>
         <qits.eventstream.version>2026.802.154015</qits.eventstream.version>
-        <qits.auth-core.version>1.0.0</qits.auth-core.version>
+        <qits.auth-core.version>2026.802.154953</qits.auth-core.version>
         <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
