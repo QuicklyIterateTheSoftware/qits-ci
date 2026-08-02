@@ -4,9 +4,3 @@
 	ignore = all
 	update = merge
 	branch = main
-[submodule "qits-eventstream"]
-	path = eventstream
-	url = https://github.com/QuicklyIterateTheSoftware/qits-eventstream.git
-	ignore = all
-	update = merge
-	branch = main

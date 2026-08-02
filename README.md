@@ -11,8 +11,8 @@ runs that file's pipeline against the head of `main`. That is the release train 
 releases, the repositories that declared an interest build themselves — and every hop of it is
 recorded, with the event that caused it, on the run and in the event log.
 
-    git submodule update --init   # the Angular client at service/src/main/webui, the bus at eventstream/
-    mvn verify                    # green from a clone alone — no monorepo, no docker, no credentials
+    git submodule update --init   # the Angular client at service/src/main/webui
+    mvn verify                    # resolves qits-eventstream 1.0.0 from local qits-artifacts
 
 ## Layout
 
@@ -21,8 +21,7 @@ recorded, with the event that caused it, on the run and in the event log.
 | `ci/` | `eu.wohlben.qits.ci.*` — entity, persistence, dto, mapper, control, error. The pipeline itself. No web, no JAX-RS. |
 | `service/` | `eu.wohlben.qits.ci.api` — the JAX-RS event intake, the run read surface, the token filter and the exception mapper — plus `…ci.daemonhost`, the step-container control plane (below). |
 | `ci-daemon-protocol/` | `eu.wohlben.qits.cidaemon.protocol` — the ci-daemon wire contract, **vendored** from [qits-ci-daemon](https://github.com/QuicklyIterateTheSoftware/qits-ci-daemon) and never edited here. Framework-free; `diff -r` is the drift detector. |
-| `eventstream/` | A **submodule** — [qits-eventstream](https://github.com/QuicklyIterateTheSoftware/qits-eventstream), `eu.wohlben.qits.eventstream`, the platform's **event bus client** (publish to qits-events, listen for what it broadcasts). Its own repository now; checked out here so the reactor builds it in place. It knows nothing about CI, and nothing in it is edited from this side. |
-| `ci-events/` | `eu.wohlben.qits.ci.events` — the events this service announces: `BuildSuccessful` for every green run, `SoftwareRelease` once per artifact a release pipeline declared. Depends on `eventstream/` and nothing else, so a future consumer takes the vocabulary without taking qits-ci. |
+| `ci-events/` | `eu.wohlben.qits.ci.events` — the events this service announces: `BuildSuccessful` for every green run, `SoftwareRelease` once per artifact a release pipeline declared. Depends on the published `qits-eventstream` jar and nothing else. |
 
 `ci/` is a library jar. **`service/` is the application** — it carries
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary:

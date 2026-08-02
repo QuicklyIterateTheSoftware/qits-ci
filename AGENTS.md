@@ -5,25 +5,17 @@ itself) and the config surface. This file is the working conventions on top of i
 
 ## The two rules that shape everything
 
-**A clone of this repo alone builds and tests green** — no monorepo, no docker, no prior
-`mvn install` elsewhere, no credentials. `mvn verify` is the gate. Anything that would break that is
-not a tradeoff to weigh, it is the thing this repo exists to avoid.
+**A clone builds against the platform Maven repository** — no monorepo and no prior `mvn install`.
+`qits-eventstream:1.0.0` is resolved from local qits-artifacts; `qits-local-up.sh` publishes it before
+building this service. `mvn verify` is the gate once that repository is available.
 
 That is why: the poms duplicate versions instead of inheriting them, the suites stand up their own
 bare git repos instead of using fixture submodules, the git host is a `file://` directory laid out
 as `<base>/git/<repoId>`, and the one seam that needs real docker is faked (`FakeCiStepRunner`)
 rather than skipped.
 
-**The one clause that has been bought back is "alone":** there are **two** submodules now — the
-Angular client at `service/src/main/webui` and the event bus at `eventstream/` — so the gate is
-`git submodule update --init && ./mvnw verify`. One command covers both, and it always will; what
-grows with each submodule is the number of ways a forgotten init fails. Everything else about the
-rule holds — still no monorepo, still no credentials, still no prior install — and the cost is two
-public clones, paid once. It is called out here rather than folded quietly into the sentence above
-because the failures it introduces look like broken builds rather than missing checkouts: an
-uninitialised client is Quinoa's `No package.json found in Web UI directory`, an uninitialised
-`eventstream/` is maven's `Child module … does not exist` before a line compiles. See "The Angular
-client" and "The event bus".
+The Angular client at `service/src/main/webui` remains the sole submodule. Initialise it before an
+image build; qits-eventstream is a normal Maven dependency and must not return as a gitlink.
 
 **`service/` compiles to a GraalVM native image**, the same rule qits-gateway and
 qits-workspace-daemon carry. `.sdkmanrc` names `25.0.2-graalce`, so `sdk env` gives you a
@@ -74,13 +66,10 @@ package:
 - `ci-daemon-protocol/` — the vendored wire contract (below). Its package is
   `eu.wohlben.qits.cidaemon.protocol`, deliberately not under `eu.wohlben.qits.ci`: it is a copy of
   another repo's module and its package must stay byte-identical with the original.
-- `eventstream/` — the event bus client (below), and a **submodule**: it is the qits-eventstream
-  repository, not a directory of this one. Its package is `eu.wohlben.qits.eventstream`, and it
-  knows nothing about `eu.wohlben.qits.ci.*`.
 - `ci-events/` — the event classes qits-ci emits, `eu.wohlben.qits.ci.events`. Under this repo's own
   namespace because it *is* this repo's vocabulary; depends on `eventstream` and nothing else.
 
-The **directories** are `ci/`, `service/`, `ci-daemon-protocol/`, `eventstream/` and `ci-events/`;
+The **directories** are `ci/`, `service/`, `ci-daemon-protocol/` and `ci-events/`;
 the artifactIds are `qits-ci-domain`, `qits-ci-service`, `qits-ci-daemon-protocol`,
 `qits-eventstream` and `qits-ci-events`. The first two mismatch deliberately — the extracted git
 history is anchored to the directory names, and generic coordinates like `eu.wohlben:ci` would

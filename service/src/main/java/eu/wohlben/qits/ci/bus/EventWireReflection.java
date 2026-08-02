@@ -74,8 +74,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * on {@code CiRunDto} are ordinary REST serialization through the CDI mapper, which Quarkus scans.
  *
  * <p>All of this is in {@code service/} because {@code service/} is where every native concession in
- * this repo lives. {@code eventstream/} is another repository entirely — a submodule now, no longer
- * a library waiting to leave — and {@code ci-events/} is this repo's vocabulary; the deployable is
+ * this repo lives. Eventstream is a published library and {@code ci-events/} is this repo's
+ * vocabulary; the deployable is
  * what gets built into an image, so the deployable is what tells the builder about itself.
  */
 @RegisterForReflection(

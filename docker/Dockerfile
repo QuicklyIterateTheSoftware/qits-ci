@@ -10,17 +10,12 @@
 #
 # Build from the repo root:
 #
-#     git submodule update --init
+#     git submodule update --init service/src/main/webui
 #     (cd service/src/main/webui && npm ci && npm run build)
 #     docker build -t qits/ci:latest -f docker/Dockerfile .
 #
-# The first two lines are not optional and are not a convenience. The init covers BOTH submodules
-# and each is load-bearing here for a different reason: this image carries the ci client
-# (service/src/main/webui = the qits-spa-ci submodule) and the builder stage below packages a bundle
-# that was ALREADY BUILT rather than building one — see the Quinoa flags on the mvnw line for why
-# the build cannot happen inside that stage — while `eventstream/` (the qits-eventstream submodule)
-# is a reactor module the `-am` build compiles from source, so an uninitialised one stops maven at
-# `Child module … does not exist` before anything is packaged.
+# The init is load-bearing: this image carries the ci client (service/src/main/webui), and the
+# builder stage packages a bundle that was already built.
 #
 # --- this image does NOT run with an empty environment, and that is not a packaging bug ------------
 # `docker run --rm qits/ci:latest` dies before the HTTP listener with
