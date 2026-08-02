@@ -1,0 +1,18 @@
+event: SoftwareRelease
+when:
+  - repository: { exact: qits-integrations-quarkus }
+    packageType: { exact: maven }
+    packageName: { exact: "eu.wohlben.qits:qits-auth-core" }
+steps:
+  - image: qits/build-images/maven-base:latest
+    timeout-seconds: 600
+    script: |
+      set -eu
+      version=$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -er .version)
+      curl -fsS -o /dev/null "$QITS_MAVEN_REGISTRY_URL/eu/wohlben/qits/qits-auth-core/$version/qits-auth-core-$version.pom"
+      sed -i -E "s#<qits.auth-core.version>[^<]+</qits.auth-core.version>#<qits.auth-core.version>$version</qits.auth-core.version>#" pom.xml
+      git add pom.xml
+      git diff --cached --quiet && exit 0
+      git -c user.name="qits release train" -c user.email="release-train@qits.local" commit -q \
+        -m "bump(qits-auth-core@$version): follow qits-integrations-quarkus"
+      git push --force "$QITS_CI_REPOSITORY_URL" HEAD:refs/heads/maintenance/qits-integrations-quarkus

@@ -46,6 +46,8 @@
     </modules>
 
     <properties>
+        <qits.eventstream.version>1.0.0</qits.eventstream.version>
+        <qits.auth-core.version>1.0.0</qits.auth-core.version>
         <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -123,7 +125,7 @@
             <dependency>
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-eventstream</artifactId>
-                <version>1.0.0</version>
+                <version>${qits.eventstream.version}</version>
             </dependency>
             <dependency>
                 <groupId>${project.groupId}</groupId>
@@ -133,7 +135,7 @@
             <dependency>
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-auth-core</artifactId>
-                <version>1.0.0</version>
+                <version>${qits.auth-core.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

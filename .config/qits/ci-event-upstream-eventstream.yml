@@ -1,0 +1,18 @@
+event: SoftwareRelease
+when:
+  - repository: { exact: qits-eventstream }
+    packageType: { exact: maven }
+    packageName: { exact: "eu.wohlben.qits:qits-eventstream" }
+steps:
+  - image: qits/build-images/maven-base:latest
+    timeout-seconds: 600
+    script: |
+      set -eu
+      version=$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -er .version)
+      curl -fsS -o /dev/null "$QITS_MAVEN_REGISTRY_URL/eu/wohlben/qits/qits-eventstream/$version/qits-eventstream-$version.pom"
+      sed -i -E "s#<qits.eventstream.version>[^<]+</qits.eventstream.version>#<qits.eventstream.version>$version</qits.eventstream.version>#" pom.xml
+      git add pom.xml
+      git diff --cached --quiet && exit 0
+      git -c user.name="qits release train" -c user.email="release-train@qits.local" commit -q \
+        -m "bump(qits-eventstream@$version): follow qits-eventstream"
+      git push --force "$QITS_CI_REPOSITORY_URL" HEAD:refs/heads/maintenance/qits-eventstream
