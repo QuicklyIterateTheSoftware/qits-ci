@@ -8,7 +8,7 @@ steps:
       set -eu
       version=$(node -p 'JSON.parse(process.env.QITS_EVENT_PAYLOAD).version')
       frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-ci"
-      git -c submodule.qits-spa-ci.url="$frontend_url" submodule update --init --depth 1 service/src/main/webui
+      git -c submodule.qits-spa-ci.url="$frontend_url" submodule update --init service/src/main/webui
       git -C service/src/main/webui fetch "$frontend_url" "refs/tags/$version:refs/tags/$version"
       git -C service/src/main/webui checkout --detach "$version"
       target=$(git -C service/src/main/webui rev-parse HEAD)
