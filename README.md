@@ -642,12 +642,16 @@ and no WebSocket on the read side; the daemon makes live output possible, it doe
 transport. The relay is memory and dies with the process — the persisted tail on each step row is
 the record.
 
-`POST /ci/api/runs/{runId}/cancel` answers 202 and asks the in-flight container to stop. The step it
+`POST /ci/api/runs/{runId}/cancel` answers 202 and asks the in-flight container to stop. Its optional
+JSON body is `{ "reason": "…" }`; absent or blank records `USER_CANCELLED`. The step it
 was on is recorded `FAILED` with "cancelled" in its output and the rest `SKIPPED`. A run still
 `QUEUED` can be cancelled too, and it is the cheap case: there is no container to ask, so the run is
 recorded `FAILED` with no steps and the worker never picks it up. Cancelling a run that has already
 finished is a 409. It is the one operation here a person invokes on purpose, so — unlike the intake —
-it is **not** hidden from `docs/openapi.yml`.
+it is **not** hidden from `docs/openapi.yml`. A queued push is also cancelled automatically when a
+newer push for the same repository and branch is accepted: it records `DEDUPED` and the newer run's
+id, which the run detail links to. Event-triggered runs are excluded because distinct trigger files
+on one branch are independent pipelines, not duplicates.
 
 ## What a restart costs
 

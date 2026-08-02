@@ -105,6 +105,17 @@ public class CiRunRepository implements PanacheRepositoryBase<CiRun, String> {
     return list("status = ?1 order by createdAt, id", CiRunStatus.QUEUED);
   }
 
+  /** Older queued push builds superseded by a newly accepted push on the same branch. */
+  public List<CiRun> listQueuedPushes(String repoId, String branch, String exceptRunId) {
+    return list(
+        "repoId = ?1 and branch = ?2 and status = ?3 and triggerType = ?4 and id <> ?5",
+        repoId,
+        branch,
+        CiRunStatus.QUEUED,
+        eu.wohlben.qits.ci.entity.CiTriggerType.POST_RECEIVE,
+        exceptRunId);
+  }
+
   /**
    * Every repository this instance has ever recorded a run for — half of what {@code KnownCiRepos}
    * offers the trigger engine as candidates, and the whole of what {@code GET /ci/api/repositories}

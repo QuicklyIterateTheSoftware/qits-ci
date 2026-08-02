@@ -157,6 +157,10 @@ public class CiRunService {
    */
   private static final String VERSION_FIELD = "version";
 
+  public static final String USER_CANCELLED = "USER_CANCELLED";
+  public static final String DEDUPED = "DEDUPED";
+  public static final int MAX_CANCELLATION_REASON_LENGTH = 255;
+
   @ConfigProperty(name = "qits.ci.output-max-chars")
   int outputMaxChars;
 
@@ -896,7 +900,18 @@ public class CiRunService {
     run.triggerType = CiTriggerType.POST_RECEIVE;
     run.configPath = CiConfigParser.CONFIG_PATH;
     // No step rows: they are written one at a time, terminal, as each step ends.
-    QuarkusTransaction.requiringNew().run(() -> runs.persist(run));
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              runs.persist(run);
+              runs.flush();
+              for (CiRun older : runs.listQueuedPushes(repoId, branch, run.id)) {
+                older.status = CiRunStatus.FAILED;
+                older.finishedAt = run.createdAt;
+                older.cancellationReason = DEDUPED;
+                older.supersededByRunId = run.id;
+              }
+            });
     return run;
   }
 
@@ -1125,6 +1140,11 @@ public class CiRunService {
    * nothing to stop, and telling the caller it does would be a lie it cannot check.
    */
   public void cancel(String runId) {
+    cancel(runId, null);
+  }
+
+  public void cancel(String runId, String requestedReason) {
+    String reason = cancellationReason(requestedReason);
     CiRun run = requireRun(runId);
     if (run.status != CiRunStatus.RUNNING && run.status != CiRunStatus.QUEUED) {
       throw new ConflictException(
@@ -1141,14 +1161,37 @@ public class CiRunService {
                   }
                   current.status = CiRunStatus.FAILED;
                   current.finishedAt = Instant.now();
+                  current.cancellationReason = reason;
+                  current.supersededByRunId = null;
                   return true;
                 });
     if (neverStarted) {
-      LOG.infof("CI run %s cancelled on request before it started", runId);
+      LOG.infof("CI run %s cancelled on request before it started (%s)", runId, reason);
       return;
     }
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              CiRun current = runs.findById(runId);
+              if (current != null) {
+                current.cancellationReason = reason;
+                current.supersededByRunId = null;
+              }
+            });
     runner.cancel(runId);
-    LOG.infof("CI run %s cancelled on request", runId);
+    LOG.infof("CI run %s cancelled on request (%s)", runId, reason);
+  }
+
+  private static String cancellationReason(String requestedReason) {
+    if (requestedReason == null || requestedReason.isBlank()) {
+      return USER_CANCELLED;
+    }
+    String reason = requestedReason.trim();
+    if (reason.length() > MAX_CANCELLATION_REASON_LENGTH) {
+      throw new eu.wohlben.qits.ci.error.BadRequestException(
+          "Cancellation reason must be at most " + MAX_CANCELLATION_REASON_LENGTH + " characters");
+    }
+    return reason;
   }
 
   /**

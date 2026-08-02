@@ -1,5 +1,7 @@
 package eu.wohlben.qits.ci.api;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.ci.control.CiIdentifiers;
 import eu.wohlben.qits.ci.control.CiRunService;
 import eu.wohlben.qits.ci.daemonhost.CiStepRelay;
@@ -12,6 +14,7 @@ import eu.wohlben.qits.ci.error.BadRequestException;
 import eu.wohlben.qits.ci.mapper.CiRunMapper;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
@@ -58,7 +61,11 @@ public class CiRunController {
 
   @Inject CiStepRelay relay;
 
+  @Inject ObjectMapper objectMapper;
+
   public record ListRunsResponse(List<CiRunDto> runs) {}
+
+  public record CancelRunRequest(String reason) {}
 
   /**
    * A repository's runs, newest-first — without step output (fetch a single run for that). The
@@ -232,12 +239,42 @@ public class CiRunController {
    */
   @POST
   @Path("/{runId}/cancel")
+  @Consumes(MediaType.WILDCARD)
   @Operation(summary = "Cancel a queued or running CI run")
   @APIResponse(responseCode = "202", description = "The run has been stopped or asked to stop")
   @APIResponse(responseCode = "404", description = "No such run")
   @APIResponse(responseCode = "409", description = "The run has already finished, so there is nothing to stop")
-  public Response cancelRun(@PathParam("runId") String runId) {
-    runService.cancel(runId);
+  public Response cancelRun(
+      @PathParam("runId") String runId,
+      @org.eclipse.microprofile.openapi.annotations.parameters.RequestBody(
+              required = false,
+              description = "Optional human-readable cancellation reason",
+              content =
+                  @org.eclipse.microprofile.openapi.annotations.media.Content(
+                      schema = @Schema(implementation = CancelRunRequest.class)))
+          String payload) {
+    runService.cancel(runId, cancellationReason(payload));
     return Response.accepted().build();
+  }
+
+  private String cancellationReason(String payload) {
+    if (payload == null || payload.isBlank()) {
+      return null;
+    }
+    try {
+      JsonNode request = objectMapper.readTree(payload);
+      JsonNode reason = request == null ? null : request.get("reason");
+      if (reason == null || reason.isNull()) {
+        return null;
+      }
+      if (!reason.isTextual()) {
+        throw new BadRequestException("Cancellation reason must be a string");
+      }
+      return reason.textValue();
+    } catch (BadRequestException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new BadRequestException("Invalid cancellation request");
+    }
   }
 }

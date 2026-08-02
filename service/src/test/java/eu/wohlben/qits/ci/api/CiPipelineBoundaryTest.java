@@ -169,6 +169,37 @@ public class CiPipelineBoundaryTest {
   }
 
   @Test
+  public void cancelAcceptsAnOptionalReason() throws Exception {
+    String repoId = seedOrigin();
+    String sha = pushBranchWithConfig(repoId, "ci-cancel-reason", CONFIG_GREEN);
+    CompletableFuture<String> started = new CompletableFuture<>();
+    CountDownLatch release = new CountDownLatch(1);
+    fakeRunner.during(
+        0,
+        spec -> {
+          started.complete(spec.runId());
+          try {
+            release.await(10, TimeUnit.SECONDS);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        });
+    postReceive(repoId, "ci-cancel-reason", ZERO_SHA, sha);
+    String runId = started.get(10, TimeUnit.SECONDS);
+
+    given()
+        .contentType("application/json")
+        .body("{\"reason\":\"superseded manually\"}")
+        .when()
+        .post("/ci/api/runs/" + runId + "/cancel")
+        .then()
+        .statusCode(202);
+    release.countDown();
+    Map<String, Object> run = awaitTerminalRun(repoId);
+    assertEquals("superseded manually", run.get("cancellationReason"));
+  }
+
+  @Test
   public void malformedConfigRecordsAConfigErrorRun() throws Exception {
     String repoId = seedOrigin();
     String sha = pushBranchWithConfig(repoId, "ci-broken", "steps: [unclosed\n");
