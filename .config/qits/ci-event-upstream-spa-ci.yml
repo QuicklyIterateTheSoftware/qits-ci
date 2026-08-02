@@ -15,6 +15,5 @@ steps:
       current=$(git ls-tree HEAD service/src/main/webui | awk '{print $3}')
       if [ "$current" = "$target" ]; then exit 0; fi
       git update-index --add --cacheinfo 160000,$target,service/src/main/webui
-      git -c user.name="qits release train" -c user.email="release-train@qits.local" commit -q \\
-        -m "bump(qits-spa-ci@$version): follow qits-spa-ci"
+      git -c user.name="qits release train" -c user.email="release-train@qits.local" commit -q -m "bump(qits-spa-ci@$version): follow qits-spa-ci"
       git push --force "$QITS_CI_REPOSITORY_URL" HEAD:refs/heads/maintenance/qits-spa-ci
