@@ -46,6 +46,7 @@
     </modules>
 
     <properties>
+        <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
@@ -140,7 +141,7 @@
     <repositories>
         <repository>
             <id>qits-maven</id>
-            <url>http://localhost:8081/artifacts/maven/maven</url>
+            <url>${qits.maven.repository.url}</url>
         </repository>
     </repositories>
 
