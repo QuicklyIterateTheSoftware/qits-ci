@@ -84,3 +84,41 @@ steps:
         -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
       docker rmi "$ref" || true
+
+  - image: qits/build-images/node-base:latest
+    branches:
+      - prefix: maintenance/
+    timeout-seconds: 300
+    script: |
+      set -eu
+      case "$QITS_CI_BRANCH" in
+        maintenance/*) ;;
+        *) echo "not a maintenance branch: $QITS_CI_BRANCH"; exit 1 ;;
+      esac
+      summary=$(git log -1 --format=%s)
+      node -e '
+        const [url, branch, summary] = process.argv.slice(1);
+        fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ branch, summary }),
+        }).then(async (res) => {
+          const text = await res.text();
+          let body = {};
+          try { body = JSON.parse(text); } catch {}
+          if (res.ok) {
+            console.log(`released ${body.version} as ${body.commitSha} from ${body.branch}`);
+            return;
+          }
+          if (res.status === 409 && body.reason === "ALREADY_INTEGRATED") {
+            console.log(`${branch} is already released - nothing to do`);
+            return;
+          }
+          console.error(`release refused: HTTP ${res.status} ${text}`);
+          process.exit(1);
+        }).catch((err) => {
+          console.error(`release call failed: ${err.message}`);
+          process.exit(1);
+        });
+      ' "$QITS_WORKSPACES_URL/workspaces/api/branches/release?repositoryId=$QITS_CI_REPO_ID" \
+        "$QITS_CI_BRANCH" "$summary"
