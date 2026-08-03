@@ -6,6 +6,7 @@ import io.quarkus.runtime.LaunchMode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -15,15 +16,27 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * step container with no step. It reuses the exact machinery {@code CiDaemonStepRunner} drives a
  * real step through -- {@link CiDaemonRegistry#registerLaunch}, {@link CiDaemonLauncher#launch},
  * {@link CiDaemonRegistry#awaitRegistered}, {@link CiDaemonLauncher#logs} on failure, {@link
- * CiDaemonRegistry#awaitHello} and {@link CiDaemonLauncher#reap} -- so probing a candidate
- * exercises the same production download path a real run would.
+ * CiDaemonRegistry#awaitHello}, {@link CiDaemonRegistry#awaitAckConfirmed} and {@link
+ * CiDaemonLauncher#reap} -- so probing a candidate exercises the same production download path a
+ * real run would.
+ *
+ * <p><b>A verdict is a round trip, not a wave.</b> {@code Hello} proves the daemon can reach the
+ * host; it says nothing about whether the host can reach the daemon, and a real run depends on
+ * exactly that direction for everything from {@code Ack} onward, {@code RunStep} above all. So
+ * {@link #awaitVerdict} does not settle {@link DaemonProbe.Verdict#PROVEN} at {@code Hello} the way
+ * an earlier version of this class did: it also waits for {@link
+ * eu.wohlben.qits.cidaemon.protocol.AckReceived}, the daemon's confirmation that the host's own
+ * {@code Ack} arrived. A daemon that dials, says {@code Hello} and then never confirms is {@link
+ * DaemonProbe.Verdict#REJECTED} at the same deadline as every other unproven case -- it looked
+ * alive and was never actually listening.
  *
  * <p><b>What it deliberately does not do.</b> It never waits for {@code Initialized}: the daemon
  * clones only after it dials, and a probe has no repository to hand it, so {@link #PROBE_REPO_ID}
  * is syntactically valid (it passes {@code CiIdentifiers.requireRepoId}) but names nothing a clone
- * can resolve. The container is reaped the moment the verdict is in, which is what kills that clone
- * along with it. It is not a host-side execution of the binary either -- the daemon still runs
- * inside the sandbox {@link CiDaemonLauncher#buildArgv} builds, exactly as a step's daemon does.
+ * can resolve. The container is reaped the moment the verdict is in -- now strictly after {@code
+ * AckReceived} or the deadline, never at {@code Hello} -- which is what kills that clone along with
+ * it. It is not a host-side execution of the binary either -- the daemon still runs inside the
+ * sandbox {@link CiDaemonLauncher#buildArgv} builds, exactly as a step's daemon does.
  *
  * <p><b>Skipped under {@code LaunchMode.TEST}</b>, the same posture {@link
  * CiDaemonLauncher#onStart} takes toward its own docker work: an ordinary {@code @QuarkusTest} that
@@ -73,7 +86,12 @@ public class CiDaemonContainerProbe implements DaemonProbe {
 
   /** {@link #probe} with the test-mode guard removed -- see the class javadoc. */
   ProbeResult probeUnconditionally(String version) {
-    String runId = "daemon-probe-" + UUID.randomUUID();
+    // A bare UUID, not "daemon-probe-" + UUID: the old prefix made every probe's runId start with
+    // the literal "daemon-p", so CiDaemonLauncher.containerName's blind 8-character substring named
+    // every probe container the same thing -- the incident this fixes. A bare UUID's own first 8
+    // characters are already high-entropy hex, and containerName no longer trusts a prefix alone
+    // anyway (it also folds in a disambiguator over the whole runId) -- see its own javadoc.
+    String runId = UUID.randomUUID().toString();
     CiDaemonRegistry.Credentials credentials = registry.registerLaunch(runId, 0, null);
     String containerName = CiDaemonLauncher.containerName(runId, 0);
     try {
@@ -105,30 +123,53 @@ public class CiDaemonContainerProbe implements DaemonProbe {
   }
 
   /**
-   * The verdict for an already-launched (or already-dialled, in a test) daemon: registered and
-   * capability-matched is {@link Verdict#PROVEN}; anything else observable is {@link
-   * Verdict#REJECTED}. Package-private so {@code CiDaemonContainerProbeTest} can drive it directly
-   * against {@link FakeCiDaemon} with no container and no docker at all.
+   * The verdict for an already-launched (or already-dialled, in a test) daemon: registered,
+   * capability-matched, <em>and</em> confirmed the host's {@code Ack} is {@link Verdict#PROVEN};
+   * anything else observable is {@link Verdict#REJECTED}. Package-private so {@code
+   * CiDaemonContainerProbeTest} can drive it directly against {@link FakeCiDaemon} with no
+   * container and no docker at all.
+   *
+   * <p>All three stages -- registration, {@code Hello}, and the {@code AckReceived} confirmation --
+   * share one deadline rather than getting {@code registerTimeoutSeconds} apiece. A daemon that is
+   * merely slow to dial must not also get a full fresh budget to confirm; the whole round trip is
+   * one thing the probe is proving, and {@link #probeUnconditionally}'s reap happens only once this
+   * method returns, so a shared deadline is also what keeps the container's total lifetime bounded
+   * by the one configured number.
    */
   ProbeResult awaitVerdict(String daemonId, String containerName) {
-    Duration deadline = Duration.ofSeconds(registerTimeoutSeconds);
-    if (!registry.awaitRegistered(daemonId, deadline)) {
+    Instant deadline = Instant.now().plusSeconds(registerTimeoutSeconds);
+    if (!registry.awaitRegistered(daemonId, remaining(deadline))) {
       // Never dialled -- the bootstrap's own stderr is the only account, captured before the reap.
       return new ProbeResult(Verdict.REJECTED, launcher.logs(containerName));
     }
     // Registration completes at websocket admission, one round trip before the daemon has said
     // anything -- reading capabilityVersionOf() straight after would see -1/null for a daemon whose
-    // Hello simply has not arrived yet. Wait on the Hello itself instead, with the same deadline: a
-    // real daemon says Hello immediately, so registered-but-silent within it is a genuine REJECTED.
-    Integer capabilityVersion = registry.awaitHello(daemonId, deadline);
-    if (capabilityVersion != null && capabilityVersion == CiDaemonProtocol.CAPABILITY_VERSION) {
-      return new ProbeResult(Verdict.PROVEN, "");
+    // Hello simply has not arrived yet. Wait on the Hello itself instead: a real daemon says Hello
+    // immediately, so registered-but-silent within the shared deadline is a genuine REJECTED.
+    Integer capabilityVersion = registry.awaitHello(daemonId, remaining(deadline));
+    if (capabilityVersion == null || capabilityVersion != CiDaemonProtocol.CAPABILITY_VERSION) {
+      return new ProbeResult(
+          Verdict.REJECTED,
+          "ci-daemon announced capability "
+              + capabilityVersion
+              + ", this host speaks "
+              + CiDaemonProtocol.CAPABILITY_VERSION);
     }
-    return new ProbeResult(
-        Verdict.REJECTED,
-        "ci-daemon announced capability "
-            + capabilityVersion
-            + ", this host speaks "
-            + CiDaemonProtocol.CAPABILITY_VERSION);
+    // Hello only proves daemon→host. The host's own Ack -- sent the moment Hello was processed,
+    // above -- is host→daemon, exactly the direction a real run depends on for everything from here
+    // on (RunStep not least). A daemon that never confirms it arrived looked alive and was never
+    // actually listening.
+    if (!registry.awaitAckConfirmed(daemonId, remaining(deadline))) {
+      return new ProbeResult(
+          Verdict.REJECTED, "ci-daemon never confirmed the host's Ack (no host→daemon proof)");
+    }
+    return new ProbeResult(Verdict.PROVEN, "");
+  }
+
+  /** What is left of {@code deadline}, clamped to non-negative so a slow stage cannot borrow time
+   *  a later {@code await} would read as a longer budget than the probe actually has left. */
+  private static Duration remaining(Instant deadline) {
+    Duration left = Duration.between(Instant.now(), deadline);
+    return left.isNegative() ? Duration.ZERO : left;
   }
 }

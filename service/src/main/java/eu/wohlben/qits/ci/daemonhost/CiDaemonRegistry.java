@@ -1,6 +1,7 @@
 package eu.wohlben.qits.ci.daemonhost;
 
 import eu.wohlben.qits.cidaemon.protocol.Ack;
+import eu.wohlben.qits.cidaemon.protocol.AckReceived;
 import eu.wohlben.qits.cidaemon.protocol.Cancel;
 import eu.wohlben.qits.cidaemon.protocol.CiDaemonMessage;
 import eu.wohlben.qits.cidaemon.protocol.CiDaemonProtocol;
@@ -40,8 +41,9 @@ import org.jboss.logging.Logger;
  *
  * <p><b>The blocking bridge.</b> Each run executes on one worker ({@code CiRunService}), one step at
  * a time, and that thread used to park on a {@code docker run} process. It now parks
- * here instead: {@link #awaitRegistered}, {@link #awaitHello}, {@link #awaitInitialized} and {@link
- * #awaitFinished} each block on one {@code CompletableFuture} per lifecycle transition while chunks
+ * here instead: {@link #awaitRegistered}, {@link #awaitHello}, {@link #awaitAckConfirmed}, {@link
+ * #awaitInitialized} and {@link #awaitFinished} each block on one {@code CompletableFuture} per
+ * lifecycle transition while chunks
  * flow to the step's listener as they arrive. The failure mode that swap introduces is anything that
  * never returns
  * wedging all of CI, so <b>nothing in this package waits without a deadline</b> — and that covers
@@ -251,6 +253,24 @@ public class CiDaemonRegistry {
     return version < 0 ? null : version;
   }
 
+  /**
+   * Block until the daemon's {@link AckReceived} confirms the host's {@link Ack} arrived, the
+   * launch is reaped, or the deadline expires. This is the third leg of the round trip {@link
+   * #awaitRegistered} and {@link #awaitHello} start: those two prove the daemon can reach the host
+   * (it dialled, it said {@code Hello}); this is the only one that proves the reverse, host→daemon
+   * delivery — which is what a real run actually depends on, since {@code Ack} and every frame after
+   * it (not least {@code RunStep}) travel that direction.
+   *
+   * <p>No real run calls this — {@link CiDaemonStepRunner} moves straight from {@link
+   * #awaitRegistered} to {@link #awaitInitialized}, so a real container's {@link AckReceived} is
+   * simply recorded here and never awaited. Only {@code CiDaemonContainerProbe} does, because a
+   * probe's whole job is to prove the round trip before anything is pinned; see its javadoc.
+   */
+  public boolean awaitAckConfirmed(String daemonId, Duration timeout) {
+    Launch launch = launches.get(daemonId);
+    return launch != null && Boolean.TRUE.equals(await(launch.ackConfirmed, timeout, Boolean.FALSE));
+  }
+
   /** Block until the daemon reports its checkout done, fails it, drops, or the deadline expires. */
   public Initialization awaitInitialized(String daemonId, Duration timeout) {
     Launch launch = launches.get(daemonId);
@@ -316,6 +336,7 @@ public class CiDaemonRegistry {
     launch.phase = Phase.DONE;
     launch.registered.complete(Boolean.FALSE);
     launch.helloReceived.complete(-1);
+    launch.ackConfirmed.complete(Boolean.FALSE);
     launch.initialized.complete(Initialization.of(Initialization.Status.CONNECTION_LOST));
     launch.finished.complete(Completion.of(Completion.Status.CONNECTION_LOST));
     WebSocketConnection connection = launch.connection;
@@ -448,6 +469,12 @@ public class CiDaemonRegistry {
         }
         send(launch, new Ack(CiDaemonProtocol.CAPABILITY_VERSION));
       }
+      case AckReceived ignored -> {
+        // Proves host→daemon delivery. Real runs never await this (see #awaitAckConfirmed); it is
+        // recorded unconditionally so a probe running concurrently with nothing else in this
+        // switch statement still sees it.
+        launch.ackConfirmed.complete(Boolean.TRUE);
+      }
       case Heartbeat ignored -> {
         /* liveness only — the open socket is the signal */
       }
@@ -491,6 +518,7 @@ public class CiDaemonRegistry {
       launch.connection = null;
     }
     launch.helloReceived.complete(-1);
+    launch.ackConfirmed.complete(Boolean.FALSE);
     launch.initialized.complete(Initialization.of(Initialization.Status.CONNECTION_LOST));
     launch.finished.complete(Completion.of(Completion.Status.CONNECTION_LOST));
     LOG.debugf("ci-daemon %s disconnected (connection %s)", daemonId, connection.id());
@@ -595,6 +623,11 @@ public class CiDaemonRegistry {
     private final CompletableFuture<Boolean> registered = new CompletableFuture<>();
     /** Completed by the {@link Hello} branch of {@link #onMessage} — see {@link #awaitHello}. */
     private final CompletableFuture<Integer> helloReceived = new CompletableFuture<>();
+    /**
+     * Completed by the {@link AckReceived} branch of {@link #onMessage} — see {@link
+     * #awaitAckConfirmed}.
+     */
+    private final CompletableFuture<Boolean> ackConfirmed = new CompletableFuture<>();
     private final CompletableFuture<Initialization> initialized = new CompletableFuture<>();
     private final CompletableFuture<Completion> finished = new CompletableFuture<>();
 

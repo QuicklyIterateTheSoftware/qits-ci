@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import eu.wohlben.qits.ci.control.DaemonProbe.ProbeResult;
 import eu.wohlben.qits.ci.control.DaemonProbe.Verdict;
 import eu.wohlben.qits.cidaemon.protocol.Ack;
+import eu.wohlben.qits.cidaemon.protocol.AckReceived;
 import eu.wohlben.qits.cidaemon.protocol.CiDaemonProtocol;
 import eu.wohlben.qits.cidaemon.protocol.Hello;
 import io.quarkus.arc.ClientProxy;
@@ -16,10 +17,16 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import java.net.URI;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -33,6 +40,11 @@ import org.junit.jupiter.api.Test;
  * {@code CiDaemonLauncher.onStart} by hand-wiring its own instance. The real container path --
  * {@link CiDaemonContainerProbe#probeUnconditionally} -- is {@code CiDaemonContainerProbeIT}'s,
  * tagged {@code extended}.
+ *
+ * <p>A round trip needs both halves proven, so most of these scripts now run one frame longer than
+ * they used to: {@code Hello} gets an {@code Ack} as before, and a candidate that means to be
+ * {@link Verdict#PROVEN} answers it with {@link AckReceived} -- the confirmation that the host's
+ * own frame actually arrived, which {@code Hello} alone never demonstrated.
  */
 @QuarkusTest
 public class CiDaemonContainerProbeTest {
@@ -105,6 +117,7 @@ public class CiDaemonContainerProbeTest {
       registry.awaitRegistered(credentials.daemonId(), SOON);
       daemon.send(new Hello(credentials.daemonId(), CiDaemonProtocol.CAPABILITY_VERSION));
       assertInstanceOf(Ack.class, daemon.next(SOON));
+      daemon.send(new AckReceived());
 
       ProbeResult result =
           probe.awaitVerdict(
@@ -113,6 +126,115 @@ public class CiDaemonContainerProbeTest {
     } finally {
       registry.reap(credentials.daemonId());
     }
+  }
+
+  /**
+   * The regression this whole change exists to fix: {@code Hello} alone used to be enough for
+   * {@link Verdict#PROVEN}, which proved only daemon→host. A daemon that never confirms the Ack
+   * looked identical to a working one right up to the moment a real run needed to send it a {@code
+   * RunStep} and nothing happened.
+   */
+  @Test
+  public void aDaemonThatSaysHelloButNeverConfirmsTheAckIsRejectedAtTheDeadline() throws Exception {
+    ClientProxy.unwrap(probe).registerTimeoutSeconds = 1;
+
+    CiDaemonRegistry.Credentials credentials =
+        registry.registerLaunch("probe-no-ack-confirmation", 0, null);
+    try (FakeCiDaemon daemon =
+        FakeCiDaemon.dial(controlSocket, credentials.daemonId(), credentials.secret())) {
+      registry.awaitRegistered(credentials.daemonId(), SOON);
+      daemon.send(new Hello(credentials.daemonId(), CiDaemonProtocol.CAPABILITY_VERSION));
+      assertInstanceOf(Ack.class, daemon.next(SOON));
+      // Unlike a real ci-daemon, this fake reads the Ack and says nothing back.
+
+      ProbeResult result =
+          probe.awaitVerdict(
+              credentials.daemonId(),
+              CiDaemonLauncher.containerName("probe-no-ack-confirmation", 0));
+      assertEquals(Verdict.REJECTED, result.verdict());
+    } finally {
+      registry.reap(credentials.daemonId());
+    }
+  }
+
+  /**
+   * The other way the Ack can go unconfirmed: the daemon is gone before it can act on it at all,
+   * whether or not the host's send actually reached the wire. Distinguishable from the never-says-
+   * hello case only by what got that far -- the verdict is the same {@link Verdict#REJECTED}.
+   */
+  @Test
+  public void aDaemonThatDisconnectsRightAfterHelloIsRejectedBecauseTheAckIsNeverConfirmed()
+      throws Exception {
+    ClientProxy.unwrap(probe).registerTimeoutSeconds = 1;
+
+    CiDaemonRegistry.Credentials credentials =
+        registry.registerLaunch("probe-ack-undelivered", 0, null);
+    try {
+      try (FakeCiDaemon daemon =
+          FakeCiDaemon.dial(controlSocket, credentials.daemonId(), credentials.secret())) {
+        registry.awaitRegistered(credentials.daemonId(), SOON);
+        daemon.send(new Hello(credentials.daemonId(), CiDaemonProtocol.CAPABILITY_VERSION));
+        // Closed here, on purpose: this daemon will never read whatever the host sent back, Ack
+        // included, so it can never confirm it either.
+      }
+
+      ProbeResult result =
+          probe.awaitVerdict(
+              credentials.daemonId(), CiDaemonLauncher.containerName("probe-ack-undelivered", 0));
+      assertEquals(Verdict.REJECTED, result.verdict());
+    } finally {
+      registry.reap(credentials.daemonId());
+    }
+  }
+
+  /**
+   * The cosmetic regression this feature also fixes: verdict used to settle at {@code Hello}, so a
+   * successful probe's reap raced the host's own {@code Ack} write and logged {@code Could not send
+   * Ack ... WebSocket is closed} on a probe that had, in fact, succeeded. Waiting for {@link
+   * AckReceived} means the reap can no longer happen before that send is not just attempted but
+   * answered, so this asserts the WARN is gone rather than trusting the reordering above to imply
+   * it.
+   */
+  @Test
+  public void aSuccessfulProbeLogsNoFailedAckSend() throws Exception {
+    CiDaemonRegistry.Credentials credentials =
+        registry.registerLaunch("probe-clean-ack-send", 0, null);
+    java.util.logging.Logger registryLog =
+        java.util.logging.Logger.getLogger(CiDaemonRegistry.class.getName());
+    List<String> warnings = Collections.synchronizedList(new ArrayList<>());
+    Handler capture =
+        new Handler() {
+          @Override
+          public void publish(LogRecord record) {
+            if (record.getLevel().intValue() >= Level.WARNING.intValue()) {
+              warnings.add(record.getMessage());
+            }
+          }
+
+          @Override
+          public void flush() {}
+
+          @Override
+          public void close() {}
+        };
+    registryLog.addHandler(capture);
+    try (FakeCiDaemon daemon =
+        FakeCiDaemon.dial(controlSocket, credentials.daemonId(), credentials.secret())) {
+      registry.awaitRegistered(credentials.daemonId(), SOON);
+      daemon.send(new Hello(credentials.daemonId(), CiDaemonProtocol.CAPABILITY_VERSION));
+      assertInstanceOf(Ack.class, daemon.next(SOON));
+      daemon.send(new AckReceived());
+
+      ProbeResult result =
+          probe.awaitVerdict(
+              credentials.daemonId(), CiDaemonLauncher.containerName("probe-clean-ack-send", 0));
+      assertEquals(Verdict.PROVEN, result.verdict());
+    } finally {
+      registryLog.removeHandler(capture);
+      registry.reap(credentials.daemonId());
+    }
+    List<String> failedSends = warnings.stream().filter(m -> m != null && m.contains("Could not send")).toList();
+    assertEquals(List.of(), failedSends, "a successful probe must not race its own Ack send: " + warnings);
   }
 
   /**
@@ -146,6 +268,46 @@ public class CiDaemonContainerProbeTest {
 
       daemon.send(new Hello(credentials.daemonId(), CiDaemonProtocol.CAPABILITY_VERSION));
       assertInstanceOf(Ack.class, daemon.next(SOON));
+      daemon.send(new AckReceived());
+
+      ProbeResult result = verdict.get(10, TimeUnit.SECONDS);
+      assertEquals(Verdict.PROVEN, result.verdict());
+    } finally {
+      registry.reap(credentials.daemonId());
+      executor.shutdownNow();
+    }
+  }
+
+  /**
+   * The same regression-proof as {@link #aDaemonThatDelaysHelloPastRegistrationIsStillProvenOnceItArrives},
+   * one stage later: a verdict that settled at {@code Hello} would already have answered {@code
+   * PROVEN} here, before the daemon ever confirmed the host's {@code Ack} arrived.
+   */
+  @Test
+  public void aDaemonThatDelaysItsAckConfirmationIsStillProvenOnceItArrives() throws Exception {
+    CiDaemonRegistry.Credentials credentials =
+        registry.registerLaunch("probe-delayed-confirmation", 0, null);
+    ExecutorService executor = Executors.newSingleThreadExecutor();
+    try (FakeCiDaemon daemon =
+        FakeCiDaemon.dial(controlSocket, credentials.daemonId(), credentials.secret())) {
+      registry.awaitRegistered(credentials.daemonId(), SOON);
+      daemon.send(new Hello(credentials.daemonId(), CiDaemonProtocol.CAPABILITY_VERSION));
+      assertInstanceOf(Ack.class, daemon.next(SOON));
+
+      Future<ProbeResult> verdict =
+          executor.submit(
+              () ->
+                  probe.awaitVerdict(
+                      credentials.daemonId(),
+                      CiDaemonLauncher.containerName("probe-delayed-confirmation", 0)));
+
+      // Hello answered, Ack read, and still nothing confirmed -- the gap the old Hello-only verdict
+      // could not see at all.
+      Thread.sleep(500);
+      assertFalse(
+          verdict.isDone(), "awaitVerdict must still be waiting for AckReceived, not the Ack read");
+
+      daemon.send(new AckReceived());
 
       ProbeResult result = verdict.get(10, TimeUnit.SECONDS);
       assertEquals(Verdict.PROVEN, result.verdict());

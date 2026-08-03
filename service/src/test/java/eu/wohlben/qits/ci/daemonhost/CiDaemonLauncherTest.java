@@ -85,7 +85,7 @@ public class CiDaemonLauncherTest {
             "run",
             "-d",
             "--name",
-            "qits-ci-01234567-2",
+            "qits-ci-01234567-412621e6-2",
             "--network",
             "qits-net",
             "--add-host=host.docker.internal:host-gateway",
@@ -306,8 +306,41 @@ public class CiDaemonLauncherTest {
   }
 
   @Test
-  public void shortRunIdsAreUsedWholeInTheContainerName() {
-    assertEquals("qits-ci-abc-0", CiDaemonLauncher.containerName("abc", 0));
+  public void shortRunIdsStillNameAValidStableContainer() {
+    // "Used whole" no longer literally holds -- a disambiguator now rides alongside even a runId
+    // short enough to need no truncation, because containerName must not assume any runId shape.
+    // What still holds: the hint stays readable, and the same input always names the same container.
+    String name = CiDaemonLauncher.containerName("abc", 0);
+    assertEquals("qits-ci-abc-17862-0", name);
+    assertEquals(name, CiDaemonLauncher.containerName("abc", 0), "must be deterministic");
+    assertTrue(name.matches("[a-zA-Z0-9][a-zA-Z0-9_.-]*"), "must stay inside docker's name charset");
+  }
+
+  @Test
+  public void twoRunIdsSharingAnEightCharacterPrefixNeverCollide() {
+    // The literal shape of today's incident: every probe runId used to be "daemon-probe-" + a UUID,
+    // so the blind 8-character substring was always "daemon-p" and two concurrent probes always
+    // named the same container. Both runIds below still share that same 8-character prefix; the
+    // disambiguator -- derived from the WHOLE runId -- is what keeps their container names apart now.
+    String a = CiDaemonLauncher.containerName("daemon-probe-11111111-1111-1111-1111-111111111111", 0);
+    String b = CiDaemonLauncher.containerName("daemon-probe-22222222-2222-2222-2222-222222222222", 0);
+    assertTrue(a.startsWith("qits-ci-daemon-p-"), a);
+    assertTrue(b.startsWith("qits-ci-daemon-p-"), b);
+    assertFalse(a.equals(b), "runIds sharing an 8-char prefix must still name different containers");
+  }
+
+  @Test
+  public void twoFreshProbeRunIdsNeverCollide() {
+    // The concrete case this incident hit, with CiDaemonContainerProbe's own (now bare-UUID) runId
+    // generation: two distinct random UUIDs must not collide on the resulting container name. Not a
+    // guarantee about UUID collisions in general -- just that containerName does not throw the
+    // entropy away the way the old blind prefix did.
+    String runIdA = java.util.UUID.randomUUID().toString();
+    String runIdB = java.util.UUID.randomUUID().toString();
+    assertFalse(runIdA.equals(runIdB), "test setup: the two random UUIDs must differ");
+    assertFalse(
+        CiDaemonLauncher.containerName(runIdA, 0).equals(CiDaemonLauncher.containerName(runIdB, 0)),
+        "two distinct probe runIds must not collide on the container name");
   }
 
   // The boot-time shape check that used to live here (daemonVersionComplaint) is gone with the

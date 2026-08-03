@@ -482,9 +482,28 @@ public class CiDaemonLauncher {
     return containerGitUrl.replaceAll("/+$", "") + "/git/" + repoId;
   }
 
-  /** One name shape and one label convention, shared by the launch, the reap and the boot sweep. */
+  /**
+   * One name shape and one label convention, shared by the launch, the reap and the boot sweep.
+   *
+   * <p><b>The leading characters of {@code runId} are a human hint, never the whole name.</b> Two
+   * different run ids that happen to share their first 8 characters must never collide on the
+   * resulting container name -- which a blind 8-character prefix does not guarantee, and which is
+   * exactly the incident this guards against: every probe run id used to start with the literal
+   * {@code "daemon-probe-"} constant, so its first 8 characters were always {@code "daemon-p"} and
+   * two concurrent probes always named the same container. A short disambiguator derived from the
+   * <em>whole</em> {@code runId} rides alongside the hint instead, so a shared prefix is no longer
+   * enough to collide -- see {@code CiDaemonLauncherTest} for the worked example, including the case
+   * this incident actually hit.
+   *
+   * <p>{@code Integer.toHexString(runId.hashCode())} is deterministic: the same {@code runId} always
+   * names the same container, which matters because {@link #reap} and the label-filtered boot sweep
+   * both have to find what {@link #launch} started. Its output is hex digits only, already inside
+   * docker's container-name charset ({@code [a-zA-Z0-9][a-zA-Z0-9_.-]*}), so nothing further needs
+   * sanitizing.
+   */
   static String containerName(String runId, int stepIndex) {
     String shortRun = runId.length() > 8 ? runId.substring(0, 8) : runId;
-    return "qits-ci-" + shortRun + "-" + stepIndex;
+    String disambiguator = Integer.toHexString(runId.hashCode());
+    return "qits-ci-" + shortRun + "-" + disambiguator + "-" + stepIndex;
   }
 }
