@@ -15,7 +15,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * step container with no step. It reuses the exact machinery {@code CiDaemonStepRunner} drives a
  * real step through -- {@link CiDaemonRegistry#registerLaunch}, {@link CiDaemonLauncher#launch},
  * {@link CiDaemonRegistry#awaitRegistered}, {@link CiDaemonLauncher#logs} on failure, {@link
- * CiDaemonRegistry#capabilityVersionOf} and {@link CiDaemonLauncher#reap} -- so probing a candidate
+ * CiDaemonRegistry#awaitHello} and {@link CiDaemonLauncher#reap} -- so probing a candidate
  * exercises the same production download path a real run would.
  *
  * <p><b>What it deliberately does not do.</b> It never waits for {@code Initialized}: the daemon
@@ -111,11 +111,16 @@ public class CiDaemonContainerProbe implements DaemonProbe {
    * against {@link FakeCiDaemon} with no container and no docker at all.
    */
   ProbeResult awaitVerdict(String daemonId, String containerName) {
-    if (!registry.awaitRegistered(daemonId, Duration.ofSeconds(registerTimeoutSeconds))) {
+    Duration deadline = Duration.ofSeconds(registerTimeoutSeconds);
+    if (!registry.awaitRegistered(daemonId, deadline)) {
       // Never dialled -- the bootstrap's own stderr is the only account, captured before the reap.
       return new ProbeResult(Verdict.REJECTED, launcher.logs(containerName));
     }
-    Integer capabilityVersion = registry.capabilityVersionOf(daemonId);
+    // Registration completes at websocket admission, one round trip before the daemon has said
+    // anything -- reading capabilityVersionOf() straight after would see -1/null for a daemon whose
+    // Hello simply has not arrived yet. Wait on the Hello itself instead, with the same deadline: a
+    // real daemon says Hello immediately, so registered-but-silent within it is a genuine REJECTED.
+    Integer capabilityVersion = registry.awaitHello(daemonId, deadline);
     if (capabilityVersion != null && capabilityVersion == CiDaemonProtocol.CAPABILITY_VERSION) {
       return new ProbeResult(Verdict.PROVEN, "");
     }

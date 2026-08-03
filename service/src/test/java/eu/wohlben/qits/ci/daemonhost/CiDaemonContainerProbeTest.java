@@ -1,6 +1,7 @@
 package eu.wohlben.qits.ci.daemonhost;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
@@ -15,6 +16,10 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import java.net.URI;
 import java.time.Duration;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -105,6 +110,67 @@ public class CiDaemonContainerProbeTest {
           probe.awaitVerdict(
               credentials.daemonId(), CiDaemonLauncher.containerName("probe-matching-capability", 0));
       assertEquals(Verdict.PROVEN, result.verdict());
+    } finally {
+      registry.reap(credentials.daemonId());
+    }
+  }
+
+  /**
+   * The regression: registration completes at websocket admission, one round trip before a real
+   * daemon has said anything at all. The bug read the capability version right there and rejected
+   * every genuine daemon (production log: "announced capability null"). Every other test here dials
+   * and says Hello back-to-back, so {@code awaitVerdict} never actually observed the gap between the
+   * two -- this test forces it: the verdict is started the moment registration is confirmed, proven
+   * still pending across a real sleep (which is what the bug would not have been -- it would already
+   * have answered {@code REJECTED}), and only then given its Hello.
+   */
+  @Test
+  public void aDaemonThatDelaysHelloPastRegistrationIsStillProvenOnceItArrives() throws Exception {
+    CiDaemonRegistry.Credentials credentials =
+        registry.registerLaunch("probe-delayed-hello", 0, null);
+    ExecutorService executor = Executors.newSingleThreadExecutor();
+    try (FakeCiDaemon daemon =
+        FakeCiDaemon.dial(controlSocket, credentials.daemonId(), credentials.secret())) {
+      registry.awaitRegistered(credentials.daemonId(), SOON);
+
+      Future<ProbeResult> verdict =
+          executor.submit(
+              () ->
+                  probe.awaitVerdict(
+                      credentials.daemonId(), CiDaemonLauncher.containerName("probe-delayed-hello", 0)));
+
+      // The gap the bug fell into: registered, and nothing said yet. A sleep this long is well past
+      // the moment the old code would have already answered REJECTED off a stale capability read.
+      Thread.sleep(500);
+      assertFalse(verdict.isDone(), "awaitVerdict must still be waiting for Hello, not the admission");
+
+      daemon.send(new Hello(credentials.daemonId(), CiDaemonProtocol.CAPABILITY_VERSION));
+      assertInstanceOf(Ack.class, daemon.next(SOON));
+
+      ProbeResult result = verdict.get(10, TimeUnit.SECONDS);
+      assertEquals(Verdict.PROVEN, result.verdict());
+    } finally {
+      registry.reap(credentials.daemonId());
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  public void aDaemonThatRegistersButNeverSaysHelloIsRejectedAtTheDeadline() throws Exception {
+    ClientProxy.unwrap(probe).registerTimeoutSeconds = 1;
+
+    CiDaemonRegistry.Credentials credentials =
+        registry.registerLaunch("probe-registers-no-hello", 0, null);
+    try (FakeCiDaemon daemon =
+        FakeCiDaemon.dial(controlSocket, credentials.daemonId(), credentials.secret())) {
+      registry.awaitRegistered(credentials.daemonId(), SOON);
+
+      // Registered, but this daemon -- unlike a real one -- never says Hello. A real daemon says it
+      // immediately, so registered-but-silent for the whole deadline is a genuine REJECTED.
+      ProbeResult result =
+          probe.awaitVerdict(
+              credentials.daemonId(), CiDaemonLauncher.containerName("probe-registers-no-hello", 0));
+      assertEquals(Verdict.REJECTED, result.verdict());
     } finally {
       registry.reap(credentials.daemonId());
     }
