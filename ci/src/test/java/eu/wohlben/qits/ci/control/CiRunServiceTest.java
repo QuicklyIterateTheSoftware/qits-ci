@@ -552,6 +552,7 @@ public class CiRunServiceTest extends CiTestSupport {
     forgetLoadedEntities();
     CiRun run = soleRun();
     assertEquals(CiRunStatus.FAILED, run.status);
+    assertEquals(CiRunService.USER_CANCELLED, run.cancellationReason);
     List<CiStep> recorded = service.stepsFor(run.id);
     assertEquals(CiStepStatus.FAILED, recorded.get(0).status);
     assertTrue(recorded.get(0).output.contains("cancelled"), recorded.get(0).output);
@@ -560,6 +561,82 @@ public class CiRunServiceTest extends CiTestSupport {
     // The runner was actually asked to stop the container, not just flagged.
     assertEquals(List.of(run.id), fakeRunner.cancelled());
     assertEquals(1, fakeRunner.executed().size(), "step 1 must never have been launched");
+  }
+
+  @Test
+  public void aNewPushDedupesOlderQueuedPushesOnTheSameBranch() throws Exception {
+    repoId = UUID.randomUUID().toString();
+    String blockerSha = "1".repeat(40);
+    String olderSha = "2".repeat(40);
+    String newerSha = "3".repeat(40);
+    String otherBranchSha = "4".repeat(40);
+    fakeConfig.put(repoId, blockerSha, ConfigLookup.found(CONFIG_TWO_STEPS));
+    fakeConfig.put(repoId, olderSha, ConfigLookup.found(CONFIG_TWO_STEPS));
+    fakeConfig.put(repoId, newerSha, ConfigLookup.found(CONFIG_TWO_STEPS));
+    fakeConfig.put(repoId, otherBranchSha, ConfigLookup.found(CONFIG_TWO_STEPS));
+
+    CompletableFuture<Void> blockerStarted = new CompletableFuture<>();
+    CountDownLatch releaseBlocker = new CountDownLatch(1);
+    fakeRunner.during(
+        0,
+        spec -> {
+          if (!spec.sha().equals(blockerSha)) {
+            return;
+          }
+          blockerStarted.complete(null);
+          try {
+            releaseBlocker.await(10, TimeUnit.SECONDS);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        });
+
+    service.onPostReceive(repoId, "blocker", "0".repeat(40), blockerSha);
+    blockerStarted.get(10, TimeUnit.SECONDS);
+    service.onPostReceive(repoId, "main", olderSha, olderSha);
+    service.onPostReceive(repoId, "feature", olderSha, otherBranchSha);
+    service.onPostReceive(repoId, "main", olderSha, newerSha);
+    releaseBlocker.countDown();
+    service.awaitIdle();
+    forgetLoadedEntities();
+
+    List<CiRun> runs = service.runsFor(repoId);
+    CiRun older = runs.stream().filter(run -> run.commitSha.equals(olderSha)).findFirst().orElseThrow();
+    CiRun newer = runs.stream().filter(run -> run.commitSha.equals(newerSha)).findFirst().orElseThrow();
+    CiRun otherBranch =
+        runs.stream().filter(run -> run.commitSha.equals(otherBranchSha)).findFirst().orElseThrow();
+    assertEquals(CiRunStatus.FAILED, older.status);
+    assertEquals(CiRunService.DEDUPED, older.cancellationReason);
+    assertEquals(newer.id, older.supersededByRunId);
+    assertNull(older.daemonVersion, "a deduped queued build never starts");
+    assertEquals(CiRunStatus.SUCCESS, newer.status);
+    assertEquals(CiRunStatus.SUCCESS, otherBranch.status, "another branch is independent");
+    assertEquals(0, service.stepsFor(older.id).size());
+  }
+
+  @Test
+  public void manualCancellationPersistsTheOptionalReason() throws Exception {
+    seedConfig(CONFIG_TWO_STEPS);
+    CompletableFuture<String> reachedStep = new CompletableFuture<>();
+    CountDownLatch cancelled = new CountDownLatch(1);
+    fakeRunner.during(
+        0,
+        spec -> {
+          reachedStep.complete(spec.runId());
+          try {
+            cancelled.await(10, TimeUnit.SECONDS);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        });
+    service.onPostReceive(repoId, "main", "0".repeat(40), sha);
+    String runId = reachedStep.get(10, TimeUnit.SECONDS);
+    service.cancel(runId, "No longer needed");
+    cancelled.countDown();
+    service.awaitIdle();
+    forgetLoadedEntities();
+
+    assertEquals("No longer needed", soleRun().cancellationReason);
   }
 
   @Test

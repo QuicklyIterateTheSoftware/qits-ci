@@ -38,8 +38,8 @@ import org.jboss.logging.Logger;
  * lifecycle and forwards frames here, exactly as {@code WorkspaceDaemonRegistry} sits behind {@code
  * DaemonControlSocket} in qits-workspaces.
  *
- * <p><b>The blocking bridge.</b> Runs execute on a single-threaded worker ({@code CiRunService}),
- * one step at a time, and that thread used to park on a {@code docker run} process. It now parks
+ * <p><b>The blocking bridge.</b> Each run executes on one worker ({@code CiRunService}), one step at
+ * a time, and that thread used to park on a {@code docker run} process. It now parks
  * here instead: {@link #awaitRegistered}, {@link #awaitInitialized} and {@link #awaitFinished} each
  * block on one {@code CompletableFuture} per lifecycle transition while chunks flow to the step's
  * listener as they arrive. The failure mode that swap introduces is anything that never returns

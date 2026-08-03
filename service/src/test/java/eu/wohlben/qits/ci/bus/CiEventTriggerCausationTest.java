@@ -372,7 +372,12 @@ public class CiEventTriggerCausationTest {
     long deadline = System.currentTimeMillis() + 60_000;
     while (System.currentTimeMillis() < deadline) {
       List<Map<String, Object>> runs = runsOf(repoId);
-      if (runs.size() >= expected && runs.stream().noneMatch(r -> "RUNNING".equals(r.get("status")))) {
+      if (runs.size() >= expected
+          && runs.stream()
+              .noneMatch(
+                  r ->
+                      "QUEUED".equals(r.get("status"))
+                          || "RUNNING".equals(r.get("status")))) {
         return runs;
       }
       Thread.sleep(100);

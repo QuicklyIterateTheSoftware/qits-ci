@@ -61,7 +61,7 @@ public class CiRunRepository implements PanacheRepositoryBase<CiRun, String> {
    *
    * <p>Unscoped by repository on purpose, and it is the one read on this surface that is: the
    * question it answers is "what is CI doing right now", which has no repository to scope to. It is
-   * bounded by what a single-threaded worker can have accepted rather than by a limit, so it does
+   * bounded by accepted work and the configured worker pool rather than by a limit, so it does
    * not carry one.
    */
   public List<CiRun> listActiveNewestFirst() {
@@ -103,6 +103,17 @@ public class CiRunRepository implements PanacheRepositoryBase<CiRun, String> {
    */
   public List<CiRun> listQueuedOldestFirst() {
     return list("status = ?1 order by createdAt, id", CiRunStatus.QUEUED);
+  }
+
+  /** Older queued push builds superseded by a newly accepted push on the same branch. */
+  public List<CiRun> listQueuedPushes(String repoId, String branch, String exceptRunId) {
+    return list(
+        "repoId = ?1 and branch = ?2 and status = ?3 and triggerType = ?4 and id <> ?5",
+        repoId,
+        branch,
+        CiRunStatus.QUEUED,
+        eu.wohlben.qits.ci.entity.CiTriggerType.POST_RECEIVE,
+        exceptRunId);
   }
 
   /**

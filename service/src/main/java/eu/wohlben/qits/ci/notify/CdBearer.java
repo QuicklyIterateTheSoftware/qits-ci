@@ -19,7 +19,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * inbound gate, and the two are independent: this service can present a token before it demands one,
  * or the reverse.
  *
- * <p><b>Non-blocking, and cached.</b> The caller is the single-threaded run worker, which must not
+ * <p><b>Non-blocking, and cached.</b> The caller is a run worker, which must not
  * park, so this returns a {@code Uni} rather than a token — the fetch runs on the event loop and the
  * POST is chained onto it. {@link TokensHelper} is what makes it one fetch rather than one per green
  * run: it holds the token until it expires and refreshes it in the background, which is why a

@@ -23,7 +23,7 @@ import java.time.Instant;
  * sole production implementation is {@code service/…/bus/SoftwareReleaseAnnouncer}, and zero
  * implementations is a supported configuration. <b>The same must-not-block rule as
  * {@link RunAnnouncer}</b>, with the same reason and one sharper edge: this runs on the
- * single-threaded run worker and a release pipeline may declare several artifacts, so an unreachable
+ * run worker and a release pipeline may declare several artifacts, so an unreachable
  * qits-events costs the publish timeout <em>per artifact</em>.
  */
 public interface ReleaseAnnouncer {
@@ -39,7 +39,7 @@ public interface ReleaseAnnouncer {
    * @param version the version, read out of the triggering event's payload. qits-ci publishes
    *     nothing when that field is absent: the declaration was written for a trigger that cannot
    *     feed it.
-   * @param packageType {@code npm}, {@code maven}, or {@code docker} — {@link
+   * @param packageType {@code npm}, {@code maven}, {@code docker} or {@code daemon} — {@link
    *     CiArtifact.Type#declared()}, the keyword the trigger file used, which is also the wire value
    * @param packageName the exact package name, unqualified for docker ({@code qits/qits-stt}): no
    *     registry-qualified reference is portable across the step network and this process's own

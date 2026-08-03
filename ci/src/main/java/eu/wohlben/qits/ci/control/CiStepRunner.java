@@ -10,7 +10,7 @@ import java.util.Map;
  *
  * <p>The seam survived the swap as a name and as a <em>shape</em>: still exactly one blocking call
  * per step, so {@code CiRunService.runSteps} stays a sequential loop with one transaction per row
- * and the run worker stays single-threaded. What changed is that a step now <b>emits events</b>
+ * and each run worker remains sequential within one pipeline. What changed is that a step now <b>emits events</b>
  * while it runs — chunks as the container produces them, and the two lifecycle instants the host
  * stamps — instead of only answering once at the end.
  *

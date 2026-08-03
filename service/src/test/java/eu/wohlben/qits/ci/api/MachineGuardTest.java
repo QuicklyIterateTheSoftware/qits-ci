@@ -174,5 +174,7 @@ class MachineGuardTest {
       })
   void readsAreNotGuarded() {
     given().when().get("/ci/api/repositories").then().statusCode(200);
+    // Including the daemon pin, which the artifacts GC reads from qits-net holding no intake token.
+    given().when().get("/ci/api/daemon").then().statusCode(200);
   }
 }

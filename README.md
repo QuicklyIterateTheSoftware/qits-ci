@@ -97,6 +97,7 @@ rest of qits it reaches over a URL it is configured with:
 | in | `GET /ci/api/runs/active` → `{"runs": [...]}` — every `QUEUED` or `RUNNING` run on the instance, all repositories, newest first, no parameters | same; unscoped, because "what is CI doing right now" has no repository to scope to |
 | in | `GET /ci/api/repositories` → `{"repositoryIds": [...]}` — the distinct repo ids this instance has runs for, ascending | same; it is the one read here that is not scoped to a repository, because it answers *which* |
 | in | `GET /ci/api/repositories/summary` → `{"repositories": [{repositoryId, lastRun, lastMainRun}]}` — ascending by id, full run objects, `lastMainRun` null when there is none | same; it is the id listing plus the two runs a client would otherwise make a request per repository to find |
+| in | `GET /ci/api/daemon` → `{"daemonVersion": "<hex or blank>"}` — the daemon binary this instance is **configured** to launch, never a run row; blank means this deployment has pinned none | same; read fail-closed by qits-artifacts' daemon GC and readable by the client |
 | in | `POST /ci/api/runs/{runId}/cancel` → 202, 409 on a run that has already finished | same: no token, behind the deployment's auth policy |
 | in | `ws://…/ci/daemon` — the socket each step container's daemon dials **out** to | authenticated by a host-minted per-container secret, not by any token |
 | out | where the git host answers, for ci's **own** `git fetch` of the pushed ref — ci appends `/git/<repoId>` | `qits.ci.git-host-url` |
@@ -146,8 +147,9 @@ objects about *runs*, and neither claims ci owns a repository.
 across all repositories, newest first, no parameters. It is the only read here that is not scoped to
 a repository *and* not a listing of them — "what is CI doing right now" has no repository to scope to,
 and asking per repository would mean knowing the repositories first and still seeing a different
-instant in each answer. It needs no `?limit=`: what is active is bounded by what one single-threaded
-worker has accepted, not by uptime. It became answerable only when a queued run became a row (below).
+instant in each answer. It needs no `?limit=`: what is active is bounded by accepted work and the
+configured worker pool, not by uptime. It became answerable only when a queued run became a row
+(below).
 
 The event sender is the git host's post-receive hook, which lives in
 [qits-artifacts](https://github.com/QuicklyIterateTheSoftware/qits-artifacts) (`CiPostReceiveNotifier`).
@@ -481,8 +483,12 @@ triggering surface is unchanged — a tag push is not a CI trigger and deliberat
 
 `artifacts:` is a **non-empty list of mappings**, each exactly `{type, name}`:
 
-- **`type`** is `npm`, `maven` or `docker`, and nothing else. The keyword is also the value on the
-  wire.
+- **`type`** is `npm`, `maven`, `docker` or `daemon`, and nothing else. The keyword is also the value
+  on the wire. `daemon` names a **platform daemon binary** — `qits-ci-daemon` and its kind:
+  executables qits-artifacts holds and the platform downloads and runs, rather than packages a
+  third-party tool installs. It is a type so the release train can announce the one binary every CI
+  run depends on; the PUT that publishes it is a step in that repository's own pipeline, exactly as
+  `npm publish` is.
 - **`name`** is the **exact package name**, non-blank. A scoped npm name has to be quoted — `@` is
   a reserved YAML indicator, so `name: "@qits/ui-components"`. A docker name is **unqualified**
   (`qits/qits-stt`, no registry host): the registry is `qits-artifacts:8080` inside a step container
@@ -628,6 +634,19 @@ it together with the daemon it deployed. Deployments not on `qits-net` under the
 also need `qits.ci.container-daemon-url`. Both are documented where they are shipped, in the `ci`
 jar's `META-INF/microprofile-config.properties`.
 
+**The pin is queryable, and a malformed one is a boot line rather than a mystery.** `GET
+/ci/api/daemon` answers the *configured* value — what a run started right now would download, which
+is a different and much smaller question than what `ci_run.daemon_version` records, since that is
+history and the run listing clamps at 100. qits-artifacts' daemon GC reads it when it plans a sweep
+and aborts with nothing deleted if it cannot, the same fail-closed shape the docker strategy has
+against qits-cd's deployments. And because the shipped template addresses the binary **by digest**, a
+non-blank value that is not 64 lowercase hex characters cannot resolve: that is checked at boot and
+warned about, naming the key and the value, instead of surfacing as every run failing
+never-registered with a download error that reads like a broken qits-artifacts. Blank stays valid and
+silent. The check follows the *template*, so re-pointing it at a version-addressed surface — the
+config edit the key's own comment promises — takes the check with it rather than flagging a correct
+calver version forever.
+
 **Failures stay distinguishable.** Docker refusing the launch, a container whose bootstrap never
 produced a daemon (its own `docker logs` tail is captured *before* the reap and becomes the step's
 output), a daemon that registered and then went quiet, a structured setup failure, a lost socket and
@@ -642,12 +661,16 @@ and no WebSocket on the read side; the daemon makes live output possible, it doe
 transport. The relay is memory and dies with the process — the persisted tail on each step row is
 the record.
 
-`POST /ci/api/runs/{runId}/cancel` answers 202 and asks the in-flight container to stop. The step it
+`POST /ci/api/runs/{runId}/cancel` answers 202 and asks the in-flight container to stop. Its optional
+JSON body is `{ "reason": "…" }`; absent or blank records `USER_CANCELLED`. The step it
 was on is recorded `FAILED` with "cancelled" in its output and the rest `SKIPPED`. A run still
 `QUEUED` can be cancelled too, and it is the cheap case: there is no container to ask, so the run is
 recorded `FAILED` with no steps and the worker never picks it up. Cancelling a run that has already
 finished is a 409. It is the one operation here a person invokes on purpose, so — unlike the intake —
-it is **not** hidden from `docs/openapi.yml`.
+it is **not** hidden from `docs/openapi.yml`. A queued push is also cancelled automatically when a
+newer push for the same repository and branch is accepted: it records `DEDUPED` and the newer run's
+id, which the run detail links to. Event-triggered runs are excluded because distinct trigger files
+on one branch are independent pipelines, not duplicates.
 
 ## What a restart costs
 
@@ -688,6 +711,9 @@ a repository's own listing will show.
 
 ## Deploying it
 
+- Set `qits.ci.concurrent-builds` to the maximum number of pipelines this qits-ci instance may run
+  at once (default **4**, minimum **1**). Steps remain sequential within one pipeline. Size this
+  together with the host's CPU and memory and the per-container `qits.ci.cpus`/`memory-limit` caps.
 - Set `qits.ci.git-host-url` / `qits.ci.container-git-url` to the git host as reachable from the ci
   host and from a step container respectively. **Both end at the service, not at `/git`** — ci
   appends `/git/<repoId>` itself, because `/git` is the codebase's segment for the smart-HTTP wire

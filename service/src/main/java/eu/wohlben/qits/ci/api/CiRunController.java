@@ -1,5 +1,7 @@
 package eu.wohlben.qits.ci.api;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.ci.control.CiIdentifiers;
 import eu.wohlben.qits.ci.control.CiRunService;
 import eu.wohlben.qits.ci.daemonhost.CiStepRelay;
@@ -12,6 +14,7 @@ import eu.wohlben.qits.ci.error.BadRequestException;
 import eu.wohlben.qits.ci.mapper.CiRunMapper;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
@@ -58,7 +61,11 @@ public class CiRunController {
 
   @Inject CiStepRelay relay;
 
+  @Inject ObjectMapper objectMapper;
+
   public record ListRunsResponse(List<CiRunDto> runs) {}
+
+  public record CancelRunRequest(String reason) {}
 
   /**
    * A repository's runs, newest-first — without step output (fetch a single run for that). The
@@ -123,8 +130,8 @@ public class CiRunController {
    * in each answer. It became answerable only when a queued run became a row — before that, half of
    * this list lived in an executor's queue where nothing could read it.
    *
-   * <p>It carries no {@code ?limit=} because it needs none: what is active is bounded by what one
-   * single-threaded worker has accepted, not by how long the instance has been up.
+   * <p>It carries no {@code ?limit=} because it needs none: what is active is bounded by accepted
+   * work and the configured worker pool, not by how long the instance has been up.
    *
    * <p>{@code /active} is a literal segment and {@link #getRun}'s is a template, so JAX-RS matches
    * this one first — a run whose id is the string {@code active} is not addressable, and no run id
@@ -151,8 +158,8 @@ public class CiRunController {
    * complements over the same table, so a run that leaves one arrives in the other.
    *
    * <p>It <b>does</b> carry {@code ?limit=} where {@code /active} does not, and the asymmetry is the
-   * whole difference between them: what is active is bounded by what one single-threaded worker has
-   * accepted, while what is finished grows for as long as the instance has been up. Absent means
+   * whole difference between them: what is active is bounded by accepted work and the configured
+   * worker pool, while what is finished grows for as long as the instance has been up. Absent means
    * {@link CiRunService#DEFAULT_FINISHED_LIMIT} rather than unbounded — the opposite of the
    * repository listing's default, because there is no repository here to make "all of them" a bounded
    * question. It is parsed by the same {@link #parseLimit} for the same 400-not-404 reason, and an
@@ -232,12 +239,42 @@ public class CiRunController {
    */
   @POST
   @Path("/{runId}/cancel")
+  @Consumes(MediaType.WILDCARD)
   @Operation(summary = "Cancel a queued or running CI run")
   @APIResponse(responseCode = "202", description = "The run has been stopped or asked to stop")
   @APIResponse(responseCode = "404", description = "No such run")
   @APIResponse(responseCode = "409", description = "The run has already finished, so there is nothing to stop")
-  public Response cancelRun(@PathParam("runId") String runId) {
-    runService.cancel(runId);
+  public Response cancelRun(
+      @PathParam("runId") String runId,
+      @org.eclipse.microprofile.openapi.annotations.parameters.RequestBody(
+              required = false,
+              description = "Optional human-readable cancellation reason",
+              content =
+                  @org.eclipse.microprofile.openapi.annotations.media.Content(
+                      schema = @Schema(implementation = CancelRunRequest.class)))
+          String payload) {
+    runService.cancel(runId, cancellationReason(payload));
     return Response.accepted().build();
+  }
+
+  private String cancellationReason(String payload) {
+    if (payload == null || payload.isBlank()) {
+      return null;
+    }
+    try {
+      JsonNode request = objectMapper.readTree(payload);
+      JsonNode reason = request == null ? null : request.get("reason");
+      if (reason == null || reason.isNull()) {
+        return null;
+      }
+      if (!reason.isTextual()) {
+        throw new BadRequestException("Cancellation reason must be a string");
+      }
+      return reason.textValue();
+    } catch (BadRequestException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new BadRequestException("Invalid cancellation request");
+    }
   }
 }

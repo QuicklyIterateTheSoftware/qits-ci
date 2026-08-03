@@ -40,6 +40,8 @@ public record CiRunDto(
     CiRunStatus status,
     Instant createdAt,
     Instant finishedAt,
+    String cancellationReason,
+    String supersededByRunId,
     String daemonVersion,
     CiTriggerType triggerType,
     String triggerEventId,

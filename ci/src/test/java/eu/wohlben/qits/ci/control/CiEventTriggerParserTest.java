@@ -377,12 +377,13 @@ public class CiEventTriggerParserTest {
               - { type: npm, name: "@qits/ui-components" }
               - { type: maven, name: "eu.wohlben.qits:qits-eventstream" }
               - { type: docker, name: qits/qits-stt }
+              - { type: daemon, name: qits-ci-daemon }
             steps:
               - image: qits/build-images/node-base:latest
                 script: ./publish-tag.sh
             """);
 
-    assertEquals(3, trigger.artifacts().size());
+    assertEquals(4, trigger.artifacts().size());
     assertEquals(CiArtifact.Type.NPM, trigger.artifacts().get(0).type());
     // The scope survives YAML: '@' is a reserved indicator, so the name has to be quoted and the
     // quotes are not part of it.
@@ -393,10 +394,16 @@ public class CiEventTriggerParserTest {
     // Unqualified, deliberately: no registry-qualified docker reference is portable between a step
     // container and this process.
     assertEquals("qits/qits-stt", trigger.artifacts().get(2).name());
+    // A platform daemon binary: an executable qits-artifacts holds and the platform runs, named
+    // bare. It is a first-class type so the one binary every CI run depends on is announced by the
+    // release train like everything else it builds.
+    assertEquals(CiArtifact.Type.DAEMON, trigger.artifacts().get(3).type());
+    assertEquals("qits-ci-daemon", trigger.artifacts().get(3).name());
     // The keyword a repository writes is the value the wire carries — one vocabulary, not two.
     assertEquals("npm", trigger.artifacts().get(0).type().declared());
     assertEquals("maven", trigger.artifacts().get(1).type().declared());
     assertEquals("docker", trigger.artifacts().get(2).type().declared());
+    assertEquals("daemon", trigger.artifacts().get(3).type().declared());
   }
 
   @Test
@@ -428,7 +435,9 @@ public class CiEventTriggerParserTest {
                 parser.parse(
                     PATH, "event: SCMRelease\nartifacts:\n  - { type: rubygems, name: qits-ci }\n"));
     assertTrue(e.getMessage().contains("rubygems"), e.getMessage());
-    assertTrue(e.getMessage().contains("npm, maven and docker"), e.getMessage());
+    // The vocabulary is derived from the enum, so an added type cannot leave the error message
+    // refusing a keyword it does not admit to knowing.
+    assertTrue(e.getMessage().contains("npm, maven, docker and daemon"), e.getMessage());
     // A missing type is the same failure: there is no default registry to fall back to.
     assertThrows(
         CiConfigException.class,

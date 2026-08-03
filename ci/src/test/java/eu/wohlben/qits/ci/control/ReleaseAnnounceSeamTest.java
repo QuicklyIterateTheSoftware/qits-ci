@@ -49,6 +49,18 @@ public class ReleaseAnnounceSeamTest extends CiTestSupport {
           script: ./publish-tag.sh
       """;
 
+  /** A daemon release pipeline: it builds a platform binary and PUTs it to qits-artifacts. */
+  private static final String DAEMON_TRIGGER =
+      """
+      event: SCMRelease
+      artifacts:
+        - { type: daemon, name: qits-ci-daemon }
+      steps:
+        - image: alpine:3
+          docker: true
+          script: ./publish-daemon.sh
+      """;
+
   /** The same file without the declaration — an ordinary event pipeline, which publishes nothing. */
   private static final String PLAIN_TRIGGER =
       """
@@ -120,6 +132,31 @@ public class ReleaseAnnounceSeamTest extends CiTestSupport {
     // And the other port is untouched: this is still a build that passed, announced exactly once.
     assertEquals(1, runAnnouncer.announced().size(), "SoftwareRelease is additional, not a swap");
     assertEquals(run.id, runAnnouncer.announced().get(0).runId());
+  }
+
+  @Test
+  public void aDaemonBinaryIsAnnouncedLikeAnyOtherArtifact() throws Exception {
+    String eventId = deliver(DAEMON_TRIGGER, RELEASED);
+
+    CiRun run = runService.runsFor(repoId).get(0);
+    List<FakeReleaseAnnouncer.Published> published = releaseAnnouncer.published();
+    assertEquals(1, published.size(), "one declaration is one announcement");
+
+    FakeReleaseAnnouncer.Published daemon = published.get(0);
+    // Nothing about the daemon type is special anywhere on this path, and that is the whole claim:
+    // the keyword parses, travels as the wire value, and reaches the seam beside npm and docker with
+    // no per-type branch to get wrong. qits-ci publishes nothing here either — the PUT to
+    // qits-artifacts is a step inside the daemon repository's own pipeline.
+    assertEquals("daemon", daemon.packageType());
+    assertEquals("qits-ci-daemon", daemon.packageName());
+    assertEquals("1.4.0", daemon.version());
+    assertEquals(run.id, daemon.runId());
+    assertEquals(repoId, daemon.repoId());
+    assertEquals(eventId, daemon.triggerEventId());
+    assertNotNull(daemon.finishedAt());
+
+    // And it is still a build that passed, announced exactly once on the other port.
+    assertEquals(1, runAnnouncer.announced().size());
   }
 
   @Test

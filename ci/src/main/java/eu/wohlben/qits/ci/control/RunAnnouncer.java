@@ -25,7 +25,7 @@ import java.time.Instant;
  * runs CI exactly as before.
  *
  * <p><b>The same must-not-block rule as {@link CdNotifier}</b>, with the same reason and one extra
- * teeth-gritting caveat: this runs on the single-threaded run worker, between one run and the next.
+ * teeth-gritting caveat: this runs on a run worker, between one run and the next.
  * The bus implementation's {@code publish()} is synchronous and never throws, but it is not free —
  * it is bounded by the publish timeout when qits-events is unreachable, after which the outbox owns
  * the event. A few seconds per green build, paid only while the far side is down, is the price that

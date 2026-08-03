@@ -31,6 +31,8 @@ public interface CiRunMapper {
         bare.status(),
         bare.createdAt(),
         bare.finishedAt(),
+        bare.cancellationReason(),
+        bare.supersededByRunId(),
         bare.daemonVersion(),
         bare.triggerType(),
         bare.triggerEventId(),

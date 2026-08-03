@@ -19,6 +19,7 @@ import eu.wohlben.qits.ci.persistence.CiStepRepository;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.runtime.LaunchMode;
 import io.quarkus.runtime.StartupEvent;
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -35,15 +36,16 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.hibernate.exception.ConstraintViolationException;
 import org.jboss.logging.Logger;
 
 /**
  * The pipeline orchestrator: a post-receive event → read the config from the pushed commit → run
- * its steps sequentially → record per-step pass/fail. Runs execute on a single-threaded daemon
- * worker (the intake returns immediately; runs across all repos are serialized — parallelism is an
- * explicit follow-up), with each DB transition in its own {@link QuarkusTransaction#requiringNew()}
+ * its steps sequentially → record per-step pass/fail. Runs execute on a bounded pool of daemon
+ * workers (the intake returns immediately; {@code qits.ci.concurrent-builds} controls how many runs
+ * may execute at once), with each DB transition in its own {@link QuarkusTransaction#requiringNew()}
  * bracket so the slow container work never holds a transaction (worker threads have no request
  * context; the {@code BlobService}/{@code GitHostRoutes} stance).
  *
@@ -157,12 +159,20 @@ public class CiRunService {
    */
   private static final String VERSION_FIELD = "version";
 
+  public static final String USER_CANCELLED = "USER_CANCELLED";
+  public static final String DEDUPED = "DEDUPED";
+  public static final int MAX_CANCELLATION_REASON_LENGTH = 255;
+
   @ConfigProperty(name = "qits.ci.output-max-chars")
   int outputMaxChars;
 
   /** The deadline a step gets when its declaration does not name one. */
   @ConfigProperty(name = "qits.ci.step-timeout-seconds")
   int stepTimeoutSeconds;
+
+  /** The instance-wide upper bound on runs executing at the same time. */
+  @ConfigProperty(name = "qits.ci.concurrent-builds")
+  int concurrentBuilds;
 
   /**
    * Runs a user asked to stop. In memory and deliberately so: a cancellation is only meaningful
@@ -171,13 +181,26 @@ public class CiRunService {
    */
   private final Set<String> cancelled = ConcurrentHashMap.newKeySet();
 
-  private final ExecutorService worker =
-      Executors.newSingleThreadExecutor(
-          r -> {
-            Thread t = new Thread(r, "ci-run-worker");
-            t.setDaemon(true);
-            return t;
-          });
+  private ExecutorService worker;
+
+  @PostConstruct
+  void initializeWorkers() {
+    worker = createWorkerPool(concurrentBuilds);
+  }
+
+  static ExecutorService createWorkerPool(int concurrentBuilds) {
+    if (concurrentBuilds < 1) {
+      throw new IllegalArgumentException("qits.ci.concurrent-builds must be at least 1");
+    }
+    AtomicInteger workerNumber = new AtomicInteger();
+    return Executors.newFixedThreadPool(
+        concurrentBuilds,
+        r -> {
+          Thread t = new Thread(r, "ci-run-worker-" + workerNumber.incrementAndGet());
+          t.setDaemon(true);
+          return t;
+        });
+  }
 
   @PreDestroy
   void shutdown() {
@@ -896,7 +919,18 @@ public class CiRunService {
     run.triggerType = CiTriggerType.POST_RECEIVE;
     run.configPath = CiConfigParser.CONFIG_PATH;
     // No step rows: they are written one at a time, terminal, as each step ends.
-    QuarkusTransaction.requiringNew().run(() -> runs.persist(run));
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              runs.persist(run);
+              runs.flush();
+              for (CiRun older : runs.listQueuedPushes(repoId, branch, run.id)) {
+                older.status = CiRunStatus.FAILED;
+                older.finishedAt = run.createdAt;
+                older.cancellationReason = DEDUPED;
+                older.supersededByRunId = run.id;
+              }
+            });
     return run;
   }
 
@@ -1125,6 +1159,11 @@ public class CiRunService {
    * nothing to stop, and telling the caller it does would be a lie it cannot check.
    */
   public void cancel(String runId) {
+    cancel(runId, null);
+  }
+
+  public void cancel(String runId, String requestedReason) {
+    String reason = cancellationReason(requestedReason);
     CiRun run = requireRun(runId);
     if (run.status != CiRunStatus.RUNNING && run.status != CiRunStatus.QUEUED) {
       throw new ConflictException(
@@ -1141,14 +1180,37 @@ public class CiRunService {
                   }
                   current.status = CiRunStatus.FAILED;
                   current.finishedAt = Instant.now();
+                  current.cancellationReason = reason;
+                  current.supersededByRunId = null;
                   return true;
                 });
     if (neverStarted) {
-      LOG.infof("CI run %s cancelled on request before it started", runId);
+      LOG.infof("CI run %s cancelled on request before it started (%s)", runId, reason);
       return;
     }
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              CiRun current = runs.findById(runId);
+              if (current != null) {
+                current.cancellationReason = reason;
+                current.supersededByRunId = null;
+              }
+            });
     runner.cancel(runId);
-    LOG.infof("CI run %s cancelled on request", runId);
+    LOG.infof("CI run %s cancelled on request (%s)", runId, reason);
+  }
+
+  private static String cancellationReason(String requestedReason) {
+    if (requestedReason == null || requestedReason.isBlank()) {
+      return USER_CANCELLED;
+    }
+    String reason = requestedReason.trim();
+    if (reason.length() > MAX_CANCELLATION_REASON_LENGTH) {
+      throw new eu.wohlben.qits.ci.error.BadRequestException(
+          "Cancellation reason must be at most " + MAX_CANCELLATION_REASON_LENGTH + " characters");
+    }
+    return reason;
   }
 
   /**

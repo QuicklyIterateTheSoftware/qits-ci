@@ -4,6 +4,11 @@
 openapi: 3.1.0
 components:
   schemas:
+    CancelRunRequest:
+      type: object
+      properties:
+        reason:
+          type: string
     CiLiveStepDto:
       type: object
       properties:
@@ -29,6 +34,10 @@ components:
           $ref: "#/components/schemas/Instant"
         finishedAt:
           $ref: "#/components/schemas/Instant"
+        cancellationReason:
+          type: string
+        supersededByRunId:
+          type: string
         daemonVersion:
           type: string
         triggerType:
@@ -85,6 +94,11 @@ components:
       enum:
       - POST_RECEIVE
       - EVENT
+    DaemonPinDto:
+      type: object
+      properties:
+        daemonVersion:
+          type: string
     Instant:
       type: string
       format: date-time
@@ -126,6 +140,19 @@ components:
       openIdConnectUrl: http://qits-idp:8080/idp/.well-known/openid-configuration
       description: Authentication
 paths:
+  /ci/api/daemon:
+    get:
+      summary: The daemon binary this instance is configured to launch
+      responses:
+        "200":
+          description: The configured pin; blank when this deployment has pinned no
+            daemon
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DaemonPinDto"
+      tags:
+      - Ci Daemon Controller
   /ci/api/repositories:
     get:
       summary: The repository ids qits-ci has recorded runs for
@@ -241,6 +268,13 @@ paths:
         required: true
         schema:
           type: string
+      requestBody:
+        description: Optional human-readable cancellation reason
+        content:
+          '*/*':
+            schema:
+              $ref: "#/components/schemas/CancelRunRequest"
+        required: false
       responses:
         "202":
           description: The run has been stopped or asked to stop
@@ -248,8 +282,10 @@ paths:
           description: No such run
         "409":
           description: "The run has already finished, so there is nothing to stop"
+        "400":
+          description: Bad Request
       tags:
       - Ci Run Controller
 info:
   title: qits-ci API
-  version: 1.0.0-SNAPSHOT
+  version: 2026.802.191321
