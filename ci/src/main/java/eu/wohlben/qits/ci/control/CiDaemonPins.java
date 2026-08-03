@@ -93,6 +93,17 @@ public class CiDaemonPins {
   }
 
   /**
+   * Every candidate this instance has rejected, newest first -- what the readiness health check
+   * (workstream BX) reports as data when the ladder has fallen all the way through to blank (§2.5,
+   * ⚖6(a)). Empty on a healthy ladder; a version can appear here only once, since a verdict is
+   * durable and a rejected candidate is never re-probed.
+   */
+  public List<String> rejectedVersions() {
+    return QuarkusTransaction.requiringNew()
+        .call(() -> repo.listRejected().stream().map(pin -> pin.version).toList());
+  }
+
+  /**
    * Adopts one release off the event log -- a live {@code SoftwareRelease} or a startup
    * reconciliation row, the two callers this method does not need to tell apart. Stores the
    * candidate {@code UNPROVEN}; nothing here probes it.
