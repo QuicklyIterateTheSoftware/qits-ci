@@ -11,7 +11,9 @@ import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
@@ -28,11 +30,28 @@ import org.jboss.logging.Logger;
  * deployment set is not something this class can take away).
  *
  * <p><b>Probing is lazy here and asynchronous elsewhere.</b> This class only ever probes a candidate
- * when {@link #answer} walks past it still {@code UNPROVEN} -- the rung that makes the ladder
- * correct with no async probe having run yet, since {@code CiStepRunner.pinDaemon()} calls through
- * to this before a run's first container. The <em>async</em> probe-on-adoption in
- * ci-daemon-autoadopt-plan.md §2.4 is a caller's job (the bus listener, once it exists), not this
- * class's -- {@link #adopt} only ever stores a candidate {@code UNPROVEN}.
+ * when {@link #answer} walks past it still unproven -- the rung that makes the ladder correct with
+ * no async probe having run yet, since {@code CiStepRunner.pinDaemon()} calls through to this before
+ * a run's first container. The <em>async</em> probe-on-adoption in ci-daemon-autoadopt-plan.md §2.4
+ * is a caller's job (the bus listener, once it exists), not this class's -- {@link #adopt} only ever
+ * stores a candidate {@code UNPROVEN}.
+ *
+ * <p><b>{@code UNKNOWN} is retryable; {@code REJECTED} is not.</b> {@code UNKNOWN} means the probe
+ * itself could not run -- no docker, a container-name collision, an unpullable image -- which is a
+ * statement about the probe, not the candidate, so {@link #answer} reprobes it on a later call
+ * exactly like a still-{@code UNPROVEN} rung. {@code REJECTED} means a real daemon dialled in and was
+ * found wanting on its own merits (wrong capability version, no confirmed {@code Ack}) -- a statement
+ * about the candidate, and it stays durable and un-retried.
+ *
+ * <p><b>At most one probe of a given candidate runs at a time, guarded per version.</b> A single
+ * global lock would also satisfy that, but two concurrent callers probing two genuinely different
+ * still-unproven candidates should not have to wait on each other, and a per-version {@link Set}
+ * costs nothing extra to keep instead. A caller that loses the race neither blocks nor launches a
+ * second probe -- it answers with the candidate's current (unchanged) verdict, which is not {@code
+ * PROVEN}, so {@link #firstProvenIndex} falls through to whatever is below it exactly as it would
+ * for a rung it had not reached yet. This is the fix for the concrete incident that motivated it: two
+ * concurrent callers each walking the ladder to the same still-unproven top candidate used to both
+ * launch a probe container, and the two containers raced docker's own container-name uniqueness.
  *
  * <p><b>Zero {@link DaemonProbe} implementations is a supported configuration</b>, the {@link
  * CdNotifier} precedent: with none wired, every probe answers {@code UNKNOWN} and the ladder never
@@ -56,6 +75,14 @@ public class CiDaemonPins {
   @Inject Instance<DaemonProbe> probes;
 
   /**
+   * The single-flight guard: candidate versions this instance is probing right now. {@code add} is
+   * the acquire (it fails, returning {@code false}, when the version is already present); {@code
+   * remove} in a {@code finally} is the release. See the class javadoc for why this is per-version
+   * rather than one lock for the whole ladder.
+   */
+  private final Set<String> probing = ConcurrentHashMap.newKeySet();
+
+  /**
    * The deployment's own pin -- see {@code microprofile-config.properties}. Blank is valid and
    * means this deployment has pinned no daemon yet.
    *
@@ -72,16 +99,41 @@ public class CiDaemonPins {
   public record Pin(String version, String previousVersion, String source) {}
 
   /**
-   * The top {@code PROVEN} rung. Probes any {@code UNPROVEN} candidate it has to walk past to find
-   * one, persisting the verdict before returning -- so a run that calls this next never records a
-   * pin that was only provisionally proven.
+   * The top {@code PROVEN} rung. Probes any {@code UNPROVEN} or {@code UNKNOWN} candidate it has to
+   * walk past to find one, persisting the verdict before returning -- so a run that calls this next
+   * never records a pin that was only provisionally proven.
+   *
+   * <p>May launch a probe container. A caller that must never do that -- a health check, a public
+   * read endpoint -- calls {@link #currentAnswer} instead; read its javadoc alongside this one.
    */
   public Pin answer() {
+    return walk(true);
+  }
+
+  /**
+   * {@link #answer}'s read-only twin. Walks the exact same ladder -- including {@code
+   * previousVersion} -- but never probes: an {@code UNPROVEN} or {@code UNKNOWN} candidate it walks
+   * past is simply not proven yet for this read, and the walk continues to what is below it (an
+   * older adopted candidate, or the configured pin) exactly as if a concurrent single-flight guard
+   * had blocked it from probing.
+   *
+   * <p>Exists because two read-only surfaces reach {@code answer()}'s ladder far more often than any
+   * run does: {@code CiDaemonReadinessCheck}, hit by the container healthcheck every few seconds, and
+   * {@code CiDaemonController}'s {@code GET /ci/api/daemon}, a public unguarded endpoint. Either one
+   * calling {@code answer()} means a probe container can be launched on that cadence -- the amplifier
+   * that turned one docker container-naming race into a near-certain collision. Neither surface needs
+   * a fresh verdict, only today's best-known one, with no side effect.
+   */
+  public Pin currentAnswer() {
+    return walk(false);
+  }
+
+  private Pin walk(boolean allowProbing) {
     List<CiDaemonPin> ordered = QuarkusTransaction.requiringNew().call(repo::listNewestFirst);
-    int topIndex = firstProvenIndex(ordered, 0);
+    int topIndex = firstProvenIndex(ordered, 0, allowProbing);
     if (topIndex >= 0) {
       CiDaemonPin top = ordered.get(topIndex);
-      int nextIndex = firstProvenIndex(ordered, topIndex + 1);
+      int nextIndex = firstProvenIndex(ordered, topIndex + 1, allowProbing);
       String previous = nextIndex >= 0 ? ordered.get(nextIndex).version : "";
       return new Pin(top.version, previous, SOURCE_ADOPTED);
     }
@@ -167,15 +219,18 @@ public class CiDaemonPins {
 
   /**
    * The index of the first candidate at or after {@code fromIndex} that is (or becomes, once
-   * probed) {@code PROVEN}; {@code -1} when none is. {@code REJECTED} and {@code UNKNOWN} candidates
-   * are skipped without being touched again -- verdicts are durable, so a version is probed once.
+   * probed) {@code PROVEN}; {@code -1} when none is. {@code REJECTED} stays skipped forever -- it is
+   * a durable verdict about the candidate itself. {@code UNPROVEN} and {@code UNKNOWN} are both
+   * eligible for a probe when {@code allowProbing} is set (see the class javadoc on why {@code
+   * UNKNOWN} is retryable); with it unset ({@link #currentAnswer}) neither is ever touched and the
+   * walk simply falls through them, unresolved for this read.
    */
-  private int firstProvenIndex(List<CiDaemonPin> ordered, int fromIndex) {
+  private int firstProvenIndex(List<CiDaemonPin> ordered, int fromIndex, boolean allowProbing) {
     for (int i = fromIndex; i < ordered.size(); i++) {
       CiDaemonPin candidate = ordered.get(i);
       CiDaemonPinVerdict verdict = candidate.verdict;
-      if (verdict == CiDaemonPinVerdict.UNPROVEN) {
-        verdict = probeAndRecord(candidate);
+      if (allowProbing && isReprobable(verdict)) {
+        verdict = probeSingleFlight(candidate);
       }
       if (verdict == CiDaemonPinVerdict.PROVEN) {
         return i;
@@ -184,12 +239,36 @@ public class CiDaemonPins {
     return -1;
   }
 
+  /** {@code UNPROVEN} or {@code UNKNOWN} -- the two verdicts {@link #firstProvenIndex} may reprobe. */
+  private static boolean isReprobable(CiDaemonPinVerdict verdict) {
+    return verdict == CiDaemonPinVerdict.UNPROVEN || verdict == CiDaemonPinVerdict.UNKNOWN;
+  }
+
+  /**
+   * {@link #probeAndRecord}, single-flight per candidate version -- see the class javadoc. A caller
+   * that fails to acquire {@link #probing} does not wait and does not probe; it returns the
+   * candidate's current (unchanged) verdict, which {@link #firstProvenIndex} then treats exactly like
+   * a rung it has not reached yet.
+   */
+  private CiDaemonPinVerdict probeSingleFlight(CiDaemonPin candidate) {
+    if (!probing.add(candidate.version)) {
+      return candidate.verdict;
+    }
+    try {
+      return probeAndRecord(candidate);
+    } finally {
+      probing.remove(candidate.version);
+    }
+  }
+
   /**
    * Runs the probe for one candidate and persists the verdict in its own transaction -- outside any
    * transaction {@link #answer} might otherwise have held open across a probe that can take tens of
-   * seconds. The guard against a stale overwrite ({@code row.verdict == UNPROVEN}) is defensive
-   * rather than a promised lock: two threads racing to answer the same still-unproven top rung may
-   * both probe, but only the first write is kept.
+   * seconds. The write guard accepts a row currently {@code UNPROVEN} <em>or</em> {@code UNKNOWN} --
+   * the same two verdicts {@link #isReprobable} names -- so a retried {@code UNKNOWN} candidate's
+   * fresh verdict is actually persisted instead of silently dropped because the row no longer reads
+   * {@code UNPROVEN}. {@link #probeSingleFlight} is what keeps two threads from racing this method
+   * for the same candidate at all; this guard is defensive on top of that, not a promised lock.
    */
   private CiDaemonPinVerdict probeAndRecord(CiDaemonPin candidate) {
     DaemonProbe.ProbeResult result = runProbe(candidate.version);
@@ -199,7 +278,7 @@ public class CiDaemonPins {
         .run(
             () -> {
               CiDaemonPin row = repo.findById(candidate.id);
-              if (row != null && row.verdict == CiDaemonPinVerdict.UNPROVEN) {
+              if (row != null && isReprobable(row.verdict)) {
                 row.verdict = verdict;
                 row.probedAt = probedAt;
                 row.detail = result.detail();

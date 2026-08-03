@@ -56,6 +56,11 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * and {@code quarkus.quinoa.ignored-path-prefixes} is unchanged — {@code /api} already covers it.
  * Note the address is {@code /ci/api/daemon} and the control socket is {@code /ci/daemon}: adjacent
  * spellings, unrelated surfaces, and only this one is a resource.
+ *
+ * <p><b>Reads {@link CiDaemonPins#currentAnswer()}, never {@link CiDaemonPins#answer()}.</b> This is
+ * a public, unguarded endpoint, so calling the probing method here would let anyone who can reach it
+ * launch a probe container on demand. An unprobed candidate answers exactly as it would through
+ * {@code answer()} once it is proven or rejected; only the probe side effect differs.
  */
 @Path("/daemon")
 @Produces(MediaType.APPLICATION_JSON)
@@ -78,7 +83,7 @@ public class CiDaemonController {
           "The ladder's top rung; daemonVersion and source are blank/\"none\" when this"
               + " deployment has adopted or pinned no daemon")
   public DaemonPinDto daemonPin() {
-    CiDaemonPins.Pin pin = pins.answer();
+    CiDaemonPins.Pin pin = pins.currentAnswer();
     return new DaemonPinDto(
         CiDaemonPins.DAEMON_NAME, pin.version(), pin.previousVersion(), pin.source());
   }

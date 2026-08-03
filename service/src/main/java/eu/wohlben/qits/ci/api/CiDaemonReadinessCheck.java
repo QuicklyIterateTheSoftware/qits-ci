@@ -27,6 +27,12 @@ import org.eclipse.microprofile.health.Readiness;
  * <p>Naming the rejected versions as health data is what makes DOWN actionable rather than merely
  * alarming -- {@code docker inspect} or {@code /q/health/ready} both surface {@link
  * CiDaemonPins#rejectedVersions()} without a second lookup anywhere.
+ *
+ * <p><b>Reads {@link CiDaemonPins#currentAnswer()}, never {@link CiDaemonPins#answer()}.</b> This
+ * check runs on the container healthcheck's own cadence (every few seconds), so calling the probing
+ * method here would launch a probe container on that cadence too -- the amplifier that turned one
+ * docker container-naming race into a near-certain collision. A DOWN ladder is still DOWN either way
+ * -- an unprobed candidate is not {@code PROVEN} regardless of which method walked past it.
  */
 @Readiness
 @ApplicationScoped
@@ -38,7 +44,7 @@ public class CiDaemonReadinessCheck implements HealthCheck {
 
   @Override
   public HealthCheckResponse call() {
-    CiDaemonPins.Pin pin = pins.answer();
+    CiDaemonPins.Pin pin = pins.currentAnswer();
     if (!CiDaemonPins.SOURCE_NONE.equals(pin.source())) {
       return HealthCheckResponse.up(NAME);
     }
