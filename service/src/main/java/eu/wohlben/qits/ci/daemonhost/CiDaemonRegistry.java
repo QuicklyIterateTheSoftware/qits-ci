@@ -339,6 +339,19 @@ public class CiDaemonRegistry {
     return launch == null ? null : launch.phase;
   }
 
+  /**
+   * The capability version this launch's {@link Hello} announced, or {@code null} when none has
+   * arrived yet (or the launch is unknown, or already reaped). Previously read once inline, logged
+   * on a mismatch and discarded (ci-daemon-autoadopt-plan.md §1.4) — this is the smallest change
+   * that turns that mismatch into a verdict a caller can act on, which is what {@code
+   * CiDaemonContainerProbe} does: registration alone cannot tell a capability-mismatched daemon
+   * (which registers, Acks, and then exits) from a healthy one, only this can.
+   */
+  public Integer capabilityVersionOf(String daemonId) {
+    Launch launch = launches.get(daemonId);
+    return launch == null || launch.capabilityVersion < 0 ? null : launch.capabilityVersion;
+  }
+
   /** Observational: how many launches are on the books. Zero after a clean run. */
   public int size() {
     return launches.size();
@@ -401,6 +414,7 @@ public class CiDaemonRegistry {
               daemonId, hello.daemonId());
           return false;
         }
+        launch.capabilityVersion = hello.capabilityVersion();
         if (hello.capabilityVersion() != CiDaemonProtocol.CAPABILITY_VERSION) {
           // Logged, not refused: the Ack carries the host's version and the daemon is the side that
           // decides it cannot speak it (it exits nonzero, and its container log is the diagnosis).
@@ -550,6 +564,8 @@ public class CiDaemonRegistry {
     private volatile Phase phase = Phase.LAUNCHED;
     private volatile String correlationId;
     private volatile long lastSeq = -1;
+    /** -1 until a {@link Hello} arrives — see {@link #capabilityVersionOf(String)}. */
+    private volatile int capabilityVersion = -1;
 
     private final CompletableFuture<Boolean> registered = new CompletableFuture<>();
     private final CompletableFuture<Initialization> initialized = new CompletableFuture<>();

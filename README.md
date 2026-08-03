@@ -97,12 +97,12 @@ rest of qits it reaches over a URL it is configured with:
 | in | `GET /ci/api/runs/active` → `{"runs": [...]}` — every `QUEUED` or `RUNNING` run on the instance, all repositories, newest first, no parameters | same; unscoped, because "what is CI doing right now" has no repository to scope to |
 | in | `GET /ci/api/repositories` → `{"repositoryIds": [...]}` — the distinct repo ids this instance has runs for, ascending | same; it is the one read here that is not scoped to a repository, because it answers *which* |
 | in | `GET /ci/api/repositories/summary` → `{"repositories": [{repositoryId, lastRun, lastMainRun}]}` — ascending by id, full run objects, `lastMainRun` null when there is none | same; it is the id listing plus the two runs a client would otherwise make a request per repository to find |
-| in | `GET /ci/api/daemon` → `{"daemonVersion": "<hex or blank>"}` — the daemon binary this instance is **configured** to launch, never a run row; blank means this deployment has pinned none | same; read fail-closed by qits-artifacts' daemon GC and readable by the client |
+| in | `GET /ci/api/daemon` → `{"daemonName", "daemonVersion", "previousDaemonVersion", "source"}` — the pin ladder's top rung (an adopted release, else the configured pin), never a run row; blank `daemonVersion` and `source: "none"` mean this deployment has pinned none | same; read fail-closed by qits-artifacts' daemon GC and readable by the client |
 | in | `POST /ci/api/runs/{runId}/cancel` → 202, 409 on a run that has already finished | same: no token, behind the deployment's auth policy |
 | in | `ws://…/ci/daemon` — the socket each step container's daemon dials **out** to | authenticated by a host-minted per-container secret, not by any token |
 | out | where the git host answers, for ci's **own** `git fetch` of the pushed ref — ci appends `/git/<repoId>` | `qits.ci.git-host-url` |
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
-| out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + `qits.ci.daemon-version` |
+| out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + the pin ladder's answer (`qits.ci.daemon-version` is the ladder's bottom rung, never demoted) |
 | out | `POST /cd/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.cd.intake-url`; no token — cd's intake is not gateway-allowlisted, the call stays on qits-net |
 | out | `PUT /events/api/events/{uuid}` — one `BuildSuccessful` per **green** run, idempotent (the `RunAnnouncer` seam) | `qits.events.url`, `qits.eventstream.enabled` |
 | out | the same route — one `SoftwareRelease` per artifact a green **release pipeline** declared (the `ReleaseAnnouncer` seam) | the same two keys |
@@ -624,28 +624,35 @@ script is its child, so everything arriving over the socket is attacker-influenc
 run: recorded, never trusted. The residual gap — a push is itself unauthenticated, and running
 repo-committed scripts is the feature — is a known, documented issue.
 
-**The daemon is pinned per run.** `qits.ci.daemon-version` is resolved once when a run is created,
+**The daemon is pinned per run, off a ladder qits-ci keeps for itself**
+(`ci-daemon-autoadopt-plan.md`). `CiDaemonPins.answer()` is resolved once when a run is created,
 recorded on the run row, and injected into every one of that run's containers, so a deploy landing
-mid-run cannot make step 3 speak a different protocol than step 1. With the shipped url template
-that version is the binary's **sha256** and the download is qits-artifacts' OCI blob route, so the
-version pin and the integrity pin are one field. It ships **blank**, which yields a url that 404s and
-the honest never-registered failure state rather than a default this repo invented; a deployment sets
-it together with the daemon it deployed. Deployments not on `qits-net` under the standard aliases
-also need `qits.ci.container-daemon-url`. Both are documented where they are shipped, in the `ci`
-jar's `META-INF/microprofile-config.properties`.
+mid-run cannot make step 3 speak a different protocol than step 1. The top rung is the newest
+**adopted** daemon release that has proven itself; the bottom rung is the deployment's own
+`qits.ci.daemon-version`, which is never demoted. A release is adopted off the `SoftwareRelease` bus
+event qits-ci-daemon's own release pipeline publishes, then proven by launching it in a real
+container and checking it dials and speaks the host's protocol version — a release that never dials,
+or dials with a protocol version this host does not know, is rejected and the ladder falls to the
+rung below. `qits.ci.daemon-autoadopt-enabled` (default `true`, dark under `%dev`/`%test`) turns
+adoption off entirely, leaving the configured pin the only rung. The download address is
+version-addressed — `qits.ci.daemon-binary-url-template` with `{version}` resolved through the
+ladder — and a version is validated at adoption as a single safe path segment (a calver or a digest
+hex, never `/`, `..`, `?`, `#` or whitespace) rather than checked at boot, because a version now
+arrives untrusted off the bus instead of only from a reviewed deployment. Deployments not on
+`qits-net` under the standard aliases also need `qits.ci.container-daemon-url`. All of this is
+documented where it is shipped, in the `ci` jar's `META-INF/microprofile-config.properties`.
 
-**The pin is queryable, and a malformed one is a boot line rather than a mystery.** `GET
-/ci/api/daemon` answers the *configured* value — what a run started right now would download, which
-is a different and much smaller question than what `ci_run.daemon_version` records, since that is
-history and the run listing clamps at 100. qits-artifacts' daemon GC reads it when it plans a sweep
-and aborts with nothing deleted if it cannot, the same fail-closed shape the docker strategy has
-against qits-cd's deployments. And because the shipped template addresses the binary **by digest**, a
-non-blank value that is not 64 lowercase hex characters cannot resolve: that is checked at boot and
-warned about, naming the key and the value, instead of surfacing as every run failing
-never-registered with a download error that reads like a broken qits-artifacts. Blank stays valid and
-silent. The check follows the *template*, so re-pointing it at a version-addressed surface — the
-config edit the key's own comment promises — takes the check with it rather than flagging a correct
-calver version forever.
+**The pin is queryable, and an empty ladder is a readiness check rather than a mystery.** `GET
+/ci/api/daemon` answers `{daemonName, daemonVersion, previousDaemonVersion, source}` — the ladder's
+top rung, what a run started right now would download and what it would fall back to — which is a
+different and much smaller question than what `ci_run.daemon_version` records, since that is history
+and the run listing clamps at 100. qits-artifacts' daemon GC reads it when it plans a sweep and
+aborts with nothing deleted if it cannot, the same fail-closed shape the docker strategy has against
+qits-cd's deployments. When every adopted candidate is rejected and no `qits.ci.daemon-version` is
+configured, `daemonVersion` answers blank, `source` answers `"none"`, and `/q/health/ready` goes
+DOWN naming the rejected versions — an honest "no pin" state, not a boot failure, so `GET
+/ci/api/daemon` stays answerable to say why. Runs still execute and still fail with today's
+distinguishable states; nothing about an empty ladder refuses a run.
 
 **Failures stay distinguishable.** Docker refusing the launch, a container whose bootstrap never
 produced a daemon (its own `docker logs` tail is captured *before* the reap and becomes the step's

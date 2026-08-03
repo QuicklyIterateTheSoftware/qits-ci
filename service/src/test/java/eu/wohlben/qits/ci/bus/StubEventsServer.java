@@ -3,6 +3,7 @@ package eu.wohlben.qits.ci.bus;
 import io.quarkus.test.common.QuarkusTestResourceLifecycleManager;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
+import io.vertx.core.json.Json;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -39,7 +40,13 @@ public class StubEventsServer implements QuarkusTestResourceLifecycleManager {
   /** One request that arrived: the id from the path, and the body verbatim. */
   public record Put(String id, String body) {}
 
+  /** One event a test seeds for {@code GET} to answer -- {@link DaemonReleaseListener}'s startup
+   *  discovery is the one reader in this repository, and this is the whole shape it reads. */
+  public record Seeded(String id, String occurredAt, String payload) {}
+
   private static final List<Put> PUTS = Collections.synchronizedList(new ArrayList<>());
+
+  private static final List<Seeded> SEEDED_EVENTS = Collections.synchronizedList(new ArrayList<>());
 
   /**
    * Every subscribe frame this stub was sent. Recorded because the deployable's own wire set is a
@@ -67,13 +74,27 @@ public class StubEventsServer implements QuarkusTestResourceLifecycleManager {
   }
 
   /**
-   * Forget what arrived. Called between tests; the server itself is one per JVM.
+   * Forget what arrived, and forget what {@code GET} would answer. Called between tests; the server
+   * itself is one per JVM.
    *
    * <p>Subscribes are deliberately <b>not</b> cleared: there is one per connection and the connection
    * outlives every test method, so clearing would throw away the only copy of the frame.
    */
   public static void reset() {
     PUTS.clear();
+    SEEDED_EVENTS.clear();
+  }
+
+  /**
+   * Script what {@code GET /events/api/events} answers -- a {@code SoftwareRelease}'s three fields
+   * {@link eu.wohlben.qits.ci.control.DaemonReleaseLog} reads, in the order they are added. This stub
+   * ignores every query parameter and returns the whole scripted list: {@code EventsDaemonReleaseLog}
+   * asks for {@code limit=2} of a query qits-events itself already filters and orders (BU), so
+   * scripting the two rows a test wants read is the honest shape for a stub standing in for that
+   * service, not a second implementation of its filter.
+   */
+  public static void seedEvent(String id, String occurredAt, String payload) {
+    SEEDED_EVENTS.add(new Seeded(id, occurredAt, payload));
   }
 
   @Override
@@ -98,6 +119,15 @@ public class StubEventsServer implements QuarkusTestResourceLifecycleManager {
                             });
                     return;
                   }
+                  if (request.method().name().equals("GET")
+                      && path.equals(EVENTS_PATH.substring(0, EVENTS_PATH.length() - 1))) {
+                    request
+                        .response()
+                        .putHeader("Content-Type", "application/json")
+                        .setStatusCode(200)
+                        .end(listResponse());
+                    return;
+                  }
                   request.response().setStatusCode(404).end();
                 })
             .webSocketHandler(
@@ -115,6 +145,33 @@ public class StubEventsServer implements QuarkusTestResourceLifecycleManager {
                 });
     server.listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().join();
     return Map.of("qits.events.url", "http://127.0.0.1:" + server.actualPort());
+  }
+
+  /** The {@code {"events":[...],"nextCursor":null}} shape {@code EventController.list} answers,
+   *  built from whatever {@link #seedEvent} scripted. */
+  private static String listResponse() {
+    StringBuilder body = new StringBuilder("{\"events\":[");
+    synchronized (SEEDED_EVENTS) {
+      for (int i = 0; i < SEEDED_EVENTS.size(); i++) {
+        Seeded seeded = SEEDED_EVENTS.get(i);
+        if (i > 0) {
+          body.append(',');
+        }
+        body.append("{\"id\":")
+            .append(Json.encode(seeded.id()))
+            .append(",\"name\":\"SoftwareRelease\",\"occurredAt\":")
+            .append(Json.encode(seeded.occurredAt()))
+            .append(",\"payload\":")
+            .append(Json.encode(seeded.payload()))
+            .append(",\"description\":null,\"parentId\":null,\"createdAt\":")
+            .append(Json.encode(seeded.occurredAt()))
+            .append(",\"updatedAt\":")
+            .append(Json.encode(seeded.occurredAt()))
+            .append("}");
+      }
+    }
+    body.append("],\"nextCursor\":null}");
+    return body.toString();
   }
 
   @Override
