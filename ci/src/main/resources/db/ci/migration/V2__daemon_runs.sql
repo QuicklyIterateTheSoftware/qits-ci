@@ -6,8 +6,9 @@
 -- injected into every one of that run's step containers, so a deploy landing mid-run cannot make
 -- step 3 speak a different protocol than step 1 — and the row records afterwards which binary
 -- produced its results. Null on runs recorded before this existed, and on a CONFIG_ERROR run that
--- never launched a container. It holds whatever qits.ci.daemon-version holds, which with the shipped
--- url template is the binary's sha256 rather than a readable version number.
+-- never launched a container. It holds whatever the daemon pin ladder answered for this run (see
+-- ci/control/CiDaemonPins) -- a readable calver for an adopted or configured release, or the sha256
+-- hex a platform bootstrapped before it had a calver row.
 alter table ci_run add column daemon_version varchar(64);
 
 -- Per-step timestamps. Both are HOST-stamped: started_at is when qits-ci sent the step's script to
