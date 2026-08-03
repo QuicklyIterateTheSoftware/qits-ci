@@ -40,9 +40,10 @@ import org.jboss.logging.Logger;
  *
  * <p><b>The blocking bridge.</b> Each run executes on one worker ({@code CiRunService}), one step at
  * a time, and that thread used to park on a {@code docker run} process. It now parks
- * here instead: {@link #awaitRegistered}, {@link #awaitInitialized} and {@link #awaitFinished} each
- * block on one {@code CompletableFuture} per lifecycle transition while chunks flow to the step's
- * listener as they arrive. The failure mode that swap introduces is anything that never returns
+ * here instead: {@link #awaitRegistered}, {@link #awaitHello}, {@link #awaitInitialized} and {@link
+ * #awaitFinished} each block on one {@code CompletableFuture} per lifecycle transition while chunks
+ * flow to the step's listener as they arrive. The failure mode that swap introduces is anything that
+ * never returns
  * wedging all of CI, so <b>nothing in this package waits without a deadline</b> — and that covers
  * three kinds of wait, not one:
  *
@@ -231,6 +232,25 @@ public class CiDaemonRegistry {
     return launch != null && Boolean.TRUE.equals(await(launch.registered, timeout, Boolean.FALSE));
   }
 
+  /**
+   * Block until the daemon's {@link Hello} arrives, the launch is reaped, or the deadline expires.
+   * Returns the announced capability version, or {@code null} when none arrived in time.
+   *
+   * <p>Registration ({@link #awaitRegistered}) completes at websocket <em>admission</em> — one round
+   * trip before the daemon has said anything at all. A caller that needs to know what the daemon
+   * announced (not just that it dialled) must wait on this instead of reading {@link
+   * #capabilityVersionOf} straight after {@link #awaitRegistered}, which can observe the gap between
+   * the two and see {@code null} for a daemon that is about to say Hello perfectly normally.
+   */
+  public Integer awaitHello(String daemonId, Duration timeout) {
+    Launch launch = launches.get(daemonId);
+    if (launch == null) {
+      return null;
+    }
+    int version = await(launch.helloReceived, timeout, -1);
+    return version < 0 ? null : version;
+  }
+
   /** Block until the daemon reports its checkout done, fails it, drops, or the deadline expires. */
   public Initialization awaitInitialized(String daemonId, Duration timeout) {
     Launch launch = launches.get(daemonId);
@@ -295,6 +315,7 @@ public class CiDaemonRegistry {
     }
     launch.phase = Phase.DONE;
     launch.registered.complete(Boolean.FALSE);
+    launch.helloReceived.complete(-1);
     launch.initialized.complete(Initialization.of(Initialization.Status.CONNECTION_LOST));
     launch.finished.complete(Completion.of(Completion.Status.CONNECTION_LOST));
     WebSocketConnection connection = launch.connection;
@@ -341,11 +362,13 @@ public class CiDaemonRegistry {
 
   /**
    * The capability version this launch's {@link Hello} announced, or {@code null} when none has
-   * arrived yet (or the launch is unknown, or already reaped). Previously read once inline, logged
-   * on a mismatch and discarded (ci-daemon-autoadopt-plan.md §1.4) — this is the smallest change
-   * that turns that mismatch into a verdict a caller can act on, which is what {@code
-   * CiDaemonContainerProbe} does: registration alone cannot tell a capability-mismatched daemon
-   * (which registers, Acks, and then exits) from a healthy one, only this can.
+   * arrived yet (or the launch is unknown, or already reaped). Observational only, and racy for a
+   * caller that needs to know what the daemon announced: reading this straight after {@link
+   * #awaitRegistered} returns can still see {@code null} for a daemon whose {@link Hello} has not
+   * arrived yet, because registration completes at websocket admission, one round trip earlier. A
+   * caller that must not see that gap blocks on {@link #awaitHello} instead — the fix for exactly
+   * this race in {@code CiDaemonContainerProbe} (proven in production: it read this method right
+   * after {@link #awaitRegistered} and rejected every genuine daemon).
    */
   public Integer capabilityVersionOf(String daemonId) {
     Launch launch = launches.get(daemonId);
@@ -415,6 +438,7 @@ public class CiDaemonRegistry {
           return false;
         }
         launch.capabilityVersion = hello.capabilityVersion();
+        launch.helloReceived.complete(hello.capabilityVersion());
         if (hello.capabilityVersion() != CiDaemonProtocol.CAPABILITY_VERSION) {
           // Logged, not refused: the Ack carries the host's version and the daemon is the side that
           // decides it cannot speak it (it exits nonzero, and its container log is the diagnosis).
@@ -466,6 +490,7 @@ public class CiDaemonRegistry {
       }
       launch.connection = null;
     }
+    launch.helloReceived.complete(-1);
     launch.initialized.complete(Initialization.of(Initialization.Status.CONNECTION_LOST));
     launch.finished.complete(Completion.of(Completion.Status.CONNECTION_LOST));
     LOG.debugf("ci-daemon %s disconnected (connection %s)", daemonId, connection.id());
@@ -568,6 +593,8 @@ public class CiDaemonRegistry {
     private volatile int capabilityVersion = -1;
 
     private final CompletableFuture<Boolean> registered = new CompletableFuture<>();
+    /** Completed by the {@link Hello} branch of {@link #onMessage} — see {@link #awaitHello}. */
+    private final CompletableFuture<Integer> helloReceived = new CompletableFuture<>();
     private final CompletableFuture<Initialization> initialized = new CompletableFuture<>();
     private final CompletableFuture<Completion> finished = new CompletableFuture<>();
 
