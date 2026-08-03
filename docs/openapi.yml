@@ -97,7 +97,13 @@ components:
     DaemonPinDto:
       type: object
       properties:
+        daemonName:
+          type: string
         daemonVersion:
+          type: string
+        previousDaemonVersion:
+          type: string
+        source:
           type: string
     Instant:
       type: string
@@ -145,8 +151,8 @@ paths:
       summary: The daemon binary this instance is configured to launch
       responses:
         "200":
-          description: The configured pin; blank when this deployment has pinned no
-            daemon
+          description: The ladder's top rung; daemonVersion and source are blank/"none"
+            when this deployment has adopted or pinned no daemon
           content:
             application/json:
               schema:

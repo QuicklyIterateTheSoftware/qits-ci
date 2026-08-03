@@ -18,7 +18,6 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -266,7 +265,6 @@ public class CiDaemonHandshakeIT {
       // Told, never derived: the container is handed this exact string and parses nothing out of it.
       launcher.containerDaemonUrl =
           "ws://host.docker.internal:" + controlSocket.getPort() + controlSocket.getPath();
-      launcher.daemonVersion = Optional.empty();
       launcher.daemonBinaryUrlTemplate = fixture.containerBinaryUrl();
       launcher.registerTimeoutSeconds = 180;
       launcher.outputMaxChars = 65536;

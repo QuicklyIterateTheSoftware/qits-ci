@@ -5,8 +5,9 @@ import eu.wohlben.qits.ci.error.BadRequestException;
 /**
  * Validates the untrusted strings that reach a filesystem path or an argv. Three arrive from the
  * event intake — which sits on the token-free {@code PublicPaths} list with a token that is blank in
- * dev — and one, the step's {@code image}, arrives from a file in the repository being tested. All
- * four are attacker-reachable by design, so all four are checked here rather than trusted.
+ * dev — one, the step's {@code image}, arrives from a file in the repository being tested, and one,
+ * the daemon version, arrives in a bus payload. All five are attacker-reachable by design, so all
+ * five are checked here rather than trusted.
  *
  * <p>These patterns are <b>defence in depth, not the only guard</b>. Nothing here is ever
  * interpolated into a shell string: the container's whole contract rides as environment and the
@@ -23,6 +24,13 @@ public final class CiIdentifiers {
 
   /** Conservative subset of valid ref names — enough for real branches, hostile to nothing else. */
   private static final String BRANCH = "[A-Za-z0-9._][A-Za-z0-9._/-]{0,254}";
+
+  /**
+   * One path segment, nothing else — a calver and a digest hex both fit, and neither {@code /},
+   * {@code ..}, {@code ?}, {@code #} nor whitespace can, which is what keeps this value from
+   * redirecting the download it is interpolated into (ci-daemon-autoadopt-plan.md §1.5).
+   */
+  private static final String DAEMON_VERSION = "[A-Za-z0-9][A-Za-z0-9._-]{0,63}";
 
   private CiIdentifiers() {}
 
@@ -79,5 +87,26 @@ public final class CiIdentifiers {
       throw new BadRequestException("Invalid branch name");
     }
     return branch;
+  }
+
+  /**
+   * A daemon pin candidate's version, as adopted off a {@code SoftwareRelease} bus payload and later
+   * interpolated into a URL path segment a step container fetches
+   * ({@code qits.ci.daemon-binary-url-template}). Accepts both spellings a pin can legitimately
+   * hold: a calver ({@code 2026.803.91607}) and a sha256 digest hex.
+   *
+   * <p>This is the check that replaces {@code CiDaemonLauncher}'s old boot-time
+   * {@code daemonVersionComplaint}, which warned only while the shipped template still spelled
+   * {@code sha256:{version}} and went silent by construction once it stopped — see
+   * ci-daemon-autoadopt-plan.md §1.5. This one is enforced at adoption rather than merely logged,
+   * because the value it guards now arrives over the bus rather than from a reviewed deployment.
+   *
+   * @throws BadRequestException if the version could redirect the download it is interpolated into
+   */
+  public static String requireDaemonVersion(String version) {
+    if (version == null || !version.matches(DAEMON_VERSION)) {
+      throw new BadRequestException("Invalid daemon version");
+    }
+    return version;
   }
 }
