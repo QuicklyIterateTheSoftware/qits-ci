@@ -86,7 +86,12 @@ public class CiDaemonContainerProbe implements DaemonProbe {
 
   /** {@link #probe} with the test-mode guard removed -- see the class javadoc. */
   ProbeResult probeUnconditionally(String version) {
-    String runId = "daemon-probe-" + UUID.randomUUID();
+    // A bare UUID, not "daemon-probe-" + UUID: the old prefix made every probe's runId start with
+    // the literal "daemon-p", so CiDaemonLauncher.containerName's blind 8-character substring named
+    // every probe container the same thing -- the incident this fixes. A bare UUID's own first 8
+    // characters are already high-entropy hex, and containerName no longer trusts a prefix alone
+    // anyway (it also folds in a disambiguator over the whole runId) -- see its own javadoc.
+    String runId = UUID.randomUUID().toString();
     CiDaemonRegistry.Credentials credentials = registry.registerLaunch(runId, 0, null);
     String containerName = CiDaemonLauncher.containerName(runId, 0);
     try {
