@@ -94,6 +94,11 @@ components:
       enum:
       - POST_RECEIVE
       - EVENT
+    DaemonPinDto:
+      type: object
+      properties:
+        daemonVersion:
+          type: string
     Instant:
       type: string
       format: date-time
@@ -135,6 +140,19 @@ components:
       openIdConnectUrl: http://qits-idp:8080/idp/.well-known/openid-configuration
       description: Authentication
 paths:
+  /ci/api/daemon:
+    get:
+      summary: The daemon binary this instance is configured to launch
+      responses:
+        "200":
+          description: The configured pin; blank when this deployment has pinned no
+            daemon
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DaemonPinDto"
+      tags:
+      - Ci Daemon Controller
   /ci/api/repositories:
     get:
       summary: The repository ids qits-ci has recorded runs for

@@ -2,6 +2,7 @@ package eu.wohlben.qits.ci.daemonhost;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -301,5 +302,61 @@ public class CiDaemonLauncherTest {
   @Test
   public void shortRunIdsAreUsedWholeInTheContainerName() {
     assertEquals("qits-ci-abc-0", CiDaemonLauncher.containerName("abc", 0));
+  }
+
+  // --- the boot-time shape check on qits.ci.daemon-version ---
+
+  private static final String DIGEST_TEMPLATE =
+      "http://qits-artifacts:8080/v2/qits/ci-daemon/blobs/sha256:{version}";
+
+  private static final String A_DIGEST =
+      "c04a603e95cf1f2f6a9a1f6f0f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c";
+
+  @Test
+  public void aBlankVersionIsValidAndSaysNothing() {
+    // Blank means this deployment has pinned no daemon — the shipped default and an honest state.
+    // A warning per boot about the default would train the reader to ignore this one.
+    assertNull(CiDaemonLauncher.daemonVersionComplaint("", DIGEST_TEMPLATE));
+    assertNull(CiDaemonLauncher.daemonVersionComplaint(null, DIGEST_TEMPLATE));
+    assertNull(CiDaemonLauncher.daemonVersionComplaint("   ", DIGEST_TEMPLATE));
+  }
+
+  @Test
+  public void aWellFormedDigestSaysNothing() {
+    assertNull(CiDaemonLauncher.daemonVersionComplaint(A_DIGEST, DIGEST_TEMPLATE));
+  }
+
+  @Test
+  public void aMalformedDigestIsNamedAtBootRatherThanLeftToEveryRun() {
+    // The failure this replaces is every run reaching the never-registered state with a download
+    // error in a container log tail — which reads like a broken qits-artifacts and names the key it
+    // actually is nowhere. So the complaint has to carry the key and the offending value.
+    for (String bad :
+        List.of(
+            "gate-build",
+            A_DIGEST.toUpperCase(java.util.Locale.ROOT),
+            A_DIGEST.substring(0, 63),
+            A_DIGEST + "0",
+            "sha256:" + A_DIGEST)) {
+      String complaint = CiDaemonLauncher.daemonVersionComplaint(bad, DIGEST_TEMPLATE);
+      assertTrue(complaint != null && complaint.contains("qits.ci.daemon-version"), bad);
+      assertTrue(complaint.contains(bad), complaint);
+    }
+  }
+
+  @Test
+  public void aTemplateThatDoesNotAddressByDigestIsNotCheckedAtAll() {
+    // The version has to be a sha256 only because the shipped template addresses the binary by one.
+    // The config comment beside that key promises a version-addressed surface would be a config edit
+    // rather than a code change, so a deployment taking that edit carries a calver version that is
+    // CORRECT — and a version-only check would flag it forever. The check follows the template and
+    // goes quiet by construction when the template stops saying "digest".
+    assertNull(
+        CiDaemonLauncher.daemonVersionComplaint(
+            "2026.8.1", "http://qits-artifacts:8080/artifacts/daemons/qits-ci-daemon/{version}"));
+    // The gate IT's fixture serves one binary from a url with no placeholder at all.
+    assertNull(
+        CiDaemonLauncher.daemonVersionComplaint("gate-build", "http://127.0.0.1:1234/ci-daemon"));
+    assertNull(CiDaemonLauncher.daemonVersionComplaint("gate-build", null));
   }
 }

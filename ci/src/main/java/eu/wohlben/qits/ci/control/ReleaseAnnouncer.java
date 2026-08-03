@@ -39,7 +39,7 @@ public interface ReleaseAnnouncer {
    * @param version the version, read out of the triggering event's payload. qits-ci publishes
    *     nothing when that field is absent: the declaration was written for a trigger that cannot
    *     feed it.
-   * @param packageType {@code npm}, {@code maven}, or {@code docker} — {@link
+   * @param packageType {@code npm}, {@code maven}, {@code docker} or {@code daemon} — {@link
    *     CiArtifact.Type#declared()}, the keyword the trigger file used, which is also the wire value
    * @param packageName the exact package name, unqualified for docker ({@code qits/qits-stt}): no
    *     registry-qualified reference is portable across the step network and this process's own

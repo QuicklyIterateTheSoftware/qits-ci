@@ -555,7 +555,7 @@ follows is what biting it feels like.
   duplicate keys are therefore errors in a trigger file and are not in a pipeline. The `steps:`
   schema is shared verbatim (`CiConfigSchema`), because a step must not mean two things.
 - **`artifacts:` is the one key the trigger file adds rather than subtracts**, and it is what makes a
-  file a *release pipeline*: a non-empty list of `{type: npm|maven|docker, name: …}`, strict in every
+  file a *release pipeline*: a non-empty list of `{type: npm|maven|docker|daemon, name: …}`, strict in every
   direction (empty list, unknown type, blank name, extra key, wrong shape — all parse errors naming
   the file). It is a parse error in `ci-post-receive.yml` for its own reason rather than by symmetry
   with `branches:`: what a declaration announces is the *triggering* event's version, and a push
@@ -732,6 +732,12 @@ mechanism at all — which is what every service here was before the header land
   and a breaking change to `CiRunDto` would have landed with an **empty diff** — which is the exact
   opposite of why the file is committed. `POST /ci/api/events/post-receive` stays hidden and the
   criterion is why: it is token-guarded, machine-only, and its wire contract lives in qits-artifacts.
+  **`GET /ci/api/daemon` is in for the mirror-image reason** and is worth having as the worked case
+  of a *machine* consumer that still belongs in the document: it is unguarded, its contract lives
+  here rather than in the service that reads it, and qits-artifacts' daemon GC reads it fail-closed —
+  so a change to its shape stops a sweep in another repository, which is precisely the class of
+  change that must not land with an empty diff. "Machine surfaces stay out" was never about the
+  caller being a machine; it is about where the contract is written down.
   The file is committed precisely so that hiding or unhiding an operation shows up as a diff.
 
   **`?limit=` on the run listing binds as a `String` on purpose.** JAX-RS answers a *query*-parameter

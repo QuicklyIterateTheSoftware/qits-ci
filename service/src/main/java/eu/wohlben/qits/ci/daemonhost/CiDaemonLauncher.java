@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
+import java.util.regex.Pattern;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
@@ -51,6 +52,12 @@ public class CiDaemonLauncher {
 
   /** Where the label-filtered boot sweep and the per-step label agree. */
   static final String RUN_LABEL = "qits.ci.run";
+
+  /** What the shipped url template addresses the binary by: a sha256 digest, written into the url. */
+  private static final String DIGEST_PLACEHOLDER = "sha256:{version}";
+
+  /** 64 lowercase hex characters — a sha256 as the OCI blob route spells it, and nothing else. */
+  private static final Pattern SHA256_HEX = Pattern.compile("[0-9a-f]{64}");
 
   /**
    * The container's entrypoint: fetch the daemon, make it executable, become it. A {@code static
@@ -103,6 +110,10 @@ public class CiDaemonLauncher {
    * rather than as an empty string — a plain {@code String} injection would fail. Blank means this
    * deployment has not pinned a daemon binary, which yields a url that 404s and the honest
    * never-registered failure state — not a boot failure, and not a default this class invents.
+   *
+   * <p>A non-blank value is shape-checked at boot and only warned about; see {@link
+   * #daemonVersionComplaint}. Still not a boot failure: the value costs runs, not the process, and a
+   * service that refused to start could not even serve {@code GET /ci/api/daemon} to say why.
    */
   @ConfigProperty(name = "qits.ci.daemon-version")
   Optional<String> daemonVersion;
@@ -223,6 +234,11 @@ public class CiDaemonLauncher {
    * by intent and a test app must not reach the host's docker daemon to prove it.
    */
   void onStart(@Observes StartupEvent event) {
+    // Before the test guard, because it reaches nothing: it reads two configured strings and logs.
+    String complaint = daemonVersionComplaint(daemonVersion(), daemonBinaryUrlTemplate);
+    if (complaint != null) {
+      LOG.warn(complaint);
+    }
     if (LaunchMode.current() == LaunchMode.TEST) {
       return;
     }
@@ -264,6 +280,47 @@ public class CiDaemonLauncher {
   /** The daemon version this process is configured to pin onto a new run; blank when unset. */
   public String daemonVersion() {
     return daemonVersion.orElse("");
+  }
+
+  /**
+   * The boot-time shape check on {@code qits.ci.daemon-version}: null when the configured value is
+   * one this deployment can serve, the complaint to log otherwise.
+   *
+   * <p><b>It exists because the failure it replaces blames the wrong thing.</b> A malformed digest
+   * resolves to a url that 404s, and what an operator sees is every run reaching the
+   * never-registered state with a download error in a container's log tail — a symptom that reads
+   * like a broken qits-artifacts, a wrong network or a bad image, and names the one config key it
+   * actually is nowhere. One line at boot is the whole fix.
+   *
+   * <p><b>Blank is valid and says so by saying nothing.</b> It means this deployment has not pinned
+   * a daemon binary yet, which is the shipped default and an honest state — a fresh platform has no
+   * daemon until something publishes one. The never-registered failure is then correct rather than
+   * mysterious, and a warning per boot about the default would train the reader to ignore this one.
+   *
+   * <p><b>The check follows the URL TEMPLATE, not the version alone</b>, and that is what keeps it
+   * from outliving its own reason. The version has to be a sha256 because the shipped template
+   * addresses the binary by digest ({@code …/blobs/sha256:{version}}); the config comment beside
+   * that key promises a version-addressed surface would be a config edit rather than a code change,
+   * and a deployment taking that edit would carry a calver version that is <em>correct</em> and that
+   * a version-only check would flag forever. So the check runs exactly when the template says the
+   * value is a digest, and goes quiet by construction when it stops saying so.
+   */
+  static String daemonVersionComplaint(String version, String urlTemplate) {
+    if (version == null || version.isBlank()) {
+      return null;
+    }
+    if (urlTemplate == null || !urlTemplate.contains(DIGEST_PLACEHOLDER)) {
+      return null;
+    }
+    if (SHA256_HEX.matcher(version).matches()) {
+      return null;
+    }
+    return "qits.ci.daemon-version is '"
+        + version
+        + "', which is not the 64 lowercase hex characters of a sha256 digest that"
+        + " qits.ci.daemon-binary-url-template addresses the binary by. Every run will download from"
+        + " a url that 404s and fail as never-registered. Set it to the digest of a published"
+        + " qits-ci-daemon, or leave it blank if this deployment has none yet.";
   }
 
   /** How long a launch may take, which is mostly how long an image pull may take. */

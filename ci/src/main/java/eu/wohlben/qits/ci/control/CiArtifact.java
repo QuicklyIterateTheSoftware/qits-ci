@@ -1,5 +1,8 @@
 package eu.wohlben.qits.ci.control;
 
+import java.util.Arrays;
+import java.util.List;
+
 /**
  * One artifact a trigger file declares its pipeline publishes: {@code {type: npm, name:
  * "@qits/ui-components"}}.
@@ -31,11 +34,21 @@ public record CiArtifact(Type type, String name) {
    * <p>Maven names a published GAV, for example {@code eu.wohlben.qits:qits-eventstream}. The
    * repository host is omitted for the same portability reason as docker's: the consumer supplies
    * the address from its own environment.
+   *
+   * <p>{@code daemon} names a platform daemon binary, for example {@code qits-ci-daemon} — an
+   * executable qits-artifacts holds and the platform downloads and runs, rather than a package any
+   * third-party tool installs. It is here so the release train can announce a daemon like anything
+   * else it builds; before it existed, the one binary every CI run depends on was the only artifact
+   * on the platform no {@code SoftwareRelease} could name. <b>qits-ci publishes none of these</b>,
+   * exactly as it publishes no npm package — the PUT to qits-artifacts is a step in the daemon
+   * repository's own release pipeline, and the declaration here is what turns that pipeline's green
+   * run into an announcement.
    */
   public enum Type {
     NPM("npm"),
     MAVEN("maven"),
-    DOCKER("docker");
+    DOCKER("docker"),
+    DAEMON("daemon");
 
     private final String declared;
 
@@ -58,9 +71,16 @@ public record CiArtifact(Type type, String name) {
       return null;
     }
 
-    /** The vocabulary as a message fragment, so an error names what this qits-ci knows. */
+    /**
+     * The vocabulary as a message fragment, so an error names what this qits-ci knows.
+     *
+     * <p>Derived from {@link #values()} rather than spelled out, because a hand-written list is a
+     * second place a new type has to be added and the only symptom of forgetting is an error message
+     * that refuses a keyword it does not admit to knowing.
+     */
     static String vocabulary() {
-      return NPM.declared + ", " + MAVEN.declared + " and " + DOCKER.declared;
+      List<String> all = Arrays.stream(values()).map(Type::declared).toList();
+      return String.join(", ", all.subList(0, all.size() - 1)) + " and " + all.getLast();
     }
   }
 }
