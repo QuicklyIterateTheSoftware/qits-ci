@@ -169,6 +169,9 @@ public class DaemonReleaseListener implements QitsRawEventListener {
    * shape {@code CiRunService.onStart}/{@code sweepInterrupted} already carries, and the same fix:
    * the reconciliation is {@link #reconcileFromLog}, package-private, so a test that wants to claim
    * something about discovery seeds the log first and calls it directly.
+   *
+   * <p><b>Must return without probing.</b> {@link #reconcileFromLog} only adopts and enqueues -- see
+   * its own javadoc for why a synchronous probe here was a boot deadlock, confirmed live.
    */
   void onStart(@Observes StartupEvent event) {
     if (!autoadoptEnabled || releaseLog.isUnsatisfied()) {
@@ -177,8 +180,28 @@ public class DaemonReleaseListener implements QitsRawEventListener {
     reconcileFromLog();
   }
 
-  /** The reconciliation on its own -- see {@link #onStart}'s javadoc for why it is a separate,
-   *  directly callable method rather than inline in the observer. */
+  /**
+   * The reconciliation on its own -- see {@link #onStart}'s javadoc for why it is a separate,
+   * directly callable method rather than inline in the observer.
+   *
+   * <p><b>Adopts synchronously (a fast upsert); never probes synchronously.</b> This used to end
+   * with a direct call to {@code pins.answer()} -- the ladder's probe -- reasoned as "paid up front
+   * instead of on the first run". That reasoning was wrong: {@code answer()} probes any {@code
+   * UNPROVEN} rung by launching a real container, and the probe dials back to this very process over
+   * a socket the startup thread has not bound yet. It cannot succeed before boot finishes, so it
+   * blocks for {@code qits.ci.daemon-register-timeout-seconds} (60s); the container healthcheck's
+   * shorter budget (~19s) fails first, and cd kills the deployment before the socket ever opens.
+   * Measured live: qits-ci {@code 0e09ca32} (2026.803.171135) failed exactly this way.
+   *
+   * <p>The fix hands the probe to {@code ci-daemon-adopt-worker} -- the same queue {@link #onFrame}
+   * already uses for a live release -- instead of running it here. {@link #onStart} then returns and
+   * the socket binds with the ladder unprobed, which is not a failure state: {@link CiDaemonPins}'s
+   * own javadoc calls probing "lazy", so the first probe simply happens once, whether that is this
+   * queued call or the next run's {@code pinDaemon()}. Readiness stays UP too while unprobed --
+   * {@code eu.wohlben.qits.ci.api.CiDaemonReadinessCheck} is DOWN only when the ladder has fallen all
+   * the way through (source {@code NONE}), and the configured pin is always available as a bottom
+   * rung underneath an unprobed one.
+   */
   void reconcileFromLog() {
     List<DaemonReleaseLog.Release> releases = releaseLog.get().recentReleases(2);
     for (int i = releases.size() - 1; i >= 0; i--) {
@@ -186,11 +209,11 @@ public class DaemonReleaseListener implements QitsRawEventListener {
       pins.adopt(release.version(), release.eventId(), release.occurredAt());
     }
     if (!releases.isEmpty()) {
-      // The probe is deliberately synchronous here rather than handed to the adopt queue: startup
-      // reconciliation runs once, on the startup thread, before this instance answers any run's
-      // pinDaemon() -- the same property the lazy probe inside answer() exists to guarantee, just
-      // paid up front instead of on the first run.
-      pins.answer();
+      try {
+        adopter.execute(pins::answer);
+      } catch (RejectedExecutionException full) {
+        LOG.warn("Daemon adoption queue is full -- startup reconciliation's probe was not queued");
+      }
     }
   }
 

@@ -18,6 +18,7 @@ import io.quarkus.test.common.WithTestResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
+import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -95,7 +96,7 @@ public class DaemonReleaseListenerTest {
   }
 
   @Test
-  public void startupDiscoveryReadsTwoRowsAndSeedsBothRungs() {
+  public void startupDiscoveryReadsTwoRowsAndSeedsBothRungs() throws Exception {
     // StubEventsServer answers GET in the order events were seeded (its own javadoc says so) --
     // qits-events itself answers newest first, so the seed order here is newest first too.
     StubEventsServer.seedEvent(
@@ -112,11 +113,104 @@ public class DaemonReleaseListenerTest {
     probe.willAnswer("v-new", Verdict.PROVEN, "");
 
     listener.reconcileFromLog();
+    listener.awaitIdle();
 
     CiDaemonPins.Pin pin = pins.answer();
     assertEquals("v-new", pin.version());
     assertEquals("v-old", pin.previousVersion());
     assertEquals(CiDaemonPins.SOURCE_ADOPTED, pin.source());
+  }
+
+  /**
+   * The regression for the boot deadlock this class once had: {@code answer()}'s probe launches a
+   * container that dials back to this process over a socket the startup thread has not bound yet, so
+   * a synchronous probe inside {@code onStart} could never succeed and blocked boot until cd killed
+   * the deployment (qits-ci {@code 0e09ca32}, 2026.803.171135). {@code reconcileFromLog} must adopt
+   * and return without probing; the probe belongs on {@code ci-daemon-adopt-worker}, proven here by
+   * asserting {@link FakeDaemonProbe} was not touched until {@link DaemonReleaseListener#awaitIdle}
+   * drains that queue.
+   */
+  @Test
+  public void reconcileFromLogAdoptsAndReturnsWithoutProbingSynchronously() throws Exception {
+    StubEventsServer.seedEvent(
+        "evt-boot",
+        "2026-08-01T00:00:00Z",
+        "{\"packageName\":\"qits-ci-daemon\",\"packageType\":\"daemon\",\"repository\":\"qits-ci-daemon\""
+            + ",\"version\":\"v-boot\"}");
+    probe.willAnswer("v-boot", Verdict.PROVEN, "");
+
+    listener.reconcileFromLog();
+
+    assertTrue(
+        probe.probed().isEmpty(),
+        "reconcileFromLog must return before the probe runs -- this is the boot deadlock shape");
+    assertEquals(1, repo.count(), "the release is adopted (a fast upsert) even though unprobed");
+
+    listener.awaitIdle();
+
+    assertEquals(List.of("v-boot"), probe.probed(), "the probe runs once queued idle drains");
+  }
+
+  /**
+   * {@code onStart} itself, not just {@code reconcileFromLog} -- the same claim from the actual
+   * {@code @Observes StartupEvent} entry point, so a future change that moves the probe back inline
+   * in {@code onStart} (rather than in the method it delegates to) still fails this test.
+   */
+  @Test
+  public void onStartReturnsWithoutInvokingTheProbeSynchronously() throws Exception {
+    StubEventsServer.seedEvent(
+        "evt-onstart",
+        "2026-08-01T00:00:00Z",
+        "{\"packageName\":\"qits-ci-daemon\",\"packageType\":\"daemon\",\"repository\":\"qits-ci-daemon\""
+            + ",\"version\":\"v-onstart\"}");
+    probe.willAnswer("v-onstart", Verdict.PROVEN, "");
+    ClientProxy.unwrap(listener).autoadoptEnabled = true;
+    try {
+      listener.onStart(null);
+
+      assertTrue(probe.probed().isEmpty(), "onStart must return before the probe runs");
+
+      listener.awaitIdle();
+
+      assertEquals(List.of("v-onstart"), probe.probed());
+    } finally {
+      ClientProxy.unwrap(listener).autoadoptEnabled = false;
+    }
+  }
+
+  /**
+   * Readiness right after boot, with the ladder's one adopted candidate still unprobed and a
+   * configured pin underneath it: {@link eu.wohlben.qits.ci.api.CiDaemonReadinessCheck} is DOWN only
+   * when the ladder falls all the way through (source {@code NONE}) -- the configured pin is a bottom
+   * rung, never probed and never demoted, so it is available whatever the adopted candidate turns out
+   * to be. Scripted {@code REJECTED} here to prove the fallback, not just the happy path.
+   */
+  @Test
+  public void bootTimeReadinessIsUpWithAnUnprobedLadderBehindAConfiguredPin() throws Exception {
+    ClientProxy.unwrap(pins).configuredVersion = Optional.of("v-configured");
+    StubEventsServer.seedEvent(
+        "evt-unprobed",
+        "2026-08-01T00:00:00Z",
+        "{\"packageName\":\"qits-ci-daemon\",\"packageType\":\"daemon\",\"repository\":\"qits-ci-daemon\""
+            + ",\"version\":\"v-unprobed\"}");
+    probe.willAnswer("v-unprobed", Verdict.REJECTED, "never dialled");
+
+    listener.reconcileFromLog();
+    assertTrue(
+        probe.probed().isEmpty(),
+        "the moment a container healthcheck would hit this endpoint after boot: adopted, not probed");
+
+    given()
+        .when()
+        .get("/ci/q/health/ready")
+        .then()
+        .statusCode(200)
+        .body("status", is("UP"))
+        .body("checks.find { it.name == 'ci-daemon-pin' }.status", is("UP"));
+
+    listener.awaitIdle();
+    assertEquals("v-configured", pins.answer().version());
+    assertEquals(CiDaemonPins.SOURCE_CONFIGURED, pins.answer().source());
   }
 
   @Test
