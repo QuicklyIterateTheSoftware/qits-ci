@@ -893,3 +893,14 @@ mechanism at all — which is what every service here was before the header land
   the root pom) while flipping `skipITs`: a native build has to run the ITs to be worth anything,
   and this one would fail it for reasons that are about the host's docker and networking rather than
   the binary. `-DskipITs=false` still runs it, unchanged.
+- `CiRestartReconciliationIT` is the boot half of the same story, and the only test that drives
+  **both** startup observers at once: a run left `RUNNING` with its step container still on the host,
+  then `CiDaemonLauncher.reapOrphans` and `CiRunService.sweepInterrupted`, then the container gone and
+  the row `FAILED`. It also asserts an **unlabelled** container survives, which is the whole of what
+  the `qits.ci.run` filter is for.
+  Two things about it. It sits in `control` rather than in `daemonhost` because `sweepInterrupted` is
+  package-private there and the paired assertion is the point; everything it needs from the launcher
+  is public. And **it must not run against a host carrying a live qits-ci**: the boot sweep removes
+  every labelled container by construction, which is correct at boot and destructive mid-run. Tagged
+  `extended` for that reason as much as for docker — it needs docker and a shell image and nothing
+  else, no daemon binary, no git host, no route back to the JVM.
