@@ -7,8 +7,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.ci.daemonhost.CiDaemonLauncher.LaunchSpec;
 import eu.wohlben.qits.ci.error.BadRequestException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -341,6 +348,89 @@ public class CiDaemonLauncherTest {
     assertFalse(
         CiDaemonLauncher.containerName(runIdA, 0).equals(CiDaemonLauncher.containerName(runIdB, 0)),
         "two distinct probe runIds must not collide on the container name");
+  }
+
+  /**
+   * <b>A docker the boot sweep cannot reach must say so.</b> The success path logs only a positive
+   * count, so while the failure was a DEBUG the two outcomes an operator most needs to tell apart —
+   * "there was nothing to sweep" and "the sweep never ran, so the orphans are still there" — left
+   * exactly the same (empty) log. Both cases are asserted here together, because the claim is about
+   * the difference between them and not about either line on its own.
+   *
+   * <p>The fake docker is a two-line shell script on {@code runtime}: this class already wires that
+   * field by hand, so nothing has to be stubbed inside {@code CiProcess} to make the CLI fail — the
+   * real process really runs and really exits non-zero.
+   */
+  @Test
+  public void aDockerThatCannotBeReachedWarnsInsteadOfLookingLikeAnEmptyHost() throws Exception {
+    String complaint = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock.";
+    CiDaemonLauncher launcher = launcher();
+    launcher.runtime = fakeDocker("echo '" + complaint + "' >&2\nexit 3\n").toString();
+
+    List<String> warnings = new ArrayList<>();
+    Handler capture = captureWarnings(warnings);
+    java.util.logging.Logger launcherLog =
+        java.util.logging.Logger.getLogger(CiDaemonLauncher.class.getName());
+    launcherLog.addHandler(capture);
+    try {
+      assertEquals(0, launcher.reapOrphans(), "a boot must not fail because docker is down");
+      assertEquals(1, warnings.size(), "one WARN, naming the failure: " + warnings);
+      String warning = warnings.getFirst();
+      assertTrue(warning.contains("exited 3"), "the exit code belongs in it: " + warning);
+      assertTrue(warning.contains(complaint), "so does docker's own words: " + warning);
+
+      // And the other half of the claim: a docker that answers with an empty list is silent, so the
+      // WARN above means "could not sweep" rather than "swept nothing".
+      warnings.clear();
+      launcher.runtime = fakeDocker("exit 0\n").toString();
+      assertEquals(0, launcher.reapOrphans());
+      assertEquals(List.of(), warnings, "an empty host is not a problem and must not warn");
+    } finally {
+      launcherLog.removeHandler(capture);
+    }
+  }
+
+  /** An executable standing in for the docker CLI, running the given script body. */
+  private static Path fakeDocker(String body) throws Exception {
+    Path script = Files.createTempFile("qits-fake-docker", ".sh");
+    Files.writeString(script, "#!/bin/sh\n" + body);
+    script.toFile().setExecutable(true);
+    script.toFile().deleteOnExit();
+    return script;
+  }
+
+  private static Handler captureWarnings(List<String> into) {
+    return new Handler() {
+      @Override
+      public void publish(LogRecord record) {
+        if (record.getLevel().intValue() >= Level.WARNING.intValue()) {
+          into.add(rendered(record));
+        }
+      }
+
+      @Override
+      public void flush() {}
+
+      @Override
+      public void close() {}
+    };
+  }
+
+  /**
+   * {@code LOG.warnf} hands the log manager a printf format plus its arguments and leaves the
+   * rendering to the handler, so the assertions above have to do that rendering themselves. A
+   * provider that formats eagerly leaves no parameters, and then the message is already the answer.
+   */
+  private static String rendered(LogRecord record) {
+    Object[] parameters = record.getParameters();
+    if (parameters == null || parameters.length == 0) {
+      return record.getMessage();
+    }
+    try {
+      return String.format(record.getMessage(), parameters);
+    } catch (RuntimeException e) {
+      return record.getMessage() + " " + Arrays.toString(parameters);
+    }
   }
 
   // The boot-time shape check that used to live here (daemonVersionComplaint) is gone with the

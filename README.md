@@ -775,6 +775,12 @@ a repository's own listing will show.
 
 ## Deploying it
 
+- **Run one qits-ci per docker daemon.** On boot it removes every container carrying the
+  `qits.ci.run` label on the daemon it talks to, because after a crash nothing is left that could say
+  which of them were its own. Two instances sharing one daemon would therefore reap each other's
+  running steps: deploying the second kills the first's in-flight builds, and every restart of either
+  does it again. Give each instance its own docker host or its own daemon; do not point two at one
+  socket to share capacity, and size a single instance with `qits.ci.concurrent-builds` instead.
 - Set `qits.ci.concurrent-builds` to the maximum number of pipelines this qits-ci instance may run
   at once (default **4**, minimum **1**). Steps remain sequential within one pipeline. Size this
   together with the host's CPU and memory and the per-container `qits.ci.cpus`/`memory-limit` caps.

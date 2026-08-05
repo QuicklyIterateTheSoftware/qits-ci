@@ -5,6 +5,7 @@ import eu.wohlben.qits.ci.control.CiIdentifiers;
 import eu.wohlben.qits.ci.control.CiProcess;
 import io.quarkus.runtime.LaunchMode;
 import io.quarkus.runtime.StartupEvent;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
@@ -49,6 +50,22 @@ public class CiDaemonLauncher {
 
   /** Lines of container log kept as the bootstrap's error report. */
   private static final String LOG_TAIL_LINES = "200";
+
+  /**
+   * How much of docker's own complaint reaches the WARN when the boot sweep cannot list containers.
+   * The tail rather than the head, because the reason a CLI failed is the last thing it says.
+   */
+  private static final int DOCKER_ERROR_TAIL_CHARS = 500;
+
+  /**
+   * Boot order, first half. This observer runs <b>before</b> {@code CiRunService.onStart}, which
+   * carries the matching {@code @Priority} one step higher. <b>Move neither alone</b> — see {@link
+   * #onStart} for what the order buys.
+   *
+   * <p>Public only so that {@code BootReconciliationOrderTest}, which sits in the other half's
+   * package, can state both numbers in one place instead of restating either as a literal.
+   */
+  public static final int BOOT_REAP_PRIORITY = 2000;
 
   /** Where the label-filtered boot sweep and the per-step label agree. */
   static final String RUN_LABEL = "qits.ci.run";
@@ -219,10 +236,21 @@ public class CiDaemonLauncher {
    * this one. The two halves run at the same event and mean one thing together: no run claims to be
    * executing, and nothing it started is still running.
    *
+   * <p><b>This half runs first, and the order is now stated rather than left to the container.</b>
+   * {@code CiRunService.sweepInterrupted} does not only write rows — it puts work back on the run
+   * worker, restarting every interrupted event run and re-enqueueing every {@code QUEUED} one, and
+   * that worker starts labelled containers as soon as it has work. A sweep-then-reap order would let
+   * this sweep {@code docker rm -f} a container the restarted run had just launched, because the
+   * filter is the label alone and a fresh container wears it exactly like a stale one. Reaping first
+   * closes that window: by the time any run can start, the previous life's containers are gone.
+   * {@code @Priority} on both observers is what encodes it — this one is {@link
+   * #BOOT_REAP_PRIORITY}, {@code CiRunService.onStart} is the higher number, and <b>neither moves
+   * alone</b>. {@code BootReconciliationOrderTest} holds it.
+   *
    * <p>Skipped under {@code TEST}, like the runner's own startup observer: the suites are docker-free
    * by intent and a test app must not reach the host's docker daemon to prove it.
    */
-  void onStart(@Observes StartupEvent event) {
+  void onStart(@Observes @Priority(BOOT_REAP_PRIORITY) StartupEvent event) {
     if (LaunchMode.current() == LaunchMode.TEST) {
       return;
     }
@@ -326,7 +354,22 @@ public class CiDaemonLauncher {
     }
   }
 
-  /** Remove every container carrying the ci run label. Returns how many there were. */
+  /**
+   * Remove every container carrying the ci run label. Returns how many there were.
+   *
+   * <p><b>This is host-wide, and it has to be.</b> The filter is the label and nothing else, so it
+   * removes every labelled container on the docker daemon — including one another qits-ci is running
+   * a step in right now. That is not an oversight to narrow: after a crash there is no record left of
+   * which containers were this process's, which is the whole reason the sweep exists. So <b>one
+   * qits-ci per docker daemon</b> is a deployment constraint, stated in {@code AGENTS.md} and in
+   * {@code README.md}'s deployment section where an operator meets it.
+   *
+   * <p><b>A failed listing is a WARN, not a DEBUG.</b> The success path only logs a positive count,
+   * so at DEBUG "the sweep could not run" and "there was nothing to sweep" left identical logs — and
+   * the first of those means every orphan from the previous life is still on the host. It still
+   * returns 0 rather than throwing: docker being briefly down must not stop this process from
+   * booting.
+   */
   public int reapOrphans() {
     CiProcess.Result listed =
         CiProcess.run(
@@ -335,7 +378,13 @@ public class CiDaemonLauncher {
             CLEANUP_TIMEOUT,
             8192);
     if (listed.exitCode() != 0) {
-      LOG.debugf("Could not list orphaned CI step containers: %s", listed.output());
+      LOG.warnf(
+          "Could not sweep orphaned CI step containers: '%s ps' exited %d%s, so any container a"
+              + " previous life left behind is still on this host. It said: %s",
+          runtime,
+          listed.exitCode(),
+          listed.timedOut() ? " (timed out)" : "",
+          dockerErrorTail(listed.output()));
       return 0;
     }
     List<String> ids =
@@ -350,6 +399,21 @@ public class CiDaemonLauncher {
     argv.addAll(ids);
     CiProcess.run(null, argv, CLEANUP_TIMEOUT, 8192);
     return ids.size();
+  }
+
+  /**
+   * The tail of what the docker CLI said, short enough for one log line. {@link CiProcess} merges
+   * stderr into stdout, so this is the whole complaint; an empty one is named rather than logged as
+   * a blank, because "docker printed nothing" is itself the diagnosis when the binary is missing.
+   */
+  private static String dockerErrorTail(String output) {
+    String text = output == null ? "" : output.strip();
+    if (text.isEmpty()) {
+      return "(nothing)";
+    }
+    return text.length() <= DOCKER_ERROR_TAIL_CHARS
+        ? text
+        : "..." + text.substring(text.length() - DOCKER_ERROR_TAIL_CHARS);
   }
 
   /**

@@ -119,7 +119,7 @@ on — **no code path here runs repo-controlled code as a host process or throug
 docker vocabulary is container lifecycle only. `CiDaemonLauncher.BOOTSTRAP` is a `static final
 String` with zero interpolation; a step script never appears in an argv.
 
-Three things bite:
+Four things bite:
 
 - **`@WebSocket(path = "/ci/daemon")` is a literal that does not follow `quarkus.rest.path`**, so it
   carries the `/ci` segment itself — and no machine guard reaches it, which is correct rather than an
@@ -150,6 +150,22 @@ Three things bite:
   run needs while a close is being polite to a peer that is about to be `rm -f`'d anyway.
   The pattern's own coverage is asserted against known strings in the same test: a guard that can be
   silently incomplete is worth exactly what its coverage is, and that coverage used to be unasserted.
+- **The boot sweep is host-wide, so one docker daemon carries one qits-ci.**
+  `CiDaemonLauncher.reapOrphans` removes *every* container labelled `qits.ci.run` on the daemon it
+  talks to. That is not a filter someone forgot to narrow: after a crash nothing is left that could
+  say whose container is whose, which is the entire reason the sweep exists. Two qits-ci instances
+  sharing one docker daemon would therefore reap each other's in-flight steps every time either one
+  booted — a second instance's *deploy* would kill the first's running builds. The constraint is in
+  `README.md`'s deployment section too, and it is the same fact `CiRestartReconciliationIT`'s javadoc
+  states as "do not run this against a host with a live qits-ci on it".
+
+  **The two boot observers are ordered, and the order is reap-then-sweep.** They observe one
+  `StartupEvent` and CDI orders two observers of one event only if they ask, so both carry
+  `@Priority` — `CiDaemonLauncher.BOOT_REAP_PRIORITY` then `CiRunService.BOOT_SWEEP_PRIORITY`.
+  The reason is the label filter again: `sweepInterrupted` hands work back to the run worker, which
+  starts labelled containers at once, so a reap running second could remove a container a restarted
+  run had just launched. Neither annotation moves alone; `BootReconciliationOrderTest` asserts the
+  pair and that ArC really honours it.
 
 This is the execution path, not a plan for one. `CiDaemonStepRunner` is the only implementation of
 `CiStepRunner`; the approach it replaced — one `docker run` of a composite `bash -c` with a

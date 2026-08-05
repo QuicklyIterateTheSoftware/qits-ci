@@ -124,7 +124,11 @@ public class CiRestartReconciliationIT {
     insertRunningRun(runId);
 
     try {
-      // The two boot observers, as a restart runs them.
+      // The two boot observers, in the order a restart runs them: reap first, then sweep. That order
+      // is the observers' own @Priority pair (BootReconciliationOrderTest holds it) and the reason is
+      // the label filter — the sweep hands work back to the run worker, so a reap running second
+      // could remove a container a restarted run had just started. Keep these two calls this way
+      // round.
       int reaped = launcher.reapOrphans();
       service.sweepInterrupted();
       service.awaitIdle();

@@ -21,6 +21,7 @@ import io.quarkus.runtime.LaunchMode;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.inject.Instance;
@@ -120,6 +121,13 @@ import org.jboss.logging.Logger;
 public class CiRunService {
 
   private static final Logger LOG = Logger.getLogger(CiRunService.class);
+
+  /**
+   * Boot order, second half. This observer runs <b>after</b> {@code CiDaemonLauncher.onStart}, whose
+   * matching {@code @Priority} is one step lower. <b>Move neither alone</b> — see {@link #onStart}
+   * for what the order buys.
+   */
+  public static final int BOOT_SWEEP_PRIORITY = 2100;
 
   /**
    * Prefixed onto an output tail whose head was dropped. Public because the runner applies the
@@ -224,8 +232,16 @@ public class CiRunService {
    * <p>The container half of the same reconciliation is {@code CiDaemonLauncher.onStart}, which
    * reaps what the {@code RUNNING} runs left behind; it is a second observer because it needs docker
    * and this module has no business knowing about it.
+   *
+   * <p><b>That half runs first, and the {@code @Priority} pair is what says so.</b> This one does
+   * not only write rows: it hands work straight back to the run worker, which starts labelled
+   * containers of its own. The reap filters on the label alone and cannot tell a container this boot
+   * just started from one the previous life left, so running it second would let it remove a
+   * restarted run's first container. {@code CiDaemonLauncher.onStart} therefore carries the lower
+   * priority and this one the higher; <b>neither moves alone</b>, and {@code
+   * BootReconciliationOrderTest} holds the pair.
    */
-  void onStart(@Observes StartupEvent event) {
+  void onStart(@Observes @Priority(BOOT_SWEEP_PRIORITY) StartupEvent event) {
     if (LaunchMode.current() == LaunchMode.TEST) {
       return;
     }
