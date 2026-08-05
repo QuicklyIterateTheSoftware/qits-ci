@@ -4,31 +4,39 @@ import java.util.Set;
 
 /**
  * Which repositories the trigger engine asks about when an event arrives. <b>One method</b>, so that
- * swapping where the answer comes from is one class rather than a refactor — which matters, because
- * the answer this platform ships is a fallback.
+ * swapping where the answer comes from is one class rather than a refactor — which is not a
+ * hypothetical: the swap has happened, and it was one class.
  *
- * <h2>What the git host offers, checked rather than assumed</h2>
+ * <h2>The shipped answer: the git host's listing, unioned with what ci knows</h2>
  *
- * <p>The plan's first choice was to enumerate through qits-artifacts, which owns the repositories.
- * <b>It exposes no such surface, and that is a decision rather than a gap.</b> Its git host is six
- * smart-HTTP routes under {@code /artifacts/git/}, all of them addressed by an id the caller already
- * has; there is no bare-directory listing; {@code /v2/_catalog} answers 404 with a comment saying
- * enumeration is what the private posture avoids; the npm search route is refused for the same
- * reason; and {@code GET /artifacts/api/repositories} lists <em>artifact</em> repositories — blob,
- * OCI and npm rows in that service's own table — which a git repository never creates. qits-projects'
- * {@code RepositoryDiscoveryService} does enumerate, and it does so by listing a shared filesystem
- * volume, which is precisely the coupling qits-ci does not have (it keeps its own bare caches and
- * fetches over HTTP so it can run on a machine with no filesystem in common with qits).
+ * <p>{@link ListedAndKnownCiRepos} is the bean the engine gets. It asks the git host for {@code GET
+ * <qits.ci.git-host-url>/git} → {@code {"repositories":[…]}} through the {@link GitHostRepoListing}
+ * port, and <b>adds</b> that to {@link KnownCiRepos}' answer — the repo ids on recorded runs plus
+ * ci's own bare caches.
  *
- * <p>So the shipped answer is {@link KnownCiRepos}: <b>the repositories qits-ci already knows</b>.
- * The cost is named rather than hidden — a repository that has never pushed since this feature
- * shipped cannot event-trigger until its first push. That is one push, it is the same push that
- * would have been needed to commit the trigger file anyway, and it buys not inventing an
- * enumeration API in another service's private posture.
+ * <p><b>Union, not replacement.</b> The listing is one HTTP call away, so an unreachable, failed or
+ * malformed listing is a WARN naming the url and an empty contribution: the answer is then the known
+ * set alone, which is exactly the behaviour that shipped before the listing existed. A read failure
+ * never shrinks the candidate set. The two sources also age in opposite directions — the listing is
+ * what the host has now, the known set covers a repository the host has stopped listing but ci still
+ * holds a cache or a run row for.
  *
- * <p>The day qits-artifacts grows a listing, this interface is where it lands: a second
- * implementation, this one deleted or kept as the offline fallback, and nothing in the engine
- * changes.
+ * <h2>What this replaced, and why the old answer is worth remembering</h2>
+ *
+ * <p>The listing did not exist for the feature's first shape, and enumerating qits-artifacts was
+ * refused rather than overlooked: its git host was six smart-HTTP routes under {@code
+ * /artifacts/git/}, all addressed by an id the caller already has; {@code /v2/_catalog} answers 404
+ * with a comment saying enumeration is what the private posture avoids; the npm search route is
+ * refused for the same reason; and {@code GET /artifacts/api/repositories} lists <em>artifact</em>
+ * repositories — blob, OCI and npm rows in that service's own table — which a git repository never
+ * creates.
+ *
+ * <p>So the shipped answer was {@link KnownCiRepos} alone, with its cost named rather than hidden: a
+ * repository that had never pushed could not event-trigger until it did, which blocked
+ * bootstrapping a platform by rerun ({@code POST /ci/api/events/trigger} against repositories seeded
+ * straight onto the git host). The git host has since grown the one listing that closes it, and this
+ * interface is where it landed — a second implementation, the old one kept as the half of the union
+ * that survives the host being unreachable, and nothing in the engine changed.
  */
 public interface CiCandidateRepos {
 

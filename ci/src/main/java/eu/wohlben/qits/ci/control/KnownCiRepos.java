@@ -14,23 +14,23 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
- * The shipped {@link CiCandidateRepos}: every repository qits-ci has already heard of — the union of
- * the repo ids on its recorded runs and the bare caches under {@code <data-dir>/repos/}.
+ * Every repository qits-ci has already heard of — the union of the repo ids on its recorded runs and
+ * the bare caches under {@code <data-dir>/repos/}.
  *
- * <p>Why this rather than an enumeration of the git host is argued in {@link CiCandidateRepos}; the
- * short of it is that qits-artifacts deliberately exposes none. <b>The consequence a deployment must
- * know</b> is that a repository qits-ci has never seen a push from cannot event-trigger until it
- * pushes once. Committing the trigger file <em>is</em> such a push, so in practice the gap closes
- * itself the moment a repository opts in — but a repository whose trigger file was committed while
- * qits-ci was down, and which then never pushes again, stays invisible until it does.
+ * <p>It was the whole of {@link CiCandidateRepos} once. It is now <b>one half</b> of {@link
+ * ListedAndKnownCiRepos}, which adds the git host's own listing on top — and it is the half that
+ * still answers when that listing cannot be read, which is why it stays a {@link CiCandidateRepos}
+ * in its own right rather than becoming a helper. Read {@link CiCandidateRepos} for the argument.
  *
- * <p>The two sources are unioned rather than one preferred, because they age in opposite directions:
- * the caches hold whatever ci has ever fetched (surviving a database wipe), the run rows hold
- * whatever ci has ever recorded (surviving a data-dir wipe). Neither alone is the honest answer to
- * "which repositories does this instance know about".
+ * <p>The two sources here are unioned rather than one preferred, because they age in opposite
+ * directions: the caches hold whatever ci has ever fetched (surviving a database wipe), the run rows
+ * hold whatever ci has ever recorded (surviving a data-dir wipe). Neither alone is the honest answer
+ * to "which repositories does this instance know about".
  *
- * <p>{@code @DefaultBean} so that a deployment — or a test — can replace the source with a single
- * alternative bean and nothing else.
+ * <p>{@code @DefaultBean} so that {@link ListedAndKnownCiRepos} — an ordinary bean — is the one the
+ * engine's {@code CiCandidateRepos} injection point resolves to, while this stays injectable by its
+ * own type. A {@code @Mock} alternative outranks both and replaces the seam whole, which is what the
+ * ci suite's {@code FakeCandidateRepos} does.
  */
 @ApplicationScoped
 @DefaultBean

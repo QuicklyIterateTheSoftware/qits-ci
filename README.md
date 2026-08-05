@@ -101,7 +101,7 @@ rest of qits it reaches over a URL it is configured with:
 | in | `GET /ci/api/daemon` → `{"daemonName", "daemonVersion", "previousDaemonVersion", "source"}` — the pin ladder's top rung (an adopted release, else the configured pin), never a run row; blank `daemonVersion` and `source: "none"` mean this deployment has pinned none | same; read fail-closed by qits-artifacts' daemon GC and readable by the client |
 | in | `POST /ci/api/runs/{runId}/cancel` → 202, 409 on a run that has already finished | same: no token, behind the deployment's auth policy |
 | in | `ws://…/ci/daemon` — the socket each step container's daemon dials **out** to | authenticated by a host-minted per-container secret, not by any token |
-| out | where the git host answers, for ci's **own** `git fetch` of the pushed ref — ci appends `/git/<repoId>` | `qits.ci.git-host-url` |
+| out | where the git host answers, for ci's **own** `git fetch` of the pushed ref — ci appends `/git/<repoId>` — and for `GET <base>/git` → `{"repositories": [...]}`, the trigger engine's candidate listing | `qits.ci.git-host-url` |
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + the pin ladder's answer (`qits.ci.daemon-version` is the ladder's bottom rung, never demoted) |
 | out | `POST /cd/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.cd.intake-url`; no token — cd's intake is not gateway-allowlisted, the call stays on qits-net |
@@ -121,8 +121,9 @@ That filter is mandatory, which makes `GET /ci/api/repositories` the answer to t
 raises: *which* repositories are there to filter by. It returns `repositoryIds` and not
 `repositories` because ci holds no repository object — `ci_run.repo_id` is a plain string with no
 relation to anything, and these are ids this instance **observed**. It is deliberately narrower than
-the trigger engine's candidate list, which also counts the bare caches on disk: a repository ci has
-merely fetched from has no run history to read. Without this endpoint, CI activity that no other
+the trigger engine's candidate list, which also counts the bare caches on disk *and* whatever the git
+host lists: a repository ci has merely fetched from has no run history to read, and one it has only
+been told about has neither. Without this endpoint, CI activity that no other
 service claims is invisible to a client rather than merely unattributed — and on this platform, where
 `qits-local-up.sh` seeds the platform's own repositories straight onto the git host with no
 qits-projects row, that is the whole run history.
@@ -386,6 +387,13 @@ steps:                          # exactly the schema ci-post-receive.yml uses
   them matching one event are two runs by design.
 - **They are read from the head of `main`**, not from a commit — an event names no push, so the
   platform's one tracked branch supplies the ref. The run records the head sha it built.
+- **Which repositories an event is evaluated against**: the union of what the git host lists (`GET
+  <qits.ci.git-host-url>/git` → `{"repositories": [...]}`) and what qits-ci already knows — the
+  repositories it has runs for, plus its own bare caches. So a repository seeded straight onto the
+  git host is a candidate before its first push, which is what makes bootstrapping by hand ("Triggering
+  one by hand") work at all. If the listing cannot be read, that is one WARN naming the url and the
+  known set answers alone: an unreachable git host never shrinks the candidate list and never fails
+  an evaluation.
 - **The two trigger types never blur.** A `ci-post-receive.yml` containing `event:`, `when:` or
   `artifacts:` is a config error, and a `ci-event-*.yml` without `event:` is one too.
 - `steps:` is the same schema, `docker: true` and `timeout-seconds:` included, with the same

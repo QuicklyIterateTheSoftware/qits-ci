@@ -2,11 +2,13 @@ package eu.wohlben.qits.ci.api;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.ci.control.FakeCiStepRunner;
+import eu.wohlben.qits.ci.githost.FakeGitHostRepoListing;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
@@ -38,6 +40,10 @@ import org.junit.jupiter.api.Test;
  * So each trigger file below selects an upstream id minted per test method: a selection on a shared
  * literal would let one method's event fire another's repository, and "exactly one run" would stop
  * being a statement about the test making it.
+ *
+ * <p>The last case is the bootstrap this endpoint exists for, and it is the one the candidate list
+ * used to block: a repository the git host lists but qits-ci has never seen. It belongs here rather
+ * than beside the listing's own tests because only the whole engine can show the gap closed.
  */
 @QuarkusTest
 public class CiManualTriggerTest {
@@ -53,11 +59,19 @@ public class CiManualTriggerTest {
   @ConfigProperty(name = "qits.ci.git-host-url")
   String gitHostUrl;
 
+  @ConfigProperty(name = "qits.ci.data-dir")
+  String dataDir;
+
   @Inject FakeCiStepRunner fakeRunner;
 
+  @Inject FakeGitHostRepoListing gitHostListing;
+
   @BeforeEach
-  void resetRunner() {
+  void resetFakes() {
     fakeRunner.reset();
+    // Empty is what every other method here wants: they make their repository a candidate by
+    // pushing, exactly as production did before the git host grew a listing.
+    gitHostListing.set();
   }
 
   @Test
@@ -142,6 +156,35 @@ public class CiManualTriggerTest {
     assertEquals(
         List.of(first, second).stream().sorted().toList(),
         runs.stream().map(r -> (String) r.get("triggerEventId")).sorted().toList());
+  }
+
+  @Test
+  public void aRepositoryOnlyTheGitHostListsTriggersWithNoPushAndNoCache() throws Exception {
+    String upstream = upstream();
+    String repoId = seedOrigin(upstream);
+
+    // The production gap, stated as two assertions: no run row and no bare cache is precisely what
+    // KnownCiRepos answers "not a candidate" to, so before the listing this repository could not
+    // event-trigger at all — which is what blocked bootstrapping a platform seeded straight onto the
+    // git host. Note it is NOT pushed.
+    assertTrue(runsOf(repoId).isEmpty(), "the repository has no run history in qits-ci");
+    assertFalse(
+        Files.isDirectory(Path.of(dataDir, "repos", repoId + ".git")),
+        "qits-ci holds no bare cache for it either");
+
+    gitHostListing.set(repoId);
+
+    String eventId =
+        trigger(
+            """
+            {"name":"SoftwareRelease","occurredAt":"2026-08-05T09:00:00Z","payload":%s}"""
+                .formatted(payload(upstream)));
+
+    Map<String, Object> run = awaitRuns(repoId, 1).get(0);
+    assertEquals("SUCCESS", run.get("status"));
+    assertEquals("EVENT", run.get("triggerType"), "the listing made it a candidate, nothing else");
+    assertEquals(eventId, run.get("triggerEventId"));
+    assertEquals(TRIGGER_PATH, run.get("configPath"));
   }
 
   @Test

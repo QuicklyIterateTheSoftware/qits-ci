@@ -60,9 +60,11 @@ package:
   it needs a web stack, which is the same line that put `api` here rather than in `ci/`, and it is
   where qits-workspaces keeps its own `daemonhost` for the same reason. `ci/` keeps the
   `CiStepRunner` seam and the orchestrator and gains no web dependency — the step runner is in
-  `service/` because it *is* the transport. Two more packages of the same kind: `notify`, the cd
-  announcement, and `bus`, both ends of the event bus (below). Every one of them is an *adapter* for
-  a seam that lives in `ci/control`; that is what the package split says.
+  `service/` because it *is* the transport. Three more packages of the same kind: `notify`, the cd
+  announcement; `bus`, both ends of the event bus (below); and `githost`, the git host's repository
+  listing (see "The trigger engine"). Every one of them is an *adapter* for a seam that lives in
+  `ci/control`; that is what the package split says — and every `java.net.http` client living here
+  rather than in `ci/` is that same rule applied.
 - `ci-daemon-protocol/` — the vendored wire contract (below). Its package is
   `eu.wohlben.qits.cidaemon.protocol`, deliberately not under `eu.wohlben.qits.ci`: it is a copy of
   another repo's module and its package must stay byte-identical with the original.
@@ -573,12 +575,50 @@ follows is what biting it feels like.
   because a declaration is statically readable, which is the whole of what the parked cycle-detection
   work needs. The daemon's return channel could not have carried an emission anyway: it is
   `StepChunk` and `StepFinished`, and a stdout sentinel is forbidden by design.
-- **The candidate list is the feature's one acknowledged compromise.** qits-artifacts owns the
-  repositories and deliberately exposes no listing of them, so `KnownCiRepos` answers with what
-  qits-ci already knows: recorded runs' repo ids plus its own bare caches. A repository that has
-  never pushed cannot event-trigger until it does. It is one method behind `CiCandidateRepos` so the
-  day a listing exists the swap is one class — and `FakeCandidateRepos` exercises that swap rather
-  than leaving it a claim.
+- **The candidate list was the feature's one acknowledged compromise, and it is the worked example of
+  a seam paying for itself.** It read: qits-artifacts exposes no listing, so `KnownCiRepos` answers
+  with what qits-ci already knows — recorded runs' repo ids plus its own bare caches — and a
+  repository that has never pushed cannot event-trigger until it does. That cost was real: it blocked
+  bootstrapping a platform seeded straight onto the git host, which is exactly what `POST
+  /ci/api/events/trigger` exists for. The git host has since grown the listing, the swap was the one
+  class the javadoc promised, and nothing in the engine moved.
+
+  **What ships now is a union, and union is the design rather than a step towards replacement.**
+  `ListedAndKnownCiRepos` is the bean the engine gets: `GET <qits.ci.git-host-url>/git` →
+  `{"repositories": […]}` through the `GitHostRepoListing` port, **added to** `KnownCiRepos`' answer.
+  The listing is one HTTP call away, so an unreachable host, a non-200, a body that is not JSON and a
+  body with no `repositories` array are each one WARN naming the url and an empty contribution — the
+  answer is then the known set alone, which is precisely what shipped before. **A read failure must
+  never shrink the candidate set**, the same rule the run queue states for an unreachable git host one
+  section up. The two halves also age in opposite directions: the listing is what the host has now,
+  the known set still covers a repository the host has stopped listing but ci holds a cache or a row
+  for.
+
+  Four things about the HTTP half, which is `service/…/githost/HttpGitHostRepoListing` and is in
+  `service/` because **`ci/` stays free of `java.net.http`** — the rule `DaemonReleaseLog` states and
+  `CdNotifier` set:
+
+  - **The url is derived, never configured.** It is the git host's own base plus the same `/git`
+    segment `GitConfigFetcher` appends to fetch a ref, so the listing and the fetch move together.
+  - **The timeouts are short because of which thread this is on.** 2s connect, 3s for the whole
+    exchange. It runs on the single-threaded `ci-trigger-worker` in front of every evaluation, so an
+    untimed call would stall *every* arriving event; and the evaluation it precedes does a `git fetch`
+    per candidate, so the listing must never be the slow part. Past the deadline the known set is a
+    correct answer.
+  - **The cache is five seconds and deliberately trivial.** One evaluation already costs a fetch per
+    candidate, so this is not an optimisation — it is so a burst on the bus is one listing read rather
+    than one per frame. Only a *successful* read is cached, because caching a failure would keep a git
+    host that came back up invisible for the window.
+  - **A non-HTTP git host is a DEBUG, not a WARN.** Both suites point `qits.ci.git-host-url` at a
+    `file://` directory, which serves no listing and never could; warning on it would be a line per
+    event forever, which is the failure `GitConfigFetcher#fetchBranch`'s `expected` parameter exists
+    to avoid. Ids off the listing are filtered through `CiIdentifiers` before they reach a git argv,
+    exactly as `KnownCiRepos` filters its own directory names.
+
+  `KnownCiRepos` stays `@DefaultBean` and `ListedAndKnownCiRepos` is an ordinary bean, which is the
+  whole of the CDI arrangement: the ordinary bean wins the engine's injection point while the default
+  one stays injectable by its own type, and a `@Mock` alternative outranks both — so
+  `FakeCandidateRepos` still replaces the seam whole and still exercises the swap it was written for.
 - **Nothing here needed native-image registration**, and `EventWireReflection`'s javadoc says why in
   full: SnakeYAML's `SafeConstructor` produces plain collections, the parser builds its records by
   hand, and the payload is `readTree`'d into a `JsonNode` and walked. No binding, no reflection, no
@@ -855,6 +895,22 @@ mechanism at all — which is what every service here was before the header land
   and both states are then real at one instant the test controls. That is why the service module's
   copy grew the hook too: `RUNNING` and `QUEUED` had to be observable over HTTP, which is where the
   SPA sees them.
+- **The candidate list is proven at three levels, and each one can only say its own thing.**
+  `HttpGitHostRepoListingTest` is plain JUnit against a real server on a real socket: the url shape,
+  the id filter, the cache, and every way the read can fail answering the *empty* set rather than
+  throwing. `ListedAndKnownCiReposTest` is a `@QuarkusTest` in the `ci` module, because the union's
+  whole content is which beans it composes — `KnownCiRepos` by its own type past its `@DefaultBean`,
+  the port through an `Instance` — and a hand-wired instance would prove none of it. And
+  `CiManualTriggerTest`'s last case is the production gap itself: a repository seeded onto the git
+  host with a trigger file, asserted to have **no run row and no bare cache**, firing a run off a
+  hand-supplied event. Only the whole engine can show that, which is why it lives there and not
+  beside the listing.
+  There is a `FakeGitHostRepoListing` in each module's test sources, duplicated for the reason both
+  `FakeCiStepRunner`s are. The service module's is a `@Mock`, so the real client is out of the way of
+  every other test; the `ci` module's is an ordinary bean, because that module ships no
+  implementation of the port at all and this is what makes it resolvable there. **Both default to
+  empty**, which is not a neutral default but the interesting one: an empty listing is exactly what an
+  unreachable git host answers, so the fallback needs no failure to stage.
 - **Two classes in this repo run with the event bus on, and they share one profile deliberately.**
   Everything else inherits the shipped `%test` darkness, so "the suite dials nothing" is the default
   rather than an arrangement each test makes; `BuildSuccessfulPublishTest` turns it back on through a
