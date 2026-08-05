@@ -49,6 +49,13 @@ class MachineGuardTest {
 
   private static final String INTAKE = "/ci/api/events/post-receive";
 
+  /** Absolute, like every address here: it is what catches a prefix or a rename regression. */
+  private static final String TRIGGER = "/ci/api/events/trigger";
+
+  private static final String TRIGGER_BODY =
+      """
+      {"name":"SoftwareRelease","payload":{"repository":"guarded-repo","version":"1.0.0"}}""";
+
   private static String push(String repoId) {
     return """
         {"repoId":"%s","branch":"main","oldSha":"%s","newSha":"%s"}"""
@@ -163,6 +170,56 @@ class MachineGuardTest {
         .post(INTAKE)
         .then()
         .statusCode(400);
+  }
+
+  @Test
+  void theManualTriggerWithNoMachineTokenIs401() {
+    // The manual trigger runs other repositories' pipelines, so it is guarded exactly as the intake
+    // is. This test is what keeps that true: the endpoint sits on the same resource, and a guard
+    // dropped from it would otherwise show up as a cheerful 202.
+    given()
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(TRIGGER_BODY)
+        .when()
+        .post(TRIGGER)
+        .then()
+        .statusCode(401);
+  }
+
+  @Test
+  @TestSecurity(user = QitsClaims.ARTIFACTS)
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = QitsClaims.CI),
+        @Claim(key = QitsClaims.PROJECT, value = "*")
+      })
+  void theManualTriggerNeedsATokenGrantedEveryProject() {
+    given()
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(TRIGGER_BODY)
+        .when()
+        .post(TRIGGER)
+        .then()
+        .statusCode(202);
+  }
+
+  @Test
+  @TestSecurity(user = QitsClaims.ARTIFACTS)
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = QitsClaims.CI),
+        @Claim(key = QitsClaims.PROJECT, value = "guarded-repo")
+      })
+  void aTokenScopedToOneRepositoryMayNotTriggerAcrossAllOfThemIs403() {
+    // An event names no repository — it is evaluated against every candidate — so a grant naming one
+    // does not cover it.
+    given()
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(TRIGGER_BODY)
+        .when()
+        .post(TRIGGER)
+        .then()
+        .statusCode(403);
   }
 
   @Test

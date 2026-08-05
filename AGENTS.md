@@ -512,6 +512,15 @@ follows is what biting it feels like.
   side, pointed the other way, and it is why `CiEventTriggerService` — which does the real work —
   imports no `eu.wohlben.qits.eventstream` type. Keep it that way; the extraction rule protects
   the library, and this one protects the domain.
+- **`onEvent` has a second inbound adapter, and that is all it is.** `POST /ci/api/events/trigger`
+  (`CiEventController`) builds the same `Arrival` from a JSON body, so the engine cannot tell a
+  hand-supplied event from a frame — no branch, no flag, no second code path, and nothing web-shaped
+  reaching `ci/`. It lives on the intake's resource rather than in one of its own so the guard, the
+  path and the accept-and-return shape stay shared; it demands `project=*` where the intake demands
+  the pushed repository, because an event names no repository. The **id default is load-bearing**: a
+  fresh random UUID per call, or the dedupe below silently drops every rerun. A caller that passes
+  one is opting into the dedupe, which is what makes a bootstrap script idempotent. Both are in
+  `README.md` under "Triggering one by hand", and both are pinned by `CiManualTriggerTest`.
 - **`signatures()` is `Set.of(ALL)` permanently, and it is not laziness.** The wire set is derived
   only when the connection is opened and **the subscriber does not dial at all when the union is
   empty**, so a listener that answered `Set.of()` until it had read some config would never open the
@@ -732,6 +741,10 @@ mechanism at all — which is what every service here was before the header land
   and a breaking change to `CiRunDto` would have landed with an **empty diff** — which is the exact
   opposite of why the file is committed. `POST /ci/api/events/post-receive` stays hidden and the
   criterion is why: it is token-guarded, machine-only, and its wire contract lives in qits-artifacts.
+  **`POST /ci/api/events/trigger` is the same criterion answering the other way on the same
+  resource**, which is the clearest illustration of it there is: a person invokes it on purpose and
+  its contract is written down nowhere but here, so it is not hidden — the guard the two share had
+  nothing to do with the decision.
   **`GET /ci/api/daemon` is in for the mirror-image reason** and is worth having as the worked case
   of a *machine* consumer that still belongs in the document: it is unguarded, its contract lives
   here rather than in the service that reads it, and qits-artifacts' daemon GC reads it fail-closed —

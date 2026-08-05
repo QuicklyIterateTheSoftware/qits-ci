@@ -140,6 +140,30 @@ components:
           $ref: "#/components/schemas/CiRunDto"
         lastMainRun:
           $ref: "#/components/schemas/CiRunDto"
+    TriggerEventAccepted:
+      type: object
+      properties:
+        eventId:
+          type: string
+    TriggerEventRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          examples:
+          - SoftwareRelease
+          description: "The event signature, matched against a trigger file's `event:`"
+        payload:
+          type: object
+          description: "The event payload, exactly as it would arrive off the bus"
+        occurredAt:
+          type: string
+          examples:
+          - 2026-08-04T09:00:00Z
+          description: "ISO-8601 instant. Absent: now."
+        eventId:
+          type: string
+          description: "UUID. Absent: a fresh random one — see the dedupe note."
   securitySchemes:
     SecurityScheme:
       type: openIdConnect
@@ -159,6 +183,27 @@ paths:
                 $ref: "#/components/schemas/DaemonPinDto"
       tags:
       - Ci Daemon Controller
+  /ci/api/events/trigger:
+    post:
+      summary: Run every event pipeline that selects a caller-supplied domain event
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TriggerEventRequest"
+        required: true
+      responses:
+        "202":
+          description: "Accepted for evaluation, with the event id it ran under"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TriggerEventAccepted"
+        "400":
+          description: "Blank name, missing payload, or an unparseable timestamp or\
+            \ id"
+      tags:
+      - Ci Event Controller
   /ci/api/repositories:
     get:
       summary: The repository ids qits-ci has recorded runs for
@@ -294,4 +339,4 @@ paths:
       - Ci Run Controller
 info:
   title: qits-ci API
-  version: 2026.802.191321
+  version: 2026.803.191734
