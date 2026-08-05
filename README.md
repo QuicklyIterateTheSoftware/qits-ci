@@ -19,7 +19,7 @@ recorded, with the event that caused it, on the run and in the event log.
 | Module | What |
 |---|---|
 | `ci/` | `eu.wohlben.qits.ci.*` — entity, persistence, dto, mapper, control, error. The pipeline itself. No web, no JAX-RS. |
-| `service/` | `eu.wohlben.qits.ci.api` — the JAX-RS event intake, the run read surface, the token filter and the exception mapper — plus `…ci.daemonhost`, the step-container control plane (below). |
+| `service/` | `eu.wohlben.qits.ci.api` — the JAX-RS event intake, the run read surface and the exception mapper — plus `…ci.daemonhost`, the step-container control plane (below). There is no filter in front of the intake: it calls `MachineAuth` (qits-auth-core) itself. |
 | `ci-daemon-protocol/` | `eu.wohlben.qits.cidaemon.protocol` — the ci-daemon wire contract, **vendored** from [qits-ci-daemon](https://github.com/QuicklyIterateTheSoftware/qits-ci-daemon) and never edited here. Framework-free; `diff -r` is the drift detector. |
 | `ci-events/` | `eu.wohlben.qits.ci.events` — the events this service announces: `BuildSuccessful` for every green run, `SoftwareRelease` once per artifact a release pipeline declared. Depends on the published `qits-eventstream` jar and nothing else. |
 
@@ -92,19 +92,19 @@ rest of qits it reaches over a URL it is configured with:
 
 | Direction | Surface | Config |
 |---|---|---|
-| in | `POST /ci/api/events/post-receive` — `{repoId, branch, oldSha, newSha}`, one per updated branch ref | guarded by `qits.ci.token` (`X-CI-Token`) |
+| in | `POST /ci/api/events/post-receive` — `{repoId, branch, oldSha, newSha}`, one per updated branch ref | `machineAuth.requireProject(repoId)` — a qits-idp bearer carrying `aud=qits-ci` and a `project` claim covering the pushed repository (`*` covers any). Behind the platform-wide gate `qits.auth.machine.required`, shipped **off** |
 | in | `POST /ci/api/events/trigger` — `{name, payload, occurredAt?, eventId?}` → 202 `{eventId}`, one domain event supplied by hand instead of by the bus ("Triggering one by hand") | guarded on the same resource, and it needs the wider grant: a machine token covering **every** project, because the event names no repository |
-| in | `GET /ci/api/runs?repositoryId={repoId}[&limit={n}]`, `GET /ci/api/runs/{runId}` | not token-guarded; they carry build logs, so a deployment must keep them behind its auth policy |
+| in | `GET /ci/api/runs?repositoryId={repoId}[&limit={n}]`, `GET /ci/api/runs/{runId}` | not machine-guarded; they carry build logs, so a deployment must keep them behind its auth policy |
 | in | `GET /ci/api/runs/active` → `{"runs": [...]}` — every `QUEUED` or `RUNNING` run on the instance, all repositories, newest first, no parameters | same; unscoped, because "what is CI doing right now" has no repository to scope to |
 | in | `GET /ci/api/repositories` → `{"repositoryIds": [...]}` — the distinct repo ids this instance has runs for, ascending | same; it is the one read here that is not scoped to a repository, because it answers *which* |
 | in | `GET /ci/api/repositories/summary` → `{"repositories": [{repositoryId, lastRun, lastMainRun}]}` — ascending by id, full run objects, `lastMainRun` null when there is none | same; it is the id listing plus the two runs a client would otherwise make a request per repository to find |
 | in | `GET /ci/api/daemon` → `{"daemonName", "daemonVersion", "previousDaemonVersion", "source"}` — the pin ladder's top rung (an adopted release, else the configured pin), never a run row; blank `daemonVersion` and `source: "none"` mean this deployment has pinned none | same; read fail-closed by qits-artifacts' daemon GC and readable by the client |
-| in | `POST /ci/api/runs/{runId}/cancel` → 202, 409 on a run that has already finished | same: no token, behind the deployment's auth policy |
-| in | `ws://…/ci/daemon` — the socket each step container's daemon dials **out** to | authenticated by a host-minted per-container secret, not by any token |
+| in | `POST /ci/api/runs/{runId}/cancel` → 202, 409 on a run that has already finished | same: no machine guard, behind the deployment's auth policy |
+| in | `ws://…/ci/daemon` — the socket each step container's daemon dials **out** to | authenticated by a host-minted per-container secret, not by a machine token |
 | out | where the git host answers, for ci's **own** `git fetch` of the pushed ref — ci appends `/git/<repoId>` — and for `GET <base>/git` → `{"repositories": [...]}`, the trigger engine's candidate listing | `qits.ci.git-host-url` |
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + the pin ladder's answer (`qits.ci.daemon-version` is the ladder's bottom rung, never demoted) |
-| out | `POST /cd/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.cd.intake-url`; no token — cd's intake is not gateway-allowlisted, the call stays on qits-net |
+| out | `POST /cd/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.cd.intake-url`; the call stays on qits-net. `CdBearer` attaches a qits-idp token with `aud=qits-cd` when `quarkus.oidc-client.client-enabled=true`, and sends the POST bare otherwise — which is the shipped default |
 | out | `PUT /events/api/events/{uuid}` — one `BuildSuccessful` per **green** run, idempotent (the `RunAnnouncer` seam) | `qits.events.url`, `qits.eventstream.enabled` |
 | out | the same route — one `SoftwareRelease` per artifact a green **release pipeline** declared (the `ReleaseAnnouncer` seam) | the same two keys |
 | out | `ws://…/events/stream` — dialled out and held open, carrying what qits-events broadcasts back | the same two keys; the address is derived, never configured twice |
@@ -785,12 +785,23 @@ a repository's own listing will show.
   which serves it under its own gateway segment, so the value is `http://qits-artifacts:8080/artifacts`
   and a fetch lands on `/artifacts/git/<repoId>`. The container-side alias only resolves on the
   network ci itself is on, so `qits.ci.network` must be set together with it.
-- Set `qits.ci.token` and configure the git host's notifier with the same value. Blank is the
-  dev/test default and means *no guard*.
-- Allow-list `/ci/api/events/` for unauthenticated access — the caller is the git host's hook, a
-  different process with no user session. That allowlist is qits-gateway's `PublicPaths`.
-- Keep the run **read** surface behind the deployment's auth policy. It is not token-guarded, and it
-  returns build logs.
+- Leave `qits.auth.machine.audience=qits-ci` alone. It is this service's id at qits-idp — the `aud`
+  its tokens carry — not a deployment fact.
+- Turn the intake's guard on with `QITS_AUTH_MACHINE_REQUIRED=true`, once qits-idp is reachable.
+  That one platform-wide gate switches on both the bearer validation and every `MachineAuth` call in
+  the code, and it ships **off**: with it off the endpoints behave exactly as they did under network
+  trust, no bearer needed. There is no third state. Turning it on with no audience set fails at
+  startup rather than accepting tokens addressed elsewhere.
+- Grant the git host's qits-idp client `project=*`. qits-artifacts hosts every project's
+  repositories, so it holds the wildcard rather than a list edited per repository; the intake matches
+  the `project` claim against the pushed **repository id**, because qits-ci has no project entity to
+  name. A client that posts `/ci/api/events/trigger` needs the same wildcard — an event names no
+  repository, so a grant naming one is a 403 there.
+- Allow-list `/ci/api/events/` for unauthenticated access — the caller carries no user session. That
+  allowlist is qits-gateway's `PublicPaths`, and it is about the *user* track only: the machine gate
+  above still applies to what arrives.
+- Keep the run **read** surface behind the deployment's auth policy. It is not machine-guarded, and
+  it returns build logs.
 - Set `qits.artifacts.registry-host` / `qits.artifacts.image-repository` to qits-artifacts' registry
   as reachable **from the docker host** — the daemon on the far side of the mounted socket is what
   resolves that name and performs the push, not this process and not the step's CLI. While the

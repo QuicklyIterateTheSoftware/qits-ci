@@ -53,8 +53,8 @@ package:
 - `ci/` — `entity`, `persistence`, `dto`, `mapper`, `control`, `error`. Framework-free in the sense
   that matters: no JAX-RS, no websockets. Entities are Panache; mappers are MapStruct
   `@Mapper(componentModel = "jakarta")`.
-- `service/` — `api` (the JAX-RS routes, the `ContainerRequestFilter` and the `ExceptionMapper`),
-  `security`, and `daemonhost` (the ci-daemon control socket, the launch registry, the container
+- `service/` — `api` (the JAX-RS routes and the `ExceptionMapper`), `bus`, `githost`, `notify`, and
+  `daemonhost` (the ci-daemon control socket, the launch registry, the container
   launcher, the live relay and `CiDaemonStepRunner` — the sole implementation of the step seam). It
   read "`api` only" until the daemon control plane landed; the transport lives beside the API because
   it needs a web stack, which is the same line that put `api` here rather than in `ci/`, and it is
@@ -122,10 +122,10 @@ String` with zero interpolation; a step script never appears in an argv.
 Three things bite:
 
 - **`@WebSocket(path = "/ci/daemon")` is a literal that does not follow `quarkus.rest.path`**, so it
-  carries the `/ci` segment itself — and it is outside `CiTokenFilter`'s reach by construction, since
-  that filter matches `UriInfo.getPath()` relative to `quarkus.rest.path`. Correct rather than an
-  oversight: the callers are containers holding no intake token, and the authentication is the
-  per-container secret.
+  carries the `/ci` segment itself — and no machine guard reaches it, which is correct rather than an
+  oversight: the callers are step containers holding no qits-idp token, and the authentication is the
+  per-container secret. Nothing has to be excluded for that to hold. `MachineAuth` guards only where
+  a handler calls it, and this endpoint calls it nowhere.
 - **The path is a cross-repo contract.** `qits.ci.container-daemon-url` (default
   `ws://qits-ci:8080/ci/daemon`) is injected as `$QITS_CI_DAEMON_URL` and dialled verbatim. Move one,
   move both. It is not a gateway route and must not become one: one process per container with a
@@ -252,12 +252,17 @@ of the repository listing's default, because there is no repository here to make
 bounded question — and an ask above **100** is clamped rather than refused, since this is the one
 listing that is both unscoped and otherwise unbounded.
 
-**`CiTokenFilter` matches on `UriInfo.getPath()`, which is relative to `quarkus.rest.path`.** It
-matches the literal `events`. Move or rename `CiEventController`'s `@Path` and the guard stops
-matching — and it fails *open*, because a request the filter does not recognise is simply not
-checked. `CiTokenGuardTest` is what stands between that and shipping: it POSTs the intake's real
-address with no token and demands a 401, so a filter that quietly stopped guarding shows up as a
-202. Change the two together and keep that test on the absolute path.
+**The machine guard is a call in the handler, not a filter over a path.** `CiEventController` opens
+each write with `machineAuth.requireProject(…)` — the intake with the pushed `repoId`, the manual
+trigger with `QitsClaims.ANY`. Nothing matches a path, so renaming a `@Path` moves the guard with the
+route and can no longer detach it. The fail-open shape that replaced the old one is narrower and
+still real: a **new** write method that simply omits the call ships unguarded, and nothing says so.
+`MachineGuardTest` is what stands between that and shipping. It runs with
+`qits.auth.machine.required=true` and POSTs each write's absolute address, demanding 401 with no
+token, 403 for a token whose `aud` or `project` claim does not cover the target, and 202 for one that
+does — and it asserts the reads answer 200 unguarded, so "guarded" stays a statement about which
+endpoints rather than about the service. Add a write endpoint, add its case there, and keep every
+address in that test absolute: a moved prefix then shows up as a 404 rather than as a pass.
 
 ## The Angular client
 
@@ -639,8 +644,10 @@ in ci's **own** physical database; a foreign key cannot span it.
 
 Four things reaching this code are attacker-controlled and must stay that way in your head:
 
-- **The intake payload.** `/ci/api/events/` sits on the token-free allowlist and the token defaults
-  to blank. `CiIdentifiers.require{RepoId,Branch,Sha}` validates all three *before* they reach a
+- **The intake payload.** `/ci/api/events/` sits on qits-gateway's unauthenticated allowlist, and the
+  machine gate `qits.auth.machine.required` ships **off**, so assume the payload arrives from anyone
+  who can reach the port. Even with the gate on it is a *caller* that is established, never the
+  content. `CiIdentifiers.require{RepoId,Branch,Sha}` validates all three *before* they reach a
   filesystem path or an argv. Never widen those, never bypass them, never interpolate an identifier
   into a shell string.
 - **The step's `image`.** It comes from a file in the repository being tested and lands in the
@@ -731,28 +738,61 @@ not the guard; the constraint is, and it will reject what the enum happily write
 
 ## Authentication
 
-Authentication happens at `qits-gateway`. This service resolves a principal from a trusted header
-(`X-Qits-User`, read by `ci/security/ForwardAuthMechanism`) and authenticates nothing.
+**Two identity tracks, and nothing in this repo implements either.** Both arrive in the
+`qits-auth-core` jar (`integrations/qits-integrations-quarkus/`), and `service/pom.xml` says so in a
+comment beside the dependency. There is no `security` package here any more, and no filter.
+
+**Users** are a header. `ForwardAuthMechanism` reads `X-Qits-User` into a `SecurityIdentity`; this
+service authenticates no person. `qits-gateway` does that (OIDC, with the variant fixed at **build**
+time via `-Dqits.variant`, so no runtime setting reopens a gateway built as `oauth`) and asserts the
+result as headers. `X-Qits-*` is its reserved namespace and is stripped from every inbound request
+unconditionally, which is the entire reason a header can be trusted as an identity here. There is no
+auth variant to select and no authorization policy over users, and roles are deliberately not
+resolved — the single role check the system has (`qits.auth.required-role`) is the gateway's.
 
 **`identity.isAnonymous()` is not a security state** — it means "no name for the audit row". A check
 of the form `if (identity.isAnonymous()) deny` would look like a security control and be worth
-nothing, because reaching this service at all already implies you are inside the trusted network.
+nothing. It is also not the machine question: a machine caller is a `JsonWebToken` principal, which
+is what `MachineIdentity.isMachine` reads and what makes an anonymous *user* and an absent *token*
+two different facts.
 
-There is no auth variant to select and no authorization policy here, and roles are deliberately not
-resolved — the single role check the system has (`qits.auth.required-role`) is the gateway's. The
-gateway authenticates every human request (OIDC, with the variant fixed at **build** time via
-`-Dqits.variant`, so no runtime setting can reopen a gateway built as `oauth`) and asserts the
-result as headers. `X-Qits-*` is its reserved namespace and is stripped from every inbound request
-unconditionally, which is the entire reason a header can be trusted as an identity here.
+**Machines** are a bearer, and the guard is `MachineAuth`. qits-idp mints the token; quarkus-oidc
+validates its signature, issuer and expiry; `MachineAuth` then asks the two questions this service
+owns — is it addressed here (`aud` contains `qits.auth.machine.audience`, which
+`application.properties` pins to `qits-ci` because it is this service's identity and not a deployment
+fact), and does its `project` claim cover the target. A missing claim is a mismatch, never a
+wildcard; `project=*` on the **token** covers everything, but `"*"` as the *target* is compared like
+any other string, so a caller cannot widen its own check. Failures are 401 with no machine token and
+403 with the wrong one, both mapped by quarkus-security rather than by `CiExceptionMapper`.
 
-`qits.ci.token` is not part of any of this. It guards one machine-to-machine path and knows nothing
-about users, so edge auth neither replaces it nor excuses it — `CiTokenGuardTest` stays exactly as
-load-bearing as it was.
+**It sits beside forward auth rather than instead of it.** A request with no `Authorization` header
+is not challenged — the tenant is bearer-only — so it falls through to the header mechanism and stays
+user traffic.
 
-`ForwardAuthTest` sets a real `X-Qits-User` rather than reaching for `@TestSecurity`, and that is
-deliberate: the header **is** the contract under test. `@TestSecurity` installs an identity without
-going through the mechanism, so it would pass just as well against a service that shipped no
-mechanism at all — which is what every service here was before the header landed.
+**One platform-wide gate, `qits.auth.machine.required`, shipped `false`, and there is no third
+state.** Off, every `require*` call returns at once, `quarkus.oidc.tenant-enabled` is off with it, no
+JWKS is fetched and a clone-alone `./mvnw verify` needs no issuer anywhere. That is what let this
+service ship enforcement before qits-idp was deployed. On, the same call demands a validated token —
+and a deployment that turns it on with no audience configured fails at **startup** rather than
+accepting tokens meant for another service. Which endpoints call the guard, and what a new one owes,
+is under "Addressing"; the deployment steps are in `README.md`.
+
+Both directions are switched independently: this service also *asks* qits-idp for a token to present
+to qits-cd (`notify/CdBearer`, `quarkus.oidc-client.client-enabled`, also shipped off). Demanding one
+and presenting one are separate rollouts.
+
+**`MachineGuardTest` blanks `qits.auth.forward.dev-user` in its profile, and that is not tidiness.**
+Under `%test` the forward-auth mechanism answers every request carrying no `X-Qits-User` with a
+synthetic `dev` identity, so it authenticates first and the bearer is never consulted. Left set,
+every case in that file sees a user rather than a machine and the 401 cases pass for the wrong
+reason. A real machine call has no such header and no such fallback.
+
+`ForwardAuthTest` lives in qits-auth-core with the mechanism it covers, and its argument is worth
+knowing when you read it: it sets a real `X-Qits-User` rather than reaching for `@TestSecurity`,
+because the header **is** the contract. `MachineGuardTest` goes the other way and uses
+`@TestSecurity` with `@OidcSecurity` claims on purpose — what is under test here is this service's
+decision about a token's claims, while whether a signature or an expiry is checked is quarkus-oidc's
+contract, tested where it lives.
 
 ## Tests
 
@@ -780,7 +820,7 @@ mechanism at all — which is what every service here was before the header land
   Keeping them hidden would have meant this file omitted the entire contract that client depends on,
   and a breaking change to `CiRunDto` would have landed with an **empty diff** — which is the exact
   opposite of why the file is committed. `POST /ci/api/events/post-receive` stays hidden and the
-  criterion is why: it is token-guarded, machine-only, and its wire contract lives in qits-artifacts.
+  criterion is why: it is machine-guarded, machine-only, and its wire contract lives in qits-artifacts.
   **`POST /ci/api/events/trigger` is the same criterion answering the other way on the same
   resource**, which is the clearest illustration of it there is: a person invokes it on purpose and
   its contract is written down nowhere but here, so it is not hidden — the guard the two share had
