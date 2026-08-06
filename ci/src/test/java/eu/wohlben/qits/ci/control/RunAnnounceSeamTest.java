@@ -15,7 +15,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The {@link RunAnnouncer} seam's semantics — the event-bus sibling of {@link CdNotifySeamTest}, and
+ * The {@link RunAnnouncer} seam's semantics — the event-bus sibling of {@link PdNotifySeamTest}, and
  * separate from it because the ports are separate: one green run produces exactly one announcement
  * on each, and neither is a fallback for the other.
  *

@@ -13,7 +13,7 @@ import org.jboss.logging.Logger;
  * round trip is the acceptance test for the whole bus, and this bean is where it becomes visible.
  *
  * <p><b>An INFO log is the whole behaviour, on purpose.</b> Nothing yet hangs off a green build
- * arriving this way — the deployment path is still {@code CdBuildNotifier}'s direct POST — so
+ * arriving this way — the deployment path is still {@code PdBuildNotifier}'s direct POST — so
  * anything more here would be a second, competing route to the same outcome. When a real consumer
  * appears, it is another bean beside this one and this one stays as the proof the stream is live.
  *

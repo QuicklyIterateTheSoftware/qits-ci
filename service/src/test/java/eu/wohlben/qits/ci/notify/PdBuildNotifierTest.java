@@ -20,16 +20,16 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The wire half of the CD announcement: what actually leaves the process — method, payload,
+ * The wire half of the deploy announcement: what actually leaves the process — method, payload,
  * credential — against a local server standing in for qits-platform-deployments. Plain JUnit over a
  * directly-constructed notifier: the seam's <em>semantics</em> (green announces, red does not) are
- * held in the ci module's {@code CdNotifySeamTest}; this test pins the contract the deployer's
+ * held in the ci module's {@code PdNotifySeamTest}; this test pins the contract the deployer's
  * intake parses, absolute path included, because a mismatch there is silent on both sides.
  *
  * <p>Delivery is fire-and-forget, so assertions wait on a queue the fixture fills rather than on
  * the call returning.
  */
-class CdBuildNotifierTest {
+class PdBuildNotifierTest {
 
   private record Received(String path, String authorization, Map<String, Object> body) {}
 
@@ -65,8 +65,8 @@ class CdBuildNotifierTest {
     server.stop(0);
   }
 
-  private CdBuildNotifier notifier() {
-    CdBuildNotifier notifier = new CdBuildNotifier();
+  private PdBuildNotifier notifier() {
+    PdBuildNotifier notifier = new PdBuildNotifier();
     notifier.intakeUrl =
         "http://127.0.0.1:" + server.getAddress().getPort() + "/platform-deployments/api/events/build-succeeded";
     notifier.objectMapper = new ObjectMapper();
@@ -76,7 +76,7 @@ class CdBuildNotifierTest {
   private Received await() throws InterruptedException {
     Received first = received.poll(10, TimeUnit.SECONDS);
     if (first == null) {
-      fail("no CD notification arrived within the deadline");
+      fail("no deploy announcement arrived within the deadline");
     }
     return first;
   }
@@ -101,7 +101,7 @@ class CdBuildNotifierTest {
 
   @Test
   void aConfiguredCredentialTravelsAsABearer() throws Exception {
-    CdBuildNotifier notifier = notifier();
+    PdBuildNotifier notifier = notifier();
     notifier.bearer = bearerOf("minted-by-qits-idp");
 
     notifier.onRunSucceeded("run-2", "repo-2", "main", "b".repeat(40));
@@ -111,9 +111,9 @@ class CdBuildNotifierTest {
 
   @Test
   void aCredentialThatCannotBeFetchedSkipsTheNotification() {
-    CdBuildNotifier notifier = notifier();
+    PdBuildNotifier notifier = notifier();
     notifier.bearer =
-        new CdBearer(true, null) {
+        new PdBearer(true, null) {
           @Override
           public Uni<Optional<String>> bearer() {
             return Uni.createFrom().failure(new IllegalStateException("qits-idp is down"));
@@ -126,9 +126,9 @@ class CdBuildNotifierTest {
     assertNull(received.poll());
   }
 
-  /** A stand-in for the real thing — what CdBearer answers once a deployment configures a client. */
-  private static CdBearer bearerOf(String accessToken) {
-    return new CdBearer(true, null) {
+  /** A stand-in for the real thing — what PdBearer answers once a deployment configures a client. */
+  private static PdBearer bearerOf(String accessToken) {
+    return new PdBearer(true, null) {
       @Override
       public Uni<Optional<String>> bearer() {
         return Uni.createFrom().item(Optional.of("Bearer " + accessToken));
@@ -138,7 +138,7 @@ class CdBuildNotifierTest {
 
   @Test
   void anUnreachableIntakeNeitherBlocksNorThrows() {
-    CdBuildNotifier notifier = new CdBuildNotifier();
+    PdBuildNotifier notifier = new PdBuildNotifier();
     // A TEST-NET address nothing answers on: the 2s connect timeout belongs to the async send, so
     // the call itself has to return immediately — it runs on the single-threaded run worker.
     notifier.intakeUrl = "http://192.0.2.1:9/platform-deployments/api/events/build-succeeded";

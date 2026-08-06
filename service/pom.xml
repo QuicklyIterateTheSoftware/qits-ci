@@ -120,7 +120,7 @@
         </dependency>
         <dependency>
             <!-- The other direction: qits-ci ASKS qits-idp for a token, to present to
-                 qits-platform-deployments (notify/CdBearer). Off by default — quarkus.oidc-client.client-enabled=false in
+                 qits-platform-deployments (notify/PdBearer). Off by default — quarkus.oidc-client.client-enabled=false in
                  application.properties — so the extension builds a disabled client, boots without a
                  secret and never dials anything. -->
             <groupId>io.quarkus</groupId>

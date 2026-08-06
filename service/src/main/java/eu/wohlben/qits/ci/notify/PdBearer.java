@@ -16,7 +16,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  *
  * <p><b>Absent unless a deployment configures it.</b> {@code quarkus.oidc-client.client-enabled} is
  * shipped {@code false}, so the extension builds a disabled client, the process boots with no secret
- * and nothing is ever dialled; {@link #bearer()} answers empty and {@link CdBuildNotifier} sends the
+ * and nothing is ever dialled; {@link #bearer()} answers empty and {@link PdBuildNotifier} sends the
  * request bare, exactly as it did before qits-idp existed. That is the same one-switch shape as the
  * inbound gate, and the two are independent: this service can present a token before it demands one,
  * or the reverse.
@@ -28,7 +28,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * restarted idp pauses new issuance and nothing else.
  */
 @ApplicationScoped
-public class CdBearer {
+public class PdBearer {
 
   /**
    * The single switch, read from the extension's own key rather than shadowed by one of ours: the
@@ -43,10 +43,10 @@ public class CdBearer {
 
   private final TokensHelper tokens = new TokensHelper();
 
-  CdBearer() {}
+  PdBearer() {}
 
   /** For tests and callers outside CDI. */
-  CdBearer(boolean enabled, OidcClient oidcClient) {
+  PdBearer(boolean enabled, OidcClient oidcClient) {
     this.enabled = enabled;
     this.oidcClient = oidcClient;
   }

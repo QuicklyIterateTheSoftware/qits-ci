@@ -9,7 +9,7 @@ import java.util.List;
 
 /**
  * Records what {@link CiRunService} announces through the {@link RunAnnouncer} port. Same shape and
- * same proxy caveat as {@link FakeCdNotifier}: state is read through <b>methods</b>, because a field
+ * same proxy caveat as {@link FakePdNotifier}: state is read through <b>methods</b>, because a field
  * read on an injected CDI client proxy sees the proxy's fields rather than the bean's.
  */
 @Mock

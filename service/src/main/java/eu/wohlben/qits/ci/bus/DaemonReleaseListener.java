@@ -79,7 +79,7 @@ public class DaemonReleaseListener implements QitsRawEventListener {
 
   @Inject CiDaemonPins pins;
 
-  /** Zero implementations is supported (the {@code CdNotifier} precedent) -- startup discovery
+  /** Zero implementations is supported (the {@code PdNotifier} precedent) -- startup discovery
    *  simply never reconciles, and the durable table is whatever a live event already adopted. */
   @Inject Instance<DaemonReleaseLog> releaseLog;
 

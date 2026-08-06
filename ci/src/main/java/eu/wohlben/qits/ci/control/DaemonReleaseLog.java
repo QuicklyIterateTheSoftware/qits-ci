@@ -9,9 +9,9 @@ import java.util.List;
  * ladder with what a restart missed, the same way a live {@code SoftwareRelease} does.
  *
  * <p>An interface rather than a call so {@code ci} stays free of {@code java.net.http} and the
- * qits-events wire shape -- the same reason {@link CdNotifier} is a port here and a hand-rolled
+ * qits-events wire shape -- the same reason {@link PdNotifier} is a port here and a hand-rolled
  * client in {@code service}. <b>Zero implementations is a supported configuration</b>, the {@link
- * CdNotifier} precedent: this port lands before its sole production implementation does ({@code
+ * PdNotifier} precedent: this port lands before its sole production implementation does ({@code
  * service/…/bus/EventsDaemonReleaseLog}), and a deployment with no implementation simply never
  * reconciles at startup -- the ladder is whatever the durable table already holds.
  */

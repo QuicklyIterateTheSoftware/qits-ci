@@ -7,13 +7,13 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Records what {@link CiRunService} announces through the {@link CdNotifier} port. State is read
+ * Records what {@link CiRunService} announces through the {@link PdNotifier} port. State is read
  * through <b>methods</b> — the injected reference is a CDI client proxy, and a field read on a
  * proxy sees the proxy's fields, not the bean's.
  */
 @Mock
 @ApplicationScoped
-public class FakeCdNotifier implements CdNotifier {
+public class FakePdNotifier implements PdNotifier {
 
   public record Notified(String runId, String repoId, String branch, String commitSha) {}
 

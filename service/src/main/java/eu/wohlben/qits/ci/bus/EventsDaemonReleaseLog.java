@@ -35,7 +35,7 @@ import org.jboss.logging.Logger;
  * table (and any live event that does arrive) is what the ladder answers from regardless.
  *
  * <p>An <b>instance</b> {@code HttpClient}, never a static one -- the same native-image constraint
- * {@link CdBuildNotifier} documents: a static client is built at image-build time and native-image
+ * {@link PdBuildNotifier} documents: a static client is built at image-build time and native-image
  * refuses the heap it lands in.
  */
 @ApplicationScoped

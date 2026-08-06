@@ -5,7 +5,7 @@ import java.util.List;
 /**
  * Where the pipeline config for a pushed commit comes from. The production implementation is {@code
  * githost/HttpGitConfigSource} in the {@code service} module — it reads the file off the git host's
- * content endpoints — and it is a port here for the reason {@link CdNotifier} and {@link
+ * content endpoints — and it is a port here for the reason {@link PdNotifier} and {@link
  * GitHostRepoListing} are: {@code ci} stays free of {@code java.net.http}. Tests replace it with an
  * in-memory fake ({@code @io.quarkus.test.Mock}).
  */

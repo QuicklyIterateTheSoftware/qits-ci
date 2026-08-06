@@ -62,7 +62,7 @@ package:
   it needs a web stack, which is the same line that put `api` here rather than in `ci/`, and it is
   where qits-workspaces keeps its own `daemonhost` for the same reason. `ci/` keeps the
   `CiStepRunner` seam and the orchestrator and gains no web dependency — the step runner is in
-  `service/` because it *is* the transport. Three more packages of the same kind: `notify`, the cd
+  `service/` because it *is* the transport. Three more packages of the same kind: `notify`, the deploy
   announcement; `bus`, both ends of the event bus (below); and `githost`, the two clients for the git
   host — the pipeline-config reads and the repository listing (both below). Every one of them is an *adapter* for a seam that lives in
   `ci/control`; that is what the package split says — and every `java.net.http` client living here
@@ -223,7 +223,7 @@ name. Four things follow, and each of them replaced something:
   must never be recorded against one commit with a trigger file from another. A 404 on the directory
   costs one more read (the root tree) to tell "declares nothing" from "could not ask".
 - **`ci/` stays free of `java.net.http`.** The port is `CiConfigSource` in `ci/control`, the client
-  is in `service/`, exactly as `CdNotifier` and `GitHostRepoListing` are. That split is also why the
+  is in `service/`, exactly as `PdNotifier` and `GitHostRepoListing` are. That split is also why the
   logging differs by path: the push path WARNs (a repository and a branch existed a moment ago),
   the trigger listing stays at DEBUG (it asks every known repository on every frame, and a deleted
   one is simply not a candidate — a warning per green build forever is how a log stops being read).
@@ -435,7 +435,7 @@ injection point of the same kind — and the eventstream suite proves it the sam
 raw listener that is injected nowhere and whose signature (a name no `eventType()` produces) has to
 turn up in the subscribe frame.
 
-**The publish hook hangs off a seam, and it is a *second* seam beside `CdNotifier` rather than a
+**The publish hook hangs off a seam, and it is a *second* seam beside `PdNotifier` rather than a
 widening of it.** `RunAnnouncer` (in `ci/control`, implemented in `service/`) is what keeps the `ci`
 module free of the bus — the same reason the deploy notifier is arranged that way — but the two
 ports stay separate because they mean different things: qits-platform-deployments is asked to
@@ -446,7 +446,7 @@ freshly loaded entity in its own transaction, so the caller's copy never sees th
 `occurredAt` is a 400 from qits-events on every green build**, which is why the seam test asserts
 the timestamp rather than only the coordinates.
 
-**There are now two publishing seams and they are separate for the same reason `CdNotifier` and
+**There are now two publishing seams and they are separate for the same reason `PdNotifier` and
 `RunAnnouncer` are.** `ReleaseAnnouncer` (`ci/control`, implemented by
 `service/…/bus/SoftwareReleaseAnnouncer`) announces one published *artifact*; `RunAnnouncer`
 announces a run that passed. One green run can go down both, and a release pipeline's does — first
@@ -656,7 +656,7 @@ follows is what biting it feels like.
 
   Four things about the HTTP half, which is `service/…/githost/HttpGitHostRepoListing` and is in
   `service/` because **`ci/` stays free of `java.net.http`** — the rule `DaemonReleaseLog` states and
-  `CdNotifier` set:
+  `PdNotifier` set:
 
   - **The url is derived, never configured.** It is the git host's own base plus the same `/git`
     segment `HttpGitConfigSource` reads content under, so the listing and the config read move
@@ -863,7 +863,7 @@ accepting tokens meant for another service. Which endpoints call the guard, and 
 is under "Addressing"; the deployment steps are in `README.md`.
 
 Both directions are switched independently: this service also *asks* qits-idp for a token to present
-to qits-platform-deployments (`notify/CdBearer`, `quarkus.oidc-client.client-enabled`, also shipped
+to qits-platform-deployments (`notify/PdBearer`, `quarkus.oidc-client.client-enabled`, also shipped
 off). Demanding one and presenting one are separate rollouts.
 
 **`MachineGuardTest` blanks `qits.auth.forward.dev-user` in its profile, and that is not tidiness.**

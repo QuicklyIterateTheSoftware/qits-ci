@@ -4,9 +4,9 @@ import java.time.Instant;
 
 /**
  * The port {@link CiRunService} announces a green run to the <b>platform at large</b> through — the
- * seam the event bus hangs off, sibling to {@link CdNotifier} and deliberately not the same one.
+ * seam the event bus hangs off, sibling to {@link PdNotifier} and deliberately not the same one.
  *
- * <p>The two look alike and mean different things. {@code CdNotifier} is a <em>request</em>
+ * <p>The two look alike and mean different things. {@code PdNotifier} is a <em>request</em>
  * addressed to one named service: qits-platform-deployments is asked to deploy, at a URL this repo
  * configures, and if nobody is listening nothing was supposed to happen. This is a <em>statement</em>
  * addressed to nobody in particular — "a build passed" — which qits-events records and anything on
@@ -24,7 +24,7 @@ import java.time.Instant;
  * via {@code Instance} and absent is a supported configuration — a deployment with no qits-events
  * runs CI exactly as before.
  *
- * <p><b>The same must-not-block rule as {@link CdNotifier}</b>, with the same reason and one extra
+ * <p><b>The same must-not-block rule as {@link PdNotifier}</b>, with the same reason and one extra
  * teeth-gritting caveat: this runs on a run worker, between one run and the next.
  * The bus implementation's {@code publish()} is synchronous and never throws, but it is not free —
  * it is bounded by the publish timeout when qits-events is unreachable, after which the outbox owns

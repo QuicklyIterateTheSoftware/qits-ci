@@ -37,7 +37,7 @@ import org.jboss.logging.Logger;
  * one. The evaluation it precedes then reads the git host per candidate, so the listing is the
  * cheapest part of the work and must never be the slowest: {@link #CONNECT_TIMEOUT} 2s and {@link
  * #REQUEST_TIMEOUT} 3s, after which the known set is a correct answer and waiting longer buys
- * nothing. Same 2s connect bound {@code CdBuildNotifier} and {@code EventsDaemonReleaseLog} carry.
+ * nothing. Same 2s connect bound {@code PdBuildNotifier} and {@code EventsDaemonReleaseLog} carry.
  *
  * <h2>The cache</h2>
  *
@@ -48,7 +48,7 @@ import org.jboss.logging.Logger;
  * back up from staying invisible for a window.
  *
  * <p>An <b>instance</b> {@code HttpClient}, never a static one — the same native-image constraint
- * {@code CdBuildNotifier} documents: a static client is built at image-build time and native-image
+ * {@code PdBuildNotifier} documents: a static client is built at image-build time and native-image
  * refuses the heap it lands in. Reading the body is {@code readTree} and a walk, so nothing here
  * needs reflection registering either.
  */

@@ -12,14 +12,14 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The {@link CdNotifier} seam's semantics, driven synchronously through the orchestrator: exactly
+ * The {@link PdNotifier} seam's semantics, driven synchronously through the orchestrator: exactly
  * one announcement per green run, carrying the run's own coordinates, and <b>nothing</b> for a red
  * run or a config error — a deployment must only ever follow a build that actually passed. What
  * the production implementation does with the announcement (the HTTP POST, the token header) is
- * {@code CdBuildNotifierTest}'s job in the service module.
+ * {@code PdBuildNotifierTest}'s job in the service module.
  */
 @QuarkusTest
-public class CdNotifySeamTest extends CiTestSupport {
+public class PdNotifySeamTest extends CiTestSupport {
 
   private static final String CONFIG_ONE_STEP =
       """
@@ -29,14 +29,14 @@ public class CdNotifySeamTest extends CiTestSupport {
       """;
 
   @Inject CiRunService service;
-  @Inject FakeCdNotifier cdNotifier;
+  @Inject FakePdNotifier pdNotifier;
 
   private String repoId;
   private String sha;
 
   @BeforeEach
   void resetNotifier() {
-    cdNotifier.reset();
+    pdNotifier.reset();
   }
 
   private void seedConfig(String content) {
@@ -52,8 +52,8 @@ public class CdNotifySeamTest extends CiTestSupport {
 
     CiRun run = service.runsFor(repoId).get(0);
     assertEquals(
-        List.of(new FakeCdNotifier.Notified(run.id, repoId, "epic/some-epic", sha)),
-        cdNotifier.notified());
+        List.of(new FakePdNotifier.Notified(run.id, repoId, "epic/some-epic", sha)),
+        pdNotifier.notified());
   }
 
   @Test
@@ -63,7 +63,7 @@ public class CdNotifySeamTest extends CiTestSupport {
         0, new CiStepRunner.StepResult(1, false, CiStepRunner.StepOutcome.OK, "boom"));
     service.execute(repoId, "main", sha);
 
-    assertEquals(List.of(), cdNotifier.notified());
+    assertEquals(List.of(), pdNotifier.notified());
   }
 
   @Test
@@ -71,7 +71,7 @@ public class CdNotifySeamTest extends CiTestSupport {
     seedConfig("steps: [unclosed\n");
     service.execute(repoId, "main", sha);
 
-    assertEquals(List.of(), cdNotifier.notified());
+    assertEquals(List.of(), pdNotifier.notified());
   }
 
   @Test
@@ -81,6 +81,6 @@ public class CdNotifySeamTest extends CiTestSupport {
     seedConfig("steps: []\n");
     service.execute(repoId, "main", sha);
 
-    assertEquals(1, cdNotifier.notified().size());
+    assertEquals(1, pdNotifier.notified().size());
   }
 }

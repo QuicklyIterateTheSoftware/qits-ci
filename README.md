@@ -104,7 +104,7 @@ rest of qits it reaches over a URL it is configured with:
 | out | where the git host answers: ci reads a commit's pipeline config off its content routes (`<base>/git/<repoId>/blob/<rev>/<path>` and `…/tree/<rev>[/<path>]`) and its candidate listing off `GET <base>/git` → `{"repositories": [...]}` | `qits.ci.git-host-url` |
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + the pin ladder's answer (`qits.ci.daemon-version` is the ladder's bottom rung, never demoted) |
-| out | `POST /platform-deployments/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.pd.intake-url` (`QITS_PD_INTAKE_URL`); the call stays on qits-net. `CdBearer` attaches a qits-idp token with `aud=qits-platform-deployments` when `quarkus.oidc-client.client-enabled=true`, and sends the POST bare otherwise — which is the shipped default |
+| out | `POST /platform-deployments/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `PdNotifier` seam) | `qits.pd.intake-url` (`QITS_PD_INTAKE_URL`); the call stays on qits-net. `PdBearer` attaches a qits-idp token with `aud=qits-platform-deployments` when `quarkus.oidc-client.client-enabled=true`, and sends the POST bare otherwise — which is the shipped default |
 | out | `PUT /events/api/events/{uuid}` — one `BuildSuccessful` per **green** run, idempotent (the `RunAnnouncer` seam) | `qits.events.url`, `qits.eventstream.enabled` |
 | out | the same route — one `SoftwareRelease` per artifact a green **release pipeline** declared (the `ReleaseAnnouncer` seam) | the same two keys |
 | out | `ws://…/events/stream` — dialled out and held open, carrying what qits-events broadcasts back | the same two keys; the address is derived, never configured twice |
@@ -161,8 +161,8 @@ anywhere and CI simply never runs. Both ends are pinned to `/ci/api/events/post-
 
 The same arrangement repeats one hop down: a green run is announced to
 [qits-platform-deployments](https://github.com/QuicklyIterateTheSoftware/qits-platform-deployments)'s
-`/platform-deployments/api/events/build-succeeded` by `service/…/notify/CdBuildNotifier` behind the
-`CdNotifier` seam in `ci/control` — fire-and-forget with the same silence hazard, so both ends pin
+`/platform-deployments/api/events/build-succeeded` by `service/…/notify/PdBuildNotifier` behind the
+`PdNotifier` seam in `ci/control` — fire-and-forget with the same silence hazard, so both ends pin
 that literal too. Only `SUCCESS` announces (a red run, a `CONFIG_ERROR` and a discarded run deploy
 nothing), and a deployment with no deployer is a supported configuration that costs one debug line
 per green run. That receiver replaced qits-cd, and the key replaced with it: `qits.pd.intake-url`,
@@ -172,7 +172,7 @@ deployment still setting `QITS_CD_INTAKE_URL` silently gets the default.
 **A green run is also announced to nobody in particular.** The same transition publishes a
 `BuildSuccessful` event to [qits-events](https://github.com/QuicklyIterateTheSoftware/qits-events),
 through a second seam in `ci/control` — `RunAnnouncer`, implemented by `service/…/bus/BuildSuccessfulAnnouncer`
-— and the two are separate ports on purpose: the cd call is a *request* addressed to one service
+— and the two are separate ports on purpose: the deploy call is a *request* addressed to one service
 that is about to act, this is a *statement* anything on the platform may subscribe to. It is a
 `PUT` at a UUID the publisher picks, so a retry is a replay rather than a duplicate; a delivery that
 does not land goes to an outbox in this process and is retried on a schedule; and it carries the
@@ -295,11 +295,11 @@ anything else is a step that can never run, which reads exactly like one that ne
 A condition over the *event* is what `when:` already is.
 
 **Publishing an image is not a feature here, it is a step.** Steps are sequential, so a push runs
-only after the build steps went green; a failed push is a failed step is a **failed run**, so the CD
-announcement (`SUCCESS` only) keeps implying the image exists. The tag is the whole contract with
-qits-cd, which pulls `<registry>/<repository>/<application>:<sha>` where `<application>` is by
-convention the repository's name — the script must spell exactly that, and the only enforcement is
-the convention plus cd's `IMAGE_MISSING` telling on a mismatch.
+only after the build steps went green; a failed push is a failed step is a **failed run**, so the
+deploy announcement (`SUCCESS` only) keeps implying the image exists. The tag is the whole contract
+with qits-platform-deployments, which pulls `<registry>/<repository>/<application>:<sha>` where
+`<application>` is by convention the repository's name — the script must spell exactly that, and the
+only enforcement is the convention plus the deployer's `IMAGE_MISSING` telling on a mismatch.
 
 > **`docker: true` makes that step root-equivalent on the host.** It bind-mounts the host's docker
 > socket (`qits.ci.docker-socket-path`) into the step's container, and the socket *is* the daemon

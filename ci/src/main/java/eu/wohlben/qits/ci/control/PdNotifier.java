@@ -7,7 +7,7 @@ package eu.wohlben.qits.ci.control;
  * deploy nothing).
  *
  * <p>An interface rather than a call so this module stays free of any web stack: the sole
- * production implementation is {@code service/…/notify/CdBuildNotifier}, a fire-and-forget HTTP
+ * production implementation is {@code service/…/notify/PdBuildNotifier}, a fire-and-forget HTTP
  * POST behind {@code qits.pd.intake-url}. It is resolved via {@code Instance} and absent is a
  * supported configuration — a deployment without a deployer runs CI exactly as before.
  *
@@ -15,7 +15,7 @@ package eu.wohlben.qits.ci.control;
  * worker, between one run and the next; anything slower than queueing an async send delays every
  * pipeline on the instance (the no-untimed-wait rule, one package over).
  */
-public interface CdNotifier {
+public interface PdNotifier {
 
   void onRunSucceeded(String runId, String repoId, String branch, String commitSha);
 }

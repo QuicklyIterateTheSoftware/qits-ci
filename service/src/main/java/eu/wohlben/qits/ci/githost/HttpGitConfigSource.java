@@ -64,7 +64,7 @@ import org.jboss.logging.Logger;
  * a push and {@code ci-trigger-worker} for an arriving event, where every candidate repository costs
  * one of these calls. {@link #CONNECT_TIMEOUT} 2s and {@link #REQUEST_TIMEOUT} 5s, so a git host
  * that has stopped answering costs seconds per repository rather than a step's whole timeout. Same
- * 2s connect bound {@code HttpGitHostRepoListing} and {@code CdBuildNotifier} carry.
+ * 2s connect bound {@code HttpGitHostRepoListing} and {@code PdBuildNotifier} carry.
  *
  * <p>Every identifier is validated by {@link CiIdentifiers} before it reaches a URL, because the
  * intake that supplies them is reachable without a session. A branch may legitimately contain

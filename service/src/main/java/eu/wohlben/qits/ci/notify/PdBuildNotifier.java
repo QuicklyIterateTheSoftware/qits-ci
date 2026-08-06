@@ -1,7 +1,7 @@
 package eu.wohlben.qits.ci.notify;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import eu.wohlben.qits.ci.control.CdNotifier;
+import eu.wohlben.qits.ci.control.PdNotifier;
 import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -29,18 +29,18 @@ import org.jboss.logging.Logger;
  * stop, which is why both repos pin the literal and both suites assert their own absolute address.
  *
  * <p>It carries a machine bearer ({@code aud=qits-platform-deployments}) when a deployment has given
- * this service client credentials at qits-idp, and nothing when it has not — see {@link CdBearer}.
+ * this service client credentials at qits-idp, and nothing when it has not — see {@link PdBearer}.
  * Both ends move independently: the receiver decides whether it demands one, this side decides
  * whether it presents one, and the unconfigured default is the call as it always was.
  *
  * <p>It lives in {@code service/} because the {@code ci} module is web-free; the seam it implements
- * is {@link CdNotifier} in {@code ci/control}, and zero implementations is a supported
+ * is {@link PdNotifier} in {@code ci/control}, and zero implementations is a supported
  * configuration.
  */
 @ApplicationScoped
-public class CdBuildNotifier implements CdNotifier {
+public class PdBuildNotifier implements PdNotifier {
 
-  private static final Logger LOG = Logger.getLogger(CdBuildNotifier.class);
+  private static final Logger LOG = Logger.getLogger(PdBuildNotifier.class);
 
   /**
    * An <b>instance</b> field, not a static one — the native-image constraint
@@ -57,18 +57,18 @@ public class CdBuildNotifier implements CdNotifier {
   @Inject ObjectMapper objectMapper;
 
   /**
-   * The machine credential, when a deployment has configured one — see {@link CdBearer}. Left null
+   * The machine credential, when a deployment has configured one — see {@link PdBearer}. Left null
    * by the plain-JUnit fixture, which is the "no credentials configured" case and the shape this
    * call has always had.
    */
-  @Inject CdBearer bearer;
+  @Inject PdBearer bearer;
 
   @Override
   public void onRunSucceeded(String runId, String repoId, String branch, String commitSha) {
     try {
       post(runId, repoId, branch, commitSha);
     } catch (Exception e) {
-      LOG.debugf("CD notification for %s@%s skipped: %s", repoId, branch, e.toString());
+      LOG.debugf("Deploy announcement for %s@%s skipped: %s", repoId, branch, e.toString());
     }
   }
 
@@ -84,7 +84,7 @@ public class CdBuildNotifier implements CdNotifier {
         .with(
             authorization -> send(body, authorization, repoId, branch),
             failure ->
-                LOG.debugf("CD notification for %s@%s has no token: %s", repoId, branch, failure));
+                LOG.debugf("Deploy announcement for %s@%s has no token: %s", repoId, branch, failure));
   }
 
   private Uni<Optional<String>> credential() {
@@ -103,10 +103,10 @@ public class CdBuildNotifier implements CdNotifier {
         .whenComplete(
             (response, failure) -> {
               if (failure != null) {
-                LOG.debugf("CD notification for %s@%s failed: %s", repoId, branch, failure);
+                LOG.debugf("Deploy announcement for %s@%s failed: %s", repoId, branch, failure);
               } else if (response.statusCode() >= 400) {
                 LOG.debugf(
-                    "CD notification for %s@%s rejected: %d", repoId, branch, response.statusCode());
+                    "Deploy announcement for %s@%s rejected: %d", repoId, branch, response.statusCode());
               }
             });
   }

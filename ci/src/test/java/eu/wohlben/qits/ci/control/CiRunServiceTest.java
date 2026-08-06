@@ -48,7 +48,7 @@ public class CiRunServiceTest extends CiTestSupport {
   /** Both green-run ports, for the one case that has to prove an all-skipped run is really green. */
   @Inject FakeRunAnnouncer announcer;
 
-  @Inject FakeCdNotifier cdNotifier;
+  @Inject FakePdNotifier pdNotifier;
 
   private String repoId;
   private String sha;
@@ -56,7 +56,7 @@ public class CiRunServiceTest extends CiTestSupport {
   @org.junit.jupiter.api.BeforeEach
   void resetPorts() {
     announcer.reset();
-    cdNotifier.reset();
+    pdNotifier.reset();
   }
 
   private void seedConfig(String content) {
@@ -325,7 +325,7 @@ public class CiRunServiceTest extends CiTestSupport {
   @Test
   public void aRunWhoseEveryStepIsBranchSkippedFinishesGreenAndAnnounces() {
     // The empty-pipeline precedent rather than a new rule — and asserted rather than assumed,
-    // because "trivially green" has to mean the same green: it notifies cd and it publishes.
+    // because "trivially green" has to mean the same green: it announces the deploy and it publishes.
     seedConfig(
         """
         steps:
@@ -351,8 +351,8 @@ public class CiRunServiceTest extends CiTestSupport {
     }
     assertEquals(1, announcer.announced().size(), "a green run announces, however little it did");
     assertEquals(run.id, announcer.announced().get(0).runId());
-    assertEquals(1, cdNotifier.notified().size());
-    assertEquals(run.id, cdNotifier.notified().get(0).runId());
+    assertEquals(1, pdNotifier.notified().size());
+    assertEquals(run.id, pdNotifier.notified().get(0).runId());
   }
 
   @Test

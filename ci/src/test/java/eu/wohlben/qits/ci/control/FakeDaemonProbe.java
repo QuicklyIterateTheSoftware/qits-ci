@@ -14,7 +14,7 @@ import java.util.concurrent.CountDownLatch;
 /**
  * A scripted {@link DaemonProbe}: each test tells it what verdict to answer for a version before
  * {@link CiDaemonPins} can ask. State is read/written through methods on the injected reference,
- * the same convention {@link FakeCdNotifier} uses.
+ * the same convention {@link FakePdNotifier} uses.
  *
  * <p><b>{@link #blockOn} adds a controllable pause inside {@link #probe}</b>, for
  * {@code CiDaemonPinsTest}'s single-flight test: it needs two threads to both reach {@code
