@@ -1,0 +1,6 @@
+# How qits-cd deploys this repo. It reads this file from the git host at the
+# built sha. qits-ci is a PLATFORM service: one instance spans every
+# environment — the build/deploy/telemetry plane — so it deploys from main.
+# `platform` becomes the canonical spelling when qits-platform-deployments
+# replaces qits-cd; today's deployer only knows `singleton`.
+deployment_target: singleton
