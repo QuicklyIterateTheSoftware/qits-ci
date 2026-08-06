@@ -46,9 +46,9 @@ window in which pushes arrive and record nothing.
 
 It was extracted as a library, on the assumption that a consuming Quarkus application would pull it
 in and gain the routes. That application was never written and under the gateway topology never will
-be. `ci` owns its **own datasource, persistence unit and Flyway lineage** (`db/ci/migration`, a
-separate H2 under `~/.qits/data/ci`), which is what makes this a standalone deployable rather than a
-checkout of the monorepo. The directory names are `ci/` and `service/` because the extracted git history is
+be. `ci` owns its **own datasource, persistence unit and Flyway lineage** (`db/ci/migration` plus the
+one Java migration in `eu.wohlben.qits.ci.migration`, on a separate H2 under `~/.qits/data/ci`),
+which is what makes this a standalone deployable rather than a checkout of the monorepo. The directory names are `ci/` and `service/` because the extracted git history is
 anchored to them; the maven coordinates are `eu.wohlben.qits:qits-ci-domain` and `…-service`.
 
 ## Addressing

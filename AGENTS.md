@@ -51,7 +51,8 @@ second rule of the same kind, and three things follow:
 `eu.wohlben.qits.ci.*`, split across maven modules with disjoint sub-packages so there is no split
 package:
 
-- `ci/` — `entity`, `persistence`, `dto`, `mapper`, `control`, `error`. Framework-free in the sense
+- `ci/` — `entity`, `persistence`, `dto`, `mapper`, `control`, `error`, and `migration` (the one
+  Flyway migration that cannot be SQL — see "Schema changes"). Framework-free in the sense
   that matters: no JAX-RS, no websockets. Entities are Panache; mappers are MapStruct
   `@Mapper(componentModel = "jakarta")`.
 - `service/` — `api` (the JAX-RS routes and the `ExceptionMapper`), `bus`, `githost`, `notify`, and
@@ -759,7 +760,9 @@ Keep it that way; do not buffer a step's output whole.
 
 `ci/src/main/resources/db/ci/migration/`, hand-written, its own lineage on its own datasource. It
 was never part of the monorepo's shared `db/migration` lineage, so it came across from the
-extraction unsquashed and unchanged — keep appending to it.
+extraction unsquashed and unchanged — keep appending to it. One member of that lineage is a **Java**
+migration in `eu.wohlben.qits.ci.migration` rather than a script, and the bottom of this section is
+why; a new migration is SQL in the directory unless it needs to read the catalogue.
 
 `V3__event_triggers.sql` is worth reading as the worked example of backfilling a `not null` column
 into a live table: add it **with a default**, so every existing row is written correctly by the
@@ -788,8 +791,34 @@ anonymous constraint. Three things came out of that and none of them should be u
   error, and cd's health gate keeps the previous container. Verified by renaming the constraint in a
   scratch database and watching V4 refuse to apply.
 
-Add a status value ⇒ add a line to `ck_ci_run_status`. The enum's `@Enumerated(EnumType.STRING)` is
-not the guard; the constraint is, and it will reject what the enum happily writes.
+**`V5` then dropped those checks again, and `V9__drop_generated_check_constraints.java` is what
+finished the job.** H2 2.4.240 keeps a checked IN-set tied to the session that compiled it: once the
+pool retires that session, a valid write fails with `23514 Check constraint invalid`. V5 removed
+`ck_ci_run_trigger_type`, `ck_ci_run_status` and `ck_ci_step_status` for that reason — but two of
+those three names never existed, because V1 declared the status domains **inline and unnamed** and
+H2 named them itself, so V5's `drop constraint if exists` was a silent no-op and `ci_step` kept its
+generated check. That is the bug that killed every run on a freshly bootstrapped platform: after a
+few long builds every `insert into ci_step` failed 23514 and the run died step-less.
+
+V9 is a **Java** migration and has to be, which is the one thing to carry away from it. V4 could
+name `CONSTRAINT_76` because it had measured that one database; the generated names depend on the
+order the DDL was replayed, live and fresh do not agree, and no SQL script can name what it cannot
+know. So V9 reads `INFORMATION_SCHEMA.TABLE_CONSTRAINTS` and drops every `CHECK` on `ci_run` and
+`ci_step`, whatever they are called — and nothing else: the primary keys, `uq_ci_run_event_trigger`,
+`fk_ci_step_run` and V8's named `ck_ci_daemon_pin_verdict` all survive, asserted by
+`CiSchemaCheckConstraintsTest`. Flyway finds the class because `quarkus.flyway.ci.locations` names
+its package beside the SQL directory; Quarkus filters discovered `JavaMigration`s by that list, and
+that filter is also what keeps this migration off the eventstream outbox's lineage in the same
+application. Move the class, move the location — and note the location list is shipped **once**, in
+the jar's `META-INF/microprofile-config.properties`, with no copy in either test resources file.
+
+So the old rule here — *add a status value ⇒ add a line to `ck_ci_run_status`* — is gone with the
+constraint. `CiRunStatus` and `CiStepStatus` are the whole of the guard now, and that is a
+deliberate trade rather than a loss: the entities are `@Enumerated(EnumType.STRING)`, no code path
+writes a status any other way, and a database engine that cannot hold the invariant reliably was
+never enforcing it. A new status value is one enum constant and no migration. V8's verdict check is
+the exception left standing, and only because it is named: the day it bites, one line of SQL drops
+it.
 
 ## Authentication
 
