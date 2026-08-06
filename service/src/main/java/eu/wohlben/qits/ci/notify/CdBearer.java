@@ -9,8 +9,10 @@ import java.util.Optional;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
- * The token qits-ci presents when it calls qits-cd — {@code aud=qits-cd}, minted by qits-idp against
- * this service's own client credentials.
+ * The token qits-ci presents when it calls qits-platform-deployments — {@code
+ * aud=qits-platform-deployments}, minted by qits-idp against this service's own client credentials.
+ * The audience is {@code quarkus.oidc-client.grant-options.client.audience}, and it moves with the
+ * intake url the notifier posts to.
  *
  * <p><b>Absent unless a deployment configures it.</b> {@code quarkus.oidc-client.client-enabled} is
  * shipped {@code false}, so the extension builds a disabled client, the process boots with no secret

@@ -21,9 +21,10 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The wire half of the CD announcement: what actually leaves the process — method, payload,
- * credential — against a local server standing in for qits-cd. Plain JUnit over a
+ * credential — against a local server standing in for qits-platform-deployments. Plain JUnit over a
  * directly-constructed notifier: the seam's <em>semantics</em> (green announces, red does not) are
- * held in the ci module's {@code CdNotifySeamTest}; this test pins the contract cd's intake parses.
+ * held in the ci module's {@code CdNotifySeamTest}; this test pins the contract the deployer's
+ * intake parses, absolute path included, because a mismatch there is silent on both sides.
  *
  * <p>Delivery is fire-and-forget, so assertions wait on a queue the fixture fills rather than on
  * the call returning.
@@ -67,7 +68,7 @@ class CdBuildNotifierTest {
   private CdBuildNotifier notifier() {
     CdBuildNotifier notifier = new CdBuildNotifier();
     notifier.intakeUrl =
-        "http://127.0.0.1:" + server.getAddress().getPort() + "/cd/api/events/build-succeeded";
+        "http://127.0.0.1:" + server.getAddress().getPort() + "/platform-deployments/api/events/build-succeeded";
     notifier.objectMapper = new ObjectMapper();
     return notifier;
   }
@@ -85,7 +86,7 @@ class CdBuildNotifierTest {
     notifier().onRunSucceeded("run-1", "repo-1", "epic/some-epic", "a".repeat(40));
 
     Received event = await();
-    assertEquals("/cd/api/events/build-succeeded", event.path());
+    assertEquals("/platform-deployments/api/events/build-succeeded", event.path());
     assertEquals(
         Map.of(
             "runId", "run-1",
@@ -140,7 +141,7 @@ class CdBuildNotifierTest {
     CdBuildNotifier notifier = new CdBuildNotifier();
     // A TEST-NET address nothing answers on: the 2s connect timeout belongs to the async send, so
     // the call itself has to return immediately — it runs on the single-threaded run worker.
-    notifier.intakeUrl = "http://192.0.2.1:9/cd/api/events/build-succeeded";
+    notifier.intakeUrl = "http://192.0.2.1:9/platform-deployments/api/events/build-succeeded";
     notifier.objectMapper = new ObjectMapper();
 
     long before = System.nanoTime();

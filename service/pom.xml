@@ -31,7 +31,7 @@
 
     <dependencies>
         <dependency>
-            <!-- /<segment>/q/health/ready - the readiness endpoint qits-cd's health gate curls;
+            <!-- /<segment>/q/health/ready - the readiness endpoint the deployer's health gate curls;
                  the deployment convention every service answers. -->
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-smallrye-health</artifactId>
@@ -119,8 +119,8 @@
             <artifactId>quarkus-oidc</artifactId>
         </dependency>
         <dependency>
-            <!-- The other direction: qits-ci ASKS qits-idp for a token, to present to qits-cd
-                 (notify/CdBearer). Off by default — quarkus.oidc-client.client-enabled=false in
+            <!-- The other direction: qits-ci ASKS qits-idp for a token, to present to
+                 qits-platform-deployments (notify/CdBearer). Off by default — quarkus.oidc-client.client-enabled=false in
                  application.properties — so the extension builds a disabled client, boots without a
                  secret and never dials anything. -->
             <groupId>io.quarkus</groupId>

@@ -63,8 +63,12 @@
 #                               a qits-idp bearer, and needs a reachable idp that grants the git
 #                               host's client a project claim.
 #   QUARKUS_OIDC_CLIENT_CLIENT_ENABLED / QUARKUS_OIDC_CLIENT_CREDENTIALS_SECRET
-#                               the other direction: present a bearer to qits-cd. A separate switch,
-#                               so either end of the platform can be turned on first.
+#                               the other direction: present a bearer to qits-platform-deployments.
+#                               A separate switch, so either end of the platform can be turned on
+#                               first.
+#   QITS_PD_INTAKE_URL          where a green run is announced — the whole url, path included. Its
+#                               qits-net default is right on that network; a wrong value is silent,
+#                               because the POST is fire-and-forget.
 #
 # See README.md, "Deploying it", for the whole surface.
 #

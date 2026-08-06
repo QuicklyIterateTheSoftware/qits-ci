@@ -7,11 +7,11 @@ import java.time.Instant;
  * seam the event bus hangs off, sibling to {@link CdNotifier} and deliberately not the same one.
  *
  * <p>The two look alike and mean different things. {@code CdNotifier} is a <em>request</em>
- * addressed to one named service: qits-cd is asked to deploy, at a URL this repo configures, and if
- * nobody is listening nothing was supposed to happen. This is a <em>statement</em> addressed to
- * nobody in particular — "a build passed" — which qits-events records and anything on the platform
- * may subscribe to, this service included. Folding them into one port would put cd's intake URL and
- * the event log's retention policy behind the same name.
+ * addressed to one named service: qits-platform-deployments is asked to deploy, at a URL this repo
+ * configures, and if nobody is listening nothing was supposed to happen. This is a <em>statement</em>
+ * addressed to nobody in particular — "a build passed" — which qits-events records and anything on
+ * the platform may subscribe to, this service included. Folding them into one port would put the
+ * deployer's intake URL and the event log's retention policy behind the same name.
  *
  * <p>Hence the one difference in the signature: {@code finishedAt}. An announcement to a service
  * that is about to act carries only what it needs to act on; an event carries <b>when it happened</b>,

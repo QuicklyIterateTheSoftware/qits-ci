@@ -56,7 +56,7 @@ sequenceDiagram
     participant Ci as qits-ci
     participant Dockerd as host dockerd
     participant Step as step container
-    participant Cd as qits-cd
+    participant Pd as qits-platform-deployments
 
     Dev->>Art: git push
     Art->>Ci: POST /ci/api/events/post-receive<br/>{repoId, branch, oldSha, newSha}
@@ -82,7 +82,7 @@ sequenceDiagram
     end
 
     Note over Ci: a red step skips the rest; the remaining rows are written SKIPPED
-    Ci->>Cd: POST /cd/api/events/build-succeeded — only on SUCCESS
+    Ci->>Pd: POST /platform-deployments/api/events/build-succeeded — only on SUCCESS
 ```
 
 Two things the diagram is deliberately precise about:
@@ -102,7 +102,7 @@ sequenceDiagram
     participant Step as final step container
     participant Dockerd as host dockerd
     participant Reg as qits-artifacts registry
-    participant Cd as qits-cd
+    participant Pd as qits-platform-deployments
 
     Ci-->>Step: RunStep{script} over the control WebSocket
     Note over Step: the script is just a script:<br/>ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/APP:$QITS_CI_SHA"<br/>docker build -t "$ref" . && docker push "$ref"
@@ -110,14 +110,14 @@ sequenceDiagram
     Dockerd->>Reg: PUT blobs + manifest — tokenless for producers
     Step-->>Ci: Output{chunks} — the build log, over the control WebSocket
     Step-->>Ci: Finished{exitCode}
-    Ci->>Cd: build-succeeded, because the run went green
-    Cd->>Reg: pull REGISTRY/REPOSITORY/APP:SHA — the tag convention, unenforced
+    Ci->>Pd: build-succeeded, because the run went green
+    Pd->>Reg: pull REGISTRY/REPOSITORY/APP:SHA — the tag convention, unenforced
 ```
 
 Nothing here is a new mechanism. The push is a step's exit code like any other — a failed push is a
-failed step is a failed run, so the announcement to qits-cd (green runs only) keeps implying the image
-exists. `$QITS_REGISTRY` and `$QITS_IMAGE_REPOSITORY` are injected into *every* step container so the
-script names no deployment fact; `$QITS_CI_SHA` was already there.
+failed step is a failed run, so the announcement to qits-platform-deployments (green runs only) keeps
+implying the image exists. `$QITS_REGISTRY` and `$QITS_IMAGE_REPOSITORY` are injected into *every*
+step container so the script names no deployment fact; `$QITS_CI_SHA` was already there.
 
 And note who dials the registry in that diagram: **`Dockerd`, not `Step` and not `Ci`.** The CLI on
 the far side of the mounted socket is a client; the host's daemon is what resolves the registry name,

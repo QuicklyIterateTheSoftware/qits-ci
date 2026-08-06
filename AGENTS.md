@@ -437,9 +437,10 @@ turn up in the subscribe frame.
 
 **The publish hook hangs off a seam, and it is a *second* seam beside `CdNotifier` rather than a
 widening of it.** `RunAnnouncer` (in `ci/control`, implemented in `service/`) is what keeps the `ci`
-module free of the bus — the same reason the cd notifier is arranged that way — but the two ports
-stay separate because they mean different things: cd is asked to deploy, the bus is told a build
-passed. The one difference in the signature is `finishedAt`, which the event needs and cd does not,
+module free of the bus — the same reason the deploy notifier is arranged that way — but the two
+ports stay separate because they mean different things: qits-platform-deployments is asked to
+deploy, the bus is told a build passed. The one difference in the signature is `finishedAt`, which
+the event needs and the deployer does not,
 and it comes back out of `finishRun` rather than off the `CiRun` instance: that method mutates a
 freshly loaded entity in its own transaction, so the caller's copy never sees the value. **A null
 `occurredAt` is a 400 from qits-events on every green build**, which is why the seam test asserts
@@ -862,8 +863,8 @@ accepting tokens meant for another service. Which endpoints call the guard, and 
 is under "Addressing"; the deployment steps are in `README.md`.
 
 Both directions are switched independently: this service also *asks* qits-idp for a token to present
-to qits-cd (`notify/CdBearer`, `quarkus.oidc-client.client-enabled`, also shipped off). Demanding one
-and presenting one are separate rollouts.
+to qits-platform-deployments (`notify/CdBearer`, `quarkus.oidc-client.client-enabled`, also shipped
+off). Demanding one and presenting one are separate rollouts.
 
 **`MachineGuardTest` blanks `qits.auth.forward.dev-user` in its profile, and that is not tidiness.**
 Under `%test` the forward-auth mechanism answers every request carrying no `X-Qits-User` with a

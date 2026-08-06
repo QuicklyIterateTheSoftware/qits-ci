@@ -77,7 +77,7 @@ public class CdNotifySeamTest extends CiTestSupport {
   @Test
   public void anEmptyPipelineIsStillAGreenRunAndAnnounces() {
     // The trivially green run: config present, zero steps. It records SUCCESS, so it announces —
-    // cd's IMAGE_MISSING is the honest outcome if nothing published an image for it.
+    // the deployer's IMAGE_MISSING is the honest outcome if nothing published an image for it.
     seedConfig("steps: []\n");
     service.execute(repoId, "main", sha);
 

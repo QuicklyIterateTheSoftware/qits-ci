@@ -725,7 +725,7 @@ public class CiRunService {
   /**
    * Announces a green run through the {@link CdNotifier} port — after the terminal row is
    * committed, so a listener that reads the run back sees {@code SUCCESS}. Absent implementations
-   * are a supported configuration (a deployment without qits-cd), and a throwing one must not turn
+   * are a supported configuration (a deployment with no deployer), and a throwing one must not turn
    * a green run red: the run <em>is</em> green, delivery is somebody else's outcome.
    */
   private void notifyCd(CiRun run) {

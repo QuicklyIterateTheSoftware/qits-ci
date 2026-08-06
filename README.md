@@ -104,7 +104,7 @@ rest of qits it reaches over a URL it is configured with:
 | out | where the git host answers: ci reads a commit's pipeline config off its content routes (`<base>/git/<repoId>/blob/<rev>/<path>` and `…/tree/<rev>[/<path>]`) and its candidate listing off `GET <base>/git` → `{"repositories": [...]}` | `qits.ci.git-host-url` |
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + the pin ladder's answer (`qits.ci.daemon-version` is the ladder's bottom rung, never demoted) |
-| out | `POST /cd/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.cd.intake-url`; the call stays on qits-net. `CdBearer` attaches a qits-idp token with `aud=qits-cd` when `quarkus.oidc-client.client-enabled=true`, and sends the POST bare otherwise — which is the shipped default |
+| out | `POST /platform-deployments/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.pd.intake-url` (`QITS_PD_INTAKE_URL`); the call stays on qits-net. `CdBearer` attaches a qits-idp token with `aud=qits-platform-deployments` when `quarkus.oidc-client.client-enabled=true`, and sends the POST bare otherwise — which is the shipped default |
 | out | `PUT /events/api/events/{uuid}` — one `BuildSuccessful` per **green** run, idempotent (the `RunAnnouncer` seam) | `qits.events.url`, `qits.eventstream.enabled` |
 | out | the same route — one `SoftwareRelease` per artifact a green **release pipeline** declared (the `ReleaseAnnouncer` seam) | the same two keys |
 | out | `ws://…/events/stream` — dialled out and held open, carrying what qits-events broadcasts back | the same two keys; the address is derived, never configured twice |
@@ -160,11 +160,14 @@ delivery failures at debug, so if the two ends disagree about the intake path no
 anywhere and CI simply never runs. Both ends are pinned to `/ci/api/events/post-receive`.
 
 The same arrangement repeats one hop down: a green run is announced to
-[qits-cd](https://github.com/QuicklyIterateTheSoftware/qits-cd)'s
-`/cd/api/events/build-succeeded` by `service/…/notify/CdBuildNotifier` behind the `CdNotifier` seam
-in `ci/control` — fire-and-forget with the same silence hazard, so both ends pin that literal too.
-Only `SUCCESS` announces (a red run, a `CONFIG_ERROR` and a discarded run deploy nothing), and a
-deployment without a qits-cd is a supported configuration that costs one debug line per green run.
+[qits-platform-deployments](https://github.com/QuicklyIterateTheSoftware/qits-platform-deployments)'s
+`/platform-deployments/api/events/build-succeeded` by `service/…/notify/CdBuildNotifier` behind the
+`CdNotifier` seam in `ci/control` — fire-and-forget with the same silence hazard, so both ends pin
+that literal too. Only `SUCCESS` announces (a red run, a `CONFIG_ERROR` and a discarded run deploy
+nothing), and a deployment with no deployer is a supported configuration that costs one debug line
+per green run. That receiver replaced qits-cd, and the key replaced with it: `qits.pd.intake-url`,
+overridden as `QITS_PD_INTAKE_URL`. There is no alias for the old `qits.cd.intake-url` — a
+deployment still setting `QITS_CD_INTAKE_URL` silently gets the default.
 
 **A green run is also announced to nobody in particular.** The same transition publishes a
 `BuildSuccessful` event to [qits-events](https://github.com/QuicklyIterateTheSoftware/qits-events),
@@ -210,7 +213,7 @@ qits-eventstream's own AGENTS.md.
 
 Both halves are **dark in `%dev` and `%test`** (`qits.eventstream.enabled`), the same posture the
 OTLP exporter takes, and a deployment without a qits-events is a supported configuration in exactly
-the way a deployment without a qits-cd is.
+the way a deployment with no deployer is.
 
 ci never touches the bare origins on disk, and it clones nothing: it **reads the one file** off the
 git host's content routes — `GET <qits.ci.git-host-url>/git/<repoId>/blob/<rev>/<path>`, with `rev`
@@ -807,6 +810,12 @@ a repository's own listing will show.
   above still applies to what arrives.
 - Keep the run **read** surface behind the deployment's auth policy. It is not machine-guarded, and
   it returns build logs.
+- Point `QITS_PD_INTAKE_URL` (`qits.pd.intake-url`) at qits-platform-deployments if it is anywhere
+  but the qits-net alias the default assumes. The whole url, path included — the notifier POSTs it
+  verbatim. Getting it wrong is **silent**: the call is fire-and-forget, so a bad value costs one
+  debug line per green run and no deployments, with nothing red anywhere to say so. The key was
+  `qits.cd.intake-url` while the receiver was qits-cd; there is no alias, so a deployment carrying
+  the old variable is setting nothing.
 - Set `qits.artifacts.registry-host` / `qits.artifacts.image-repository` to qits-artifacts' registry
   as reachable **from the docker host** — the daemon on the far side of the mounted socket is what
   resolves that name and performs the push, not this process and not the step's CLI. While the
