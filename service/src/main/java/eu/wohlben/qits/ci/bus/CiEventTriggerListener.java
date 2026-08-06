@@ -36,8 +36,8 @@ import java.util.Set;
  * <h2>What {@link #onFrame} does, and what it deliberately does not</h2>
  *
  * <p>It enqueues and returns. The caller is the bus's websocket worker, delivering one frame at a
- * time to <em>every</em> consumer, and evaluation does a {@code git fetch} per candidate repository —
- * doing that here would stall the whole subscription behind a git host.
+ * time to <em>every</em> consumer, and evaluation reads the git host once per candidate repository —
+ * doing that here would stall the whole subscription behind it.
  *
  * <p>That hand-off is also why the frame's id is carried as <b>data</b>. {@code onFrame} runs inside
  * {@code CausationScope} of this frame's id, and that scope does not follow work onto another thread

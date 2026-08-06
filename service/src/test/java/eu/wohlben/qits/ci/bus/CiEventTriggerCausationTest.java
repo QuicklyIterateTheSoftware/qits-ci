@@ -10,6 +10,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.ci.control.FakeCiStepRunner;
 import eu.wohlben.qits.eventstream.control.EventDispatcher;
+import eu.wohlben.qits.ci.githost.StubGitHost;
+import io.quarkus.test.common.TestResourceScope;
 import io.quarkus.test.common.WithTestResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -20,7 +22,6 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -49,6 +50,7 @@ import org.junit.jupiter.api.Test;
  * — reads what the stub recorded when the application dialled it at startup.
  */
 @QuarkusTest
+@WithTestResource(value = StubGitHost.class, scope = TestResourceScope.GLOBAL)
 @TestProfile(BuildSuccessfulPublishTest.EventstreamOn.class)
 @WithTestResource(StubEventsServer.class)
 public class CiEventTriggerCausationTest {
@@ -79,9 +81,6 @@ public class CiEventTriggerCausationTest {
   }
 
   private final ObjectMapper json = new ObjectMapper();
-
-  @ConfigProperty(name = "qits.ci.git-host-url")
-  String gitHostUrl;
 
   @Inject FakeCiStepRunner fakeRunner;
 
@@ -335,7 +334,7 @@ public class CiEventTriggerCausationTest {
   }
 
   private Path gitHostRoot() {
-    return Path.of(gitHostUrl.replaceFirst("^file://", ""), "git");
+    return StubGitHost.ROOT.resolve("git");
   }
 
   private String git(Path cwd, String... args) throws Exception {

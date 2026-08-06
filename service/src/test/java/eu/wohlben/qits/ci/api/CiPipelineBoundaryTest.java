@@ -11,6 +11,9 @@ import static org.junit.jupiter.api.Assertions.fail;
 import eu.wohlben.qits.ci.control.CiStepRunner.StepOutcome;
 import eu.wohlben.qits.ci.control.CiStepRunner.StepResult;
 import eu.wohlben.qits.ci.control.FakeCiStepRunner;
+import eu.wohlben.qits.ci.githost.StubGitHost;
+import io.quarkus.test.common.TestResourceScope;
+import io.quarkus.test.common.WithTestResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import io.restassured.path.json.JsonPath;
@@ -23,7 +26,6 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -44,13 +46,14 @@ import org.junit.jupiter.api.Test;
  * <p><b>Where the loop starts.</b> The git host is not in this repo — it belongs to qits-artifacts,
  * and it reaches ci over HTTP (its {@code CiPostReceiveNotifier} POSTs to {@code
  * qits.ci.intake-url}). So the test pushes into a real bare origin laid out as {@code
- * <git-host>/git/<repoId>} and addressed over {@code file://}, then POSTs the event itself — byte
+ * <git-host>/git/<repoId>} and served by {@code StubGitHost}, then POSTs the event itself — byte
  * for byte the payload the notifier sends. That is exactly the surface an extracted ci service
  * sees. The monorepo's version of this test drove a real {@code git push} through the in-process
  * git host and let the hook fire; the assertions about the *hook's own* filtering (a branch
  * deletion must not produce an event) went with the hook and belong to qits-artifacts.
  */
 @QuarkusTest
+@WithTestResource(value = StubGitHost.class, scope = TestResourceScope.GLOBAL)
 public class CiPipelineBoundaryTest {
 
   /** The all-zero sha git reports as the old id of a newly created branch. */
@@ -68,9 +71,6 @@ public class CiPipelineBoundaryTest {
           script: |
             echo two-ran
       """;
-
-  @ConfigProperty(name = "qits.ci.git-host-url")
-  String gitHostUrl;
 
   @Inject FakeCiStepRunner fakeRunner;
 
@@ -230,9 +230,9 @@ public class CiPipelineBoundaryTest {
   @Test
   public void forcePushRecordsOneRunForTheSurvivingTip() throws Exception {
     // A force-push is one received ref update, so it yields exactly one run — for the tip that
-    // exists. (The orphaned-commit case needs the event to arrive before the rewrite lands, a race
-    // this level cannot stage; it is covered directly in the ci module by
-    // GitConfigFetcherTest.commitForcePushedAwayIsGone and CiRunServiceTest's GONE cases.)
+    // exists. (A commit the repository no longer holds at all is covered where it can be staged:
+    // HttpGitConfigSourceTest.aCommitTheRepositoryDoesNotHoldIsGone and CiRunServiceTest's GONE
+    // cases.)
     String repoId = seedOrigin();
     Path clone = cloneRepo(repoId);
     git(clone, "checkout", "-q", "-b", "ci-rewritten");
@@ -705,11 +705,11 @@ public class CiPipelineBoundaryTest {
         .statusCode(202);
   }
 
-  // --- git plumbing (the git host stands in as <base>/git/<repoId> over file://) ---
+  // --- git plumbing (StubGitHost serves these bares as <base>/git/<repoId>) ---
 
   /** The directory this suite's {@code qits.ci.git-host-url} points at. */
   private Path gitHostRoot() {
-    return Path.of(gitHostUrl.replaceFirst("^file://", ""), "git");
+    return StubGitHost.ROOT.resolve("git");
   }
 
   /**

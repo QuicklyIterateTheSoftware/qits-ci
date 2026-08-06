@@ -1,0 +1,366 @@
+package eu.wohlben.qits.ci.githost;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import eu.wohlben.qits.ci.control.CiConfigParser;
+import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
+import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerFile;
+import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerLookup;
+import eu.wohlben.qits.ci.error.BadRequestException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+/**
+ * {@link HttpGitConfigSource} on its own — plain JUnit against a real git host on a real socket
+ * ({@link StubGitHost}), no Quarkus, since its only collaborators are an {@code ObjectMapper} and a
+ * config string. Same shape as {@link HttpGitHostRepoListingTest}, one route over.
+ *
+ * <p>The repositories are real bares built by real {@code git}, because what is under test is the
+ * two halves of a contract with another service: which url each read goes to, and what this class
+ * makes of the answer. A commit the branch has moved past is the case worth having in front of you —
+ * it is the whole reason the read is addressed by sha.
+ */
+public class HttpGitConfigSourceTest {
+
+  private static final String BRANCH = "main";
+
+  private Path root;
+  private StubGitHost.Server host;
+  private HttpGitConfigSource source;
+
+  @BeforeEach
+  void startHost() throws Exception {
+    root = Files.createTempDirectory("ci-config-host");
+    host = StubGitHost.start(root);
+    source = new HttpGitConfigSource();
+    source.gitHostUrl = host.gitHostUrl();
+    source.objectMapper = new ObjectMapper();
+  }
+
+  @AfterEach
+  void stopHost() throws Exception {
+    host.stop();
+    StubGitHost.deleteRecursively(root);
+  }
+
+  // --- the push half: the config at the pushed commit ---
+
+  @Test
+  public void theConfigIsReadAtThePushedCommit() throws Exception {
+    String repoId = "repo-with-config";
+    String sha = seed(repoId, "steps:\n  - image: alpine:3\n    script: 'true'\n");
+
+    ConfigLookup lookup = source.read(repoId, BRANCH, sha);
+    assertEquals(ConfigLookup.Status.FOUND, lookup.status());
+    assertEquals("steps:\n  - image: alpine:3\n    script: 'true'\n", lookup.content());
+  }
+
+  @Test
+  public void aCommitWithoutTheFileIsAbsentRatherThanAnError() throws Exception {
+    // 404 on the blob is the opt-in case, and it is by far the common one: a repository that
+    // declares no pipeline must read as ABSENT, which discards the row, never as a failure.
+    String repoId = "repo-without-config";
+    String sha = seed(repoId, null);
+    assertEquals(ConfigLookup.Status.ABSENT, source.read(repoId, BRANCH, sha).status());
+  }
+
+  @Test
+  public void aCommitTheRepositoryDoesNotHoldIsGone() throws Exception {
+    // The tree probe is what tells this apart from the case above: the rev itself does not resolve,
+    // so there is no commit to describe and nothing is recorded for it.
+    String repoId = "repo-without-that-commit";
+    seed(repoId, "steps: []\n");
+    assertEquals(
+        ConfigLookup.Status.GONE,
+        source.read(repoId, BRANCH, "0123456789012345678901234567890123456789").status());
+  }
+
+  @Test
+  public void aCommitTheBranchHasMovedPastIsStillRead() throws Exception {
+    // The point of reading at the sha. A second push landed before ci got to the first one; the
+    // first commit's pipeline is still what that push declared, and it still runs.
+    String repoId = "repo-advanced";
+    String first = seed(repoId, "steps: []\n");
+    advance(repoId);
+
+    ConfigLookup lookup = source.read(repoId, BRANCH, first);
+    assertEquals(ConfigLookup.Status.FOUND, lookup.status());
+    assertEquals("steps: []\n", lookup.content());
+  }
+
+  @Test
+  public void anUnreachableHostIsUnreachableRatherThanAbsent() throws Exception {
+    // The distinction a red row would destroy: a read failure must not invent a gate, so it may
+    // never arrive as "this repository declares no pipeline".
+    String repoId = "repo-unreachable";
+    String sha = seed(repoId, "steps: []\n");
+    host.stop();
+    assertEquals(ConfigLookup.Status.UNREACHABLE, source.read(repoId, BRANCH, sha).status());
+  }
+
+  @Test
+  public void hostileIdentifiersAreRejectedBeforeTheyReachAUrl() {
+    assertThrows(BadRequestException.class, () -> source.read("../../etc", BRANCH, "cafebabe0000"));
+    assertThrows(
+        BadRequestException.class, () -> source.read("repo-1", "../../etc", "cafebabe0000"));
+    assertThrows(BadRequestException.class, () -> source.read("repo-1", BRANCH, "not-a-sha"));
+    assertThrows(BadRequestException.class, () -> source.readEventTriggers("a/../b", BRANCH));
+  }
+
+  @Test
+  public void aSlashyBranchIsPercentEncodedBecauseARevIsOneSegment() {
+    assertTrue(
+        source.treeUrl("repo-1", "feature/x", "").endsWith("/tree/feature%2Fx"),
+        "a rev is one path segment, so the slash cannot travel raw");
+    assertEquals(
+        host.gitHostUrl() + "/git/repo-1/blob/feature%2Fx/.config/qits/ci-post-receive.yml",
+        source.blobUrl("repo-1", "feature/x", CiConfigParser.CONFIG_PATH));
+  }
+
+  @Test
+  public void aRepositoryOnASlashyBranchIsRead() throws Exception {
+    String repoId = "repo-slashy";
+    seed(repoId, "steps: []\n", Map.of(".config/qits/ci-event-a.yml", "event: A\n"));
+    String sha = branchOff(repoId, "feature/x");
+
+    assertEquals(ConfigLookup.Status.FOUND, source.read(repoId, "feature/x", sha).status());
+    EventTriggerLookup lookup = source.readEventTriggers(repoId, "feature/x");
+    assertEquals(EventTriggerLookup.Status.FOUND, lookup.status());
+    assertEquals(sha, lookup.headSha());
+  }
+
+  // --- the event half: list the config directory at the branch, read each file at that head ---
+
+  @Test
+  public void everyTriggerFileIsListedAtTheHeadAndReadAtTheShaTheListingResolved() throws Exception {
+    String repoId = "repo-with-triggers";
+    String sha =
+        seed(
+            repoId,
+            "steps: []\n",
+            Map.of(
+                ".config/qits/ci-event-one.yml", "event: A\n",
+                ".config/qits/ci-event-two.yml", "event: B\n"));
+
+    EventTriggerLookup lookup = source.readEventTriggers(repoId, BRANCH);
+    assertEquals(EventTriggerLookup.Status.FOUND, lookup.status());
+    assertEquals(sha, lookup.headSha(), "the run records the head the trigger was read at");
+    assertEquals(
+        Map.of(
+            ".config/qits/ci-event-one.yml", "event: A\n",
+            ".config/qits/ci-event-two.yml", "event: B\n"),
+        lookup.files().stream()
+            .collect(Collectors.toMap(EventTriggerFile::path, EventTriggerFile::content)));
+  }
+
+  @Test
+  public void theFilesAreTheOnesAtTheResolvedHeadEvenWhenTheBranchMovesUnderTheRead()
+      throws Exception {
+    // The sha-consistency rule, staged: the listing resolves a head, the branch then moves, and the
+    // file contents must still be the ones that head carried — never a mix of two commits.
+    String repoId = "repo-moving";
+    String head = seed(repoId, "steps: []\n", Map.of(".config/qits/ci-event-a.yml", "event: A\n"));
+    HttpGitConfigSource pinned =
+        new HttpGitConfigSource() {
+          @Override
+          String blobUrl(String repo, String rev, String path) {
+            // Between the listing and the reads, a push lands. The reads are addressed by the sha
+            // the listing answered, so what they return is unaffected.
+            try {
+              rewriteTrigger(repoId);
+            } catch (Exception e) {
+              throw new IllegalStateException(e);
+            }
+            return super.blobUrl(repo, rev, path);
+          }
+        };
+    pinned.gitHostUrl = host.gitHostUrl();
+    pinned.objectMapper = new ObjectMapper();
+
+    EventTriggerLookup lookup = pinned.readEventTriggers(repoId, BRANCH);
+    assertEquals(head, lookup.headSha());
+    assertEquals(
+        List.of("event: A\n"), lookup.files().stream().map(EventTriggerFile::content).toList());
+    assertNotEquals(head, tip(repoId), "the branch really did move during the read");
+  }
+
+  @Test
+  public void aRepositoryWithNoConfigDirectoryListsNothingRatherThanFailing() throws Exception {
+    String repoId = "repo-bare";
+    String sha = seed(repoId, null);
+    EventTriggerLookup lookup = source.readEventTriggers(repoId, BRANCH);
+    assertEquals(EventTriggerLookup.Status.FOUND, lookup.status());
+    assertEquals(sha, lookup.headSha());
+    assertEquals(List.of(), lookup.files());
+  }
+
+  @Test
+  public void thePostReceiveConfigAndUnrelatedFilesAreNotTriggerFiles() throws Exception {
+    String repoId = "repo-mixed";
+    seed(
+        repoId,
+        "steps: []\n",
+        Map.of(
+            ".config/qits/ci-event-real.yml", "event: A\n",
+            ".config/qits/notes.md", "hello\n",
+            ".config/qits/ci-event-nope.yaml", "event: B\n"));
+
+    assertEquals(
+        List.of(".config/qits/ci-event-real.yml"),
+        source.readEventTriggers(repoId, BRANCH).files().stream()
+            .map(EventTriggerFile::path)
+            .toList());
+  }
+
+  @Test
+  public void anUnknownRepositoryOrBranchIsUnreachableRatherThanEmpty() throws Exception {
+    // Told apart from "declares no trigger", because the two mean different things to the engine:
+    // one is a repository with nothing to say, the other is a repository ci could not ask.
+    String repoId = "repo-other-branch";
+    seed(repoId, "steps: []\n");
+    assertEquals(
+        EventTriggerLookup.Status.UNREACHABLE,
+        source.readEventTriggers(repoId, "no-such-branch").status());
+    assertEquals(
+        EventTriggerLookup.Status.UNREACHABLE,
+        source.readEventTriggers("no-such-repo", BRANCH).status());
+  }
+
+  @Test
+  public void anUnreachableHostListsNoTriggersAndSaysSo() throws Exception {
+    String repoId = "repo-listing-unreachable";
+    seed(repoId, "steps: []\n", Map.of(".config/qits/ci-event-a.yml", "event: A\n"));
+    host.stop();
+    assertEquals(
+        EventTriggerLookup.Status.UNREACHABLE,
+        source.readEventTriggers(repoId, BRANCH).status());
+  }
+
+  // --- seeding: real bares under <root>/git/<repoId>, exactly as the git host holds them ---
+
+  private String seed(String repoId, String config) throws Exception {
+    return seed(repoId, config, Map.of());
+  }
+
+  private String seed(String repoId, String config, Map<String, String> extraFiles)
+      throws Exception {
+    Path work = Files.createTempDirectory("ci-config-seed");
+    try {
+      git(null, "init", "-q", "-b", BRANCH, work.toString());
+      Files.writeString(work.resolve("readme.txt"), "hello\n");
+      if (config != null) {
+        write(work, CiConfigParser.CONFIG_PATH, config);
+      }
+      for (Map.Entry<String, String> extra : extraFiles.entrySet()) {
+        write(work, extra.getKey(), extra.getValue());
+      }
+      commit(work, "seed");
+      String sha = git(work, "rev-parse", "HEAD").strip();
+      git(null, "clone", "-q", "--bare", work.toString(), bare(repoId).toString());
+      return sha;
+    } finally {
+      StubGitHost.deleteRecursively(work);
+    }
+  }
+
+  /** A second push onto {@code main}. */
+  private void advance(String repoId) throws Exception {
+    inAClone(
+        repoId,
+        BRANCH,
+        clone -> {
+          write(clone, "later.txt", "later\n");
+          commit(clone, "later");
+          git(clone, "push", "-q", "origin", BRANCH);
+        });
+  }
+
+  /** Rewrites the trigger file on {@code main} — a push landing mid-evaluation. */
+  private void rewriteTrigger(String repoId) throws Exception {
+    inAClone(
+        repoId,
+        BRANCH,
+        clone -> {
+          write(clone, ".config/qits/ci-event-a.yml", "event: REWRITTEN\n");
+          commit(clone, "rewrite the trigger");
+          git(clone, "push", "-q", "origin", BRANCH);
+        });
+  }
+
+  /** Pushes a new branch with a slash in its name; returns its tip. */
+  private String branchOff(String repoId, String branch) throws Exception {
+    Path clone = Files.createTempDirectory("ci-config-branch");
+    try {
+      Files.delete(clone);
+      git(null, "clone", "-q", bare(repoId).toString(), clone.toString());
+      git(clone, "checkout", "-q", "-b", branch);
+      write(clone, "on-the-branch.txt", "yes\n");
+      commit(clone, "branch");
+      git(clone, "push", "-q", "origin", branch);
+      return git(clone, "rev-parse", "HEAD").strip();
+    } finally {
+      StubGitHost.deleteRecursively(clone);
+    }
+  }
+
+  private String tip(String repoId) throws Exception {
+    return git(bare(repoId), "rev-parse", BRANCH).strip();
+  }
+
+  private interface InAClone {
+    void run(Path clone) throws Exception;
+  }
+
+  private void inAClone(String repoId, String branch, InAClone action) throws Exception {
+    Path clone = Files.createTempDirectory("ci-config-clone");
+    try {
+      Files.delete(clone);
+      git(null, "clone", "-q", "-b", branch, bare(repoId).toString(), clone.toString());
+      action.run(clone);
+    } finally {
+      StubGitHost.deleteRecursively(clone);
+    }
+  }
+
+  private Path bare(String repoId) {
+    return root.resolve("git").resolve(repoId);
+  }
+
+  private static void write(Path root, String path, String content) throws Exception {
+    Path file = root.resolve(path);
+    Files.createDirectories(file.getParent());
+    Files.writeString(file, content);
+  }
+
+  private static void commit(Path clone, String message) throws Exception {
+    git(clone, "add", ".");
+    git(clone, "-c", "user.email=ci@test", "-c", "user.name=ci", "commit", "-q", "-m", message);
+  }
+
+  private static String git(Path cwd, String... args) throws Exception {
+    String[] command = new String[args.length + 1];
+    command[0] = "git";
+    System.arraycopy(args, 0, command, 1, args.length);
+    ProcessBuilder pb = new ProcessBuilder(command);
+    if (cwd != null) {
+      pb.directory(cwd.toFile());
+    }
+    pb.redirectErrorStream(true);
+    Process p = pb.start();
+    String out = new String(p.getInputStream().readAllBytes());
+    if (p.waitFor() != 0) {
+      throw new RuntimeException("git " + String.join(" ", args) + " failed:\n" + out);
+    }
+    return out;
+  }
+}

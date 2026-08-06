@@ -34,15 +34,15 @@ import org.jboss.logging.Logger;
  *
  * <p>This call sits on {@code ci-trigger-worker} in front of every evaluation, and that thread is
  * single-threaded by design — an untimed call here would stall every arriving event, not just this
- * one. The evaluation it precedes then does a {@code git fetch} per candidate, so the listing is the
+ * one. The evaluation it precedes then reads the git host per candidate, so the listing is the
  * cheapest part of the work and must never be the slowest: {@link #CONNECT_TIMEOUT} 2s and {@link
  * #REQUEST_TIMEOUT} 3s, after which the known set is a correct answer and waiting longer buys
  * nothing. Same 2s connect bound {@code CdBuildNotifier} and {@code EventsDaemonReleaseLog} carry.
  *
  * <h2>The cache</h2>
  *
- * <p>{@link #CACHE_TTL} is five seconds, and it is deliberately trivial: one evaluation already does
- * a git fetch per candidate, so the listing is never the cost worth optimising — the cache exists so
+ * <p>{@link #CACHE_TTL} is five seconds, and it is deliberately trivial: one evaluation already
+ * reads the git host per candidate, so the listing is never the cost worth optimising — the cache exists so
  * a burst of events on the bus is one listing read rather than one per frame. Only a <b>successful</b>
  * read is cached; a failure is retried by the next event, which is what keeps a git host that came
  * back up from staying invisible for a window.
@@ -88,9 +88,9 @@ public class HttpGitHostRepoListing implements GitHostRepoListing {
     }
     String url = listingUrl();
     if (!isHttp(url)) {
-      // A git host addressed over file:// serves no listing and never could. DEBUG rather than
-      // WARN: this is the suites' own stand-in, and a warning per event forever is how a log stops
-      // being read (GitConfigFetcher#fetchBranch makes the same argument at length).
+      // A git host addressed over anything but HTTP serves no listing and never could. DEBUG
+      // rather than WARN: a warning per event forever is how a log stops being read, which is the
+      // argument HttpGitConfigSource makes about the trigger-listing path too.
       LOG.debugf("%s is not an HTTP git host — no repository listing to read", url);
       return Set.of();
     }
@@ -161,7 +161,7 @@ public class HttpGitHostRepoListing implements GitHostRepoListing {
     return ids;
   }
 
-  /** {@code <base>/git} — the directory above the bares {@code GitConfigFetcher} fetches from. */
+  /** {@code <base>/git} — the base {@code HttpGitConfigSource} reads content under. */
   String listingUrl() {
     return gitHostUrl.replaceAll("/+$", "") + "/git";
   }

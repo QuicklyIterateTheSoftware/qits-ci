@@ -101,7 +101,7 @@ rest of qits it reaches over a URL it is configured with:
 | in | `GET /ci/api/daemon` → `{"daemonName", "daemonVersion", "previousDaemonVersion", "source"}` — the pin ladder's top rung (an adopted release, else the configured pin), never a run row; blank `daemonVersion` and `source: "none"` mean this deployment has pinned none | same; read fail-closed by qits-artifacts' daemon GC and readable by the client |
 | in | `POST /ci/api/runs/{runId}/cancel` → 202, 409 on a run that has already finished | same: no machine guard, behind the deployment's auth policy |
 | in | `ws://…/ci/daemon` — the socket each step container's daemon dials **out** to | authenticated by a host-minted per-container secret, not by a machine token |
-| out | where the git host answers, for ci's **own** `git fetch` of the pushed ref — ci appends `/git/<repoId>` — and for `GET <base>/git` → `{"repositories": [...]}`, the trigger engine's candidate listing | `qits.ci.git-host-url` |
+| out | where the git host answers: ci reads a commit's pipeline config off its content routes (`<base>/git/<repoId>/blob/<rev>/<path>` and `…/tree/<rev>[/<path>]`) and its candidate listing off `GET <base>/git` → `{"repositories": [...]}` | `qits.ci.git-host-url` |
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + the pin ladder's answer (`qits.ci.daemon-version` is the ladder's bottom rung, never demoted) |
 | out | `POST /cd/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `CdNotifier` seam) | `qits.cd.intake-url`; the call stays on qits-net. `CdBearer` attaches a qits-idp token with `aud=qits-cd` when `quarkus.oidc-client.client-enabled=true`, and sends the POST bare otherwise — which is the shipped default |
@@ -121,9 +121,8 @@ That filter is mandatory, which makes `GET /ci/api/repositories` the answer to t
 raises: *which* repositories are there to filter by. It returns `repositoryIds` and not
 `repositories` because ci holds no repository object — `ci_run.repo_id` is a plain string with no
 relation to anything, and these are ids this instance **observed**. It is deliberately narrower than
-the trigger engine's candidate list, which also counts the bare caches on disk *and* whatever the git
-host lists: a repository ci has merely fetched from has no run history to read, and one it has only
-been told about has neither. Without this endpoint, CI activity that no other
+the trigger engine's candidate list, which also counts whatever the git host lists: a repository ci
+has only been told about has no run history to read. Without this endpoint, CI activity that no other
 service claims is invisible to a client rather than merely unattributed — and on this platform, where
 `qits-local-up.sh` seeds the platform's own repositories straight onto the git host with no
 qits-projects row, that is the whole run history.
@@ -213,14 +212,17 @@ Both halves are **dark in `%dev` and `%test`** (`qits.eventstream.enabled`), the
 OTLP exporter takes, and a deployment without a qits-events is a supported configuration in exactly
 the way a deployment without a qits-cd is.
 
-ci never touches the bare origins on disk: it keeps its **own** bare cache per repository under
-`<qits.ci.data-dir>/repos/<repoId>.git` and fetches into it over the git host's URL. That is what
-lets it run on a machine with no shared filesystem with qits.
+ci never touches the bare origins on disk, and it clones nothing: it **reads the one file** off the
+git host's content routes — `GET <qits.ci.git-host-url>/git/<repoId>/blob/<rev>/<path>`, with `rev`
+a sha or a ref name and the resolved commit answered in a `Git-Commit-Sha` header. So it runs on a
+machine with no shared filesystem with qits, no local mirror and no `git` binary.
 
-The fetch asks for the **branch ref**, not the bare sha — an unadvertised-object fetch would mean
-relaxing the git host's want policy for every unauthenticated client. ci then verifies the pushed
-sha is still an ancestor of the fetched tip: a racing push still runs, a force-pushed-away commit
-records nothing rather than a spurious red run.
+**The push path reads at the pushed sha itself**, which is the whole of why there is no mirror: a
+second push landing first changes nothing, and a 404 means the commit declares no pipeline. A commit
+the repository no longer holds at all is told apart by one more read (the tree at that sha) and
+records nothing, so a force-push cannot leave a red run blaming a commit whose build was never
+broken. The event path lists `.config/qits/` at `main`, takes the head from the header, and reads
+each file **at that sha**, so a push mid-evaluation cannot mix two commits into one run.
 
 ## The file a repository commits
 
@@ -389,7 +391,7 @@ steps:                          # exactly the schema ci-post-receive.yml uses
   platform's one tracked branch supplies the ref. The run records the head sha it built.
 - **Which repositories an event is evaluated against**: the union of what the git host lists (`GET
   <qits.ci.git-host-url>/git` → `{"repositories": [...]}`) and what qits-ci already knows — the
-  repositories it has runs for, plus its own bare caches. So a repository seeded straight onto the
+  repositories it has runs for. So a repository seeded straight onto the
   git host is a candidate before its first push, which is what makes bootstrapping by hand ("Triggering
   one by hand") work at all. If the listing cannot be read, that is one WARN naming the url and the
   known set answers alone: an unreachable git host never shrinks the candidate list and never fails
@@ -563,15 +565,12 @@ answer inside a step. A push-triggered run gets none of these.
 
 ### Which repositories are asked
 
-Every arriving event is evaluated against **the repositories qits-ci already knows** — the union of
-its recorded runs' repo ids and its own bare caches. qits-artifacts hosts the git repositories but
-deliberately exposes no listing of them (its `/v2/_catalog` and npm search routes refuse enumeration
-by design, and `GET /artifacts/api/repositories` lists *artifact* repositories, which a git repo
-never creates), and qits-ci has no shared filesystem to scan the way qits-projects does. The
-consequence, stated plainly: **a repository qits-ci has never seen a push from cannot event-trigger
-until it pushes once.** Committing the trigger file is such a push, so in practice the gap closes
-itself. It is one method (`CiCandidateRepos`) so that the day a listing exists, swapping to it is
-one class.
+Every arriving event is evaluated against the union of **what the git host lists** (`GET
+<qits.ci.git-host-url>/git`) and **what qits-ci already knows** — its recorded runs' repo ids. The
+listing is what lets a repository seeded straight onto the git host event-trigger before its first
+push; the known set is what still answers when the listing cannot be read, because a read failure
+must never shrink the candidate set. It is one method (`CiCandidateRepos`), which is how the listing
+was added: one class, nothing in the engine moved.
 
 ### Exactly one run per (event, trigger file)
 
@@ -668,8 +667,8 @@ control WebSocket every step dials versus the host's docker socket only a `docke
 mounted — are in [`docs/step-execution-flow.md`](docs/step-execution-flow.md). The prose above stays
 the contract; the diagram illustrates it.
 
-`GitConfigFetcher` shells ci's own host `git` against its own bare cache, and that plus the docker
-CLI is the entire set of processes qits-ci spawns. Its docker vocabulary is container lifecycle:
+The docker CLI is now the **entire** set of processes qits-ci spawns — the config read is an HTTP
+call, so the host needs no `git`. Its docker vocabulary is container lifecycle:
 `run`, `logs`, `rm`, `ps`, `network inspect`/`create`. `exec` is not in it, not even to deliver the
 daemon binary.
 
@@ -786,10 +785,10 @@ a repository's own listing will show.
   together with the host's CPU and memory and the per-container `qits.ci.cpus`/`memory-limit` caps.
 - Set `qits.ci.git-host-url` / `qits.ci.container-git-url` to the git host as reachable from the ci
   host and from a step container respectively. **Both end at the service, not at `/git`** — ci
-  appends `/git/<repoId>` itself, because `/git` is the codebase's segment for the smart-HTTP wire
-  protocol while *which* service hosts it is a deployment fact. The git host is qits-artifacts,
-  which serves it under its own gateway segment, so the value is `http://qits-artifacts:8080/artifacts`
-  and a fetch lands on `/artifacts/git/<repoId>`. The container-side alias only resolves on the
+  appends `/git/<repoId>` itself, because `/git` is the codebase's segment for the git host while
+  *which* service hosts it is a deployment fact. The git host is qits-artifacts, which serves it
+  under its own gateway segment, so the value is `http://qits-artifacts:8080/artifacts` and a read
+  lands on `/artifacts/git/<repoId>`. The container-side alias only resolves on the
   network ci itself is on, so `qits.ci.network` must be set together with it.
 - Leave `qits.auth.machine.audience=qits-ci` alone. It is this service's id at qits-idp — the `aud`
   its tokens carry — not a deployment fact.
@@ -823,8 +822,8 @@ a repository's own listing will show.
 - Leave `qits.ci.workspaces-url` alone for the same reason: it is qits-workspaces' root as reached
   **from a step container**, and the shipped `http://qits-workspaces:8080` is already right on
   qits-net. Scheme, host and port, **no path** — a step appends `/workspaces/api/…` itself.
-- Give the process a persistent `~/.qits/data/ci` (or override `quarkus.datasource.ci.jdbc.url` and
-  `qits.ci.data-dir`). The H2 there is a plain **single-writer file** — no `AUTO_SERVER`, so nothing
+- Give the process a persistent `~/.qits/data/ci` (or override `quarkus.datasource.ci.jdbc.url`).
+  The H2 there is a plain **single-writer file** — no `AUTO_SERVER`, so nothing
   else may open it while ci runs, and nothing listens on a database port.
 - Point `QITS_EVENTS_URL` (`qits.events.url`) at qits-events — scheme, host and port, **no path**:
   the client appends `/events/api/events/{id}` and `/events/stream` itself, and a path here yields a

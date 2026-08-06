@@ -14,8 +14,9 @@ import java.util.concurrent.TimeUnit;
  * process is {@link Process#destroyForcibly() force-killed} and whatever output was captured so far
  * is returned with {@code timedOut=true}.
  *
- * <p><b>What it is used for is the docker CLI and ci's own git, and nothing else.</b> No caller
- * anywhere hands it a step's script: a step's script is repo-controlled code, it never becomes a
+ * <p><b>What it is used for is the docker CLI, and nothing else.</b> It shelled {@code git} too
+ * until the pipeline config became an HTTP read off the git host. No caller anywhere hands it a
+ * step's script: a step's script is repo-controlled code, it never becomes a
  * host process, and the only argv it ever reaches is none. See the invariant in {@code CLAUDE.md}.
  *
  * <p>Output is <b>bounded while reading</b>: the buffer keeps only the trailing {@code maxChars} (a

@@ -11,8 +11,9 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Replaces {@link GitConfigFetcher} for the ci suite: an in-memory map the tests populate per
- * (repoId, sha). Unknown commits read as {@link ConfigLookup#absent()}.
+ * The pipeline config for the ci suite: an in-memory map the tests populate per (repoId, sha).
+ * Unknown commits read as {@link ConfigLookup#absent()}. The production implementation is {@code
+ * service/…/githost/HttpGitConfigSource}, which this module ships none of.
  *
  * <p>Lookups are a <b>queue</b> per commit, because the service legitimately reads twice: once to
  * find the config, and again after a failed workspace setup to ask whether the commit is still

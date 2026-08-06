@@ -3,9 +3,11 @@ package eu.wohlben.qits.ci.control;
 import java.util.List;
 
 /**
- * Where the pipeline config for a pushed commit comes from. The real implementation ({@link
- * GitConfigFetcher}) shells ci's own {@code git} against the git host's smart-HTTP URL; tests
- * replace it with an in-memory fake ({@code @io.quarkus.test.Mock}).
+ * Where the pipeline config for a pushed commit comes from. The production implementation is {@code
+ * githost/HttpGitConfigSource} in the {@code service} module — it reads the file off the git host's
+ * content endpoints — and it is a port here for the reason {@link CdNotifier} and {@link
+ * GitHostRepoListing} are: {@code ci} stays free of {@code java.net.http}. Tests replace it with an
+ * in-memory fake ({@code @io.quarkus.test.Mock}).
  */
 public interface CiConfigSource {
 
@@ -21,20 +23,17 @@ public interface CiConfigSource {
       /** The pushed commit has no config file — the repo has not opted in for this push. */
       ABSENT,
       /**
-       * The commit is no longer reachable in the repository (amended/force-pushed away before the
-       * run started). Nothing is recorded — the push it belonged to no longer exists, so a red run
-       * would blame a commit whose build was never broken.
+       * The repository does not hold the commit at all (it was amended or force-pushed away and
+       * garbage-collected). Nothing is recorded — the push it belonged to no longer exists, so a red
+       * run would blame a commit whose build was never broken.
+       *
+       * <p>It is <b>held</b> rather than <b>reachable</b>, and the difference is deliberate: a
+       * commit the branch has moved past still has a pipeline worth running, and the config is read
+       * at that commit rather than at the branch precisely so that it does.
        */
       GONE,
       /** The git host could not be reached at all — nothing is recorded. */
       UNREACHABLE,
-      /**
-       * The fetch lost its <b>local tracking ref</b> to a concurrent fetch of the same repository,
-       * past the fetcher's own bounded retry. A condition of this process, not of the host or the
-       * commit — so unlike {@link #UNREACHABLE} the run must survive: the row stays and the read is
-       * retried. Told apart precisely so a local race can never be treated as "could not ask".
-       */
-      CONTENDED,
       /** The file exists but cannot be a valid config (e.g. absurdly large) ⇒ CONFIG_ERROR. */
       INVALID
     }
@@ -53,10 +52,6 @@ public interface CiConfigSource {
 
     public static ConfigLookup unreachable() {
       return new ConfigLookup(Status.UNREACHABLE, null, null);
-    }
-
-    public static ConfigLookup contended() {
-      return new ConfigLookup(Status.CONTENDED, null, null);
     }
 
     public static ConfigLookup invalid(String message) {
@@ -99,8 +94,9 @@ public interface CiConfigSource {
   record EventTriggerFile(String path, String content) {}
 
   /**
-   * Reads {@link CiConfigParser#CONFIG_PATH} from {@code sha}, which must still be reachable from
-   * {@code branch} in the repository.
+   * Reads {@link CiConfigParser#CONFIG_PATH} at {@code sha} itself. {@code branch} is the run's
+   * coordinate rather than a place to look: the commit is read directly, so a branch that has moved
+   * on since the push changes nothing about what this commit declared.
    */
   ConfigLookup read(String repoId, String branch, String sha);
 

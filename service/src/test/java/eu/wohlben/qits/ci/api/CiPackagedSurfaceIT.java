@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.ci.daemonhost.FakeCiDaemon;
+import eu.wohlben.qits.ci.githost.StubGitHost;
 import io.quarkus.test.junit.QuarkusIntegrationTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -98,13 +99,26 @@ public class CiPackagedSurfaceIT {
     static final Path HOME = Path.of("target", "ci-packaged-it-home").toAbsolutePath();
     static final Path GIT_HOST = Path.of("target", "ci-packaged-it-git-host").toAbsolutePath();
 
+    /**
+     * The stub git host this JVM serves to the launched process. It has to be started here, before
+     * the artifact boots, because its port is what the override names — and it is a real HTTP server
+     * because content reads are HTTP: the launched process reads the pushed commit's config back out
+     * of it exactly as it would out of qits-artifacts.
+     */
+    static StubGitHost.Server gitHost;
+
     @Override
     public Map<String, String> getConfigOverrides() {
       deleteRecursively(HOME);
       deleteRecursively(GIT_HOST);
+      try {
+        gitHost = StubGitHost.start(GIT_HOST);
+      } catch (Exception e) {
+        throw new IllegalStateException("could not start the stub git host", e);
+      }
       return Map.of(
           "user.home", HOME.toString(),
-          "qits.ci.git-host-url", "file://" + GIT_HOST);
+          "qits.ci.git-host-url", gitHost.gitHostUrl());
     }
   }
 
@@ -249,7 +263,7 @@ public class CiPackagedSurfaceIT {
         "the shipped file-H2 default must be what the packaged process opened");
   }
 
-  // --- the git host stands in as <base>/git/<repoId> over file://, as in CiPipelineBoundaryTest ---
+  // --- the git host is StubGitHost over <base>/git/<repoId>, as in CiPipelineBoundaryTest ---
 
   private Path gitHostRoot() {
     return PackagedUnderTarget.GIT_HOST.resolve("git");

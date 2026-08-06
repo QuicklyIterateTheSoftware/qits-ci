@@ -61,8 +61,8 @@ sequenceDiagram
     Dev->>Art: git push
     Art->>Ci: POST /ci/api/events/post-receive<br/>{repoId, branch, oldSha, newSha}
     Ci-->>Art: 202 — fire-and-forget, the hook ignores this
-    Ci->>Art: git fetch the branch ref into ci's OWN bare cache
-    Ci->>Ci: read .config/qits/ci-post-receive.yml out of the pushed commit,<br/>parse the steps, pin the daemon version, write the run row RUNNING
+    Ci->>Art: GET /artifacts/git/{repoId}/blob/{newSha}/.config/qits/ci-post-receive.yml<br/>one file at the pushed commit — no clone, no mirror
+    Ci->>Ci: parse the steps, pin the daemon version, write the run row RUNNING
 
     loop one fresh container per step, in sequence
         Ci->>Dockerd: docker run -d --cap-drop=ALL --security-opt=no-new-privileges …<br/>entrypoint = the host-authored BOOTSTRAP, the contract as env

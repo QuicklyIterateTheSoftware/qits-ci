@@ -11,15 +11,14 @@ import java.util.Set;
  *
  * <p>{@link ListedAndKnownCiRepos} is the bean the engine gets. It asks the git host for {@code GET
  * <qits.ci.git-host-url>/git} → {@code {"repositories":[…]}} through the {@link GitHostRepoListing}
- * port, and <b>adds</b> that to {@link KnownCiRepos}' answer — the repo ids on recorded runs plus
- * ci's own bare caches.
+ * port, and <b>adds</b> that to {@link KnownCiRepos}' answer — the repo ids on recorded runs.
  *
  * <p><b>Union, not replacement.</b> The listing is one HTTP call away, so an unreachable, failed or
  * malformed listing is a WARN naming the url and an empty contribution: the answer is then the known
  * set alone, which is exactly the behaviour that shipped before the listing existed. A read failure
  * never shrinks the candidate set. The two sources also age in opposite directions — the listing is
  * what the host has now, the known set covers a repository the host has stopped listing but ci still
- * holds a cache or a run row for.
+ * holds a run row for.
  *
  * <h2>What this replaced, and why the old answer is worth remembering</h2>
  *
@@ -42,7 +41,7 @@ public interface CiCandidateRepos {
 
   /**
    * The repository ids to evaluate against an arriving event. Called once per event on the trigger
-   * worker, so it may do IO, but every id it returns costs a {@code git fetch}.
+   * worker, so it may do IO, but every id it returns costs a read against the git host.
    */
   Set<String> candidates();
 }

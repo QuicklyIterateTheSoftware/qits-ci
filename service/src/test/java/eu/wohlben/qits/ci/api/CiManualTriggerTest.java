@@ -2,13 +2,15 @@ package eu.wohlben.qits.ci.api;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.ci.control.FakeCiStepRunner;
 import eu.wohlben.qits.ci.githost.FakeGitHostRepoListing;
+import eu.wohlben.qits.ci.githost.StubGitHost;
+import io.quarkus.test.common.TestResourceScope;
+import io.quarkus.test.common.WithTestResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
@@ -18,7 +20,6 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -46,6 +47,7 @@ import org.junit.jupiter.api.Test;
  * than beside the listing's own tests because only the whole engine can show the gap closed.
  */
 @QuarkusTest
+@WithTestResource(value = StubGitHost.class, scope = TestResourceScope.GLOBAL)
 public class CiManualTriggerTest {
 
   private static final String ZERO_SHA = "0".repeat(40);
@@ -55,12 +57,6 @@ public class CiManualTriggerTest {
   private static final String POST_RECEIVE = "steps:\n  - image: alpine:3\n    script: echo push\n";
 
   private static final String TRIGGER = "/ci/api/events/trigger";
-
-  @ConfigProperty(name = "qits.ci.git-host-url")
-  String gitHostUrl;
-
-  @ConfigProperty(name = "qits.ci.data-dir")
-  String dataDir;
 
   @Inject FakeCiStepRunner fakeRunner;
 
@@ -159,18 +155,14 @@ public class CiManualTriggerTest {
   }
 
   @Test
-  public void aRepositoryOnlyTheGitHostListsTriggersWithNoPushAndNoCache() throws Exception {
+  public void aRepositoryOnlyTheGitHostListsTriggersWithNoPushAtAll() throws Exception {
     String upstream = upstream();
     String repoId = seedOrigin(upstream);
 
-    // The production gap, stated as two assertions: no run row and no bare cache is precisely what
-    // KnownCiRepos answers "not a candidate" to, so before the listing this repository could not
-    // event-trigger at all — which is what blocked bootstrapping a platform seeded straight onto the
-    // git host. Note it is NOT pushed.
+    // The production gap: no run row is precisely what KnownCiRepos answers "not a candidate" to,
+    // so before the listing this repository could not event-trigger at all — which is what blocked
+    // bootstrapping a platform seeded straight onto the git host. Note it is NOT pushed.
     assertTrue(runsOf(repoId).isEmpty(), "the repository has no run history in qits-ci");
-    assertFalse(
-        Files.isDirectory(Path.of(dataDir, "repos", repoId + ".git")),
-        "qits-ci holds no bare cache for it either");
 
     gitHostListing.set(repoId);
 
@@ -297,7 +289,7 @@ public class CiManualTriggerTest {
   }
 
   private Path gitHostRoot() {
-    return Path.of(gitHostUrl.replaceFirst("^file://", ""), "git");
+    return StubGitHost.ROOT.resolve("git");
   }
 
   private String git(Path cwd, String... args) throws Exception {

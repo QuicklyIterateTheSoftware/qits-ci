@@ -10,9 +10,9 @@ itself) and the config surface. This file is the working conventions on top of i
 building this service. `mvn verify` is the gate once that repository is available.
 
 That is why: the poms duplicate versions instead of inheriting them, the suites stand up their own
-bare git repos instead of using fixture submodules, the git host is a `file://` directory laid out
-as `<base>/git/<repoId>`, and the one seam that needs real docker is faked (`FakeCiStepRunner`)
-rather than skipped.
+bare git repos instead of using fixture submodules, the git host is `StubGitHost` — a real HTTP
+server in the suite, serving those bares as `<base>/git/<repoId>` — and the one seam that needs real
+docker is faked (`FakeCiStepRunner`) rather than skipped.
 
 The Angular client at `service/src/main/webui` remains the sole submodule. Initialise it before an
 image build; qits-eventstream is a normal Maven dependency and must not return as a gitlink.
@@ -32,7 +32,8 @@ second rule of the same kind, and three things follow:
   proxies, `ServiceLoader`, resources loaded by computed name and JNI/JNA all need registering, and
   when they are missing the failure lands at *runtime, in the binary*, while the JVM suite stays
   green. Prefer what is already in the image — `ProcessBuilder` over a process library (which is why
-  `CiProcess` and `GitConfigFetcher` shell out rather than link a docker or git client), and
+  `CiProcess` shells out rather than links a docker client) and `java.net.http` over a REST client
+  library (which is why every client in `service/…/githost` and `notify` is hand-rolled), and
   `java.lang.foreign` over JNA. If a native build needs configuration to pass, that configuration is
   part of the change. The repo's one explicit registration is `EventWireReflection` in
   `service/…/bus/`, and it is worth reading as the worked example of this bullet: the types are
@@ -61,8 +62,8 @@ package:
   where qits-workspaces keeps its own `daemonhost` for the same reason. `ci/` keeps the
   `CiStepRunner` seam and the orchestrator and gains no web dependency — the step runner is in
   `service/` because it *is* the transport. Three more packages of the same kind: `notify`, the cd
-  announcement; `bus`, both ends of the event bus (below); and `githost`, the git host's repository
-  listing (see "The trigger engine"). Every one of them is an *adapter* for a seam that lives in
+  announcement; `bus`, both ends of the event bus (below); and `githost`, the two clients for the git
+  host — the pipeline-config reads and the repository listing (both below). Every one of them is an *adapter* for a seam that lives in
   `ci/control`; that is what the package split says — and every `java.net.http` client living here
   rather than in `ci/` is that same rule applied.
 - `ci-daemon-protocol/` — the vendored wire contract (below). Its package is
@@ -193,6 +194,42 @@ Two more things live in this package and belong to it rather than to `ci/`:
   belt-and-braces for its own sake: cancel runs on the request thread and the claim runs on the run
   worker, so if the worker won the race and turned the row `RUNNING` in between, the flag is what
   stops the run before its first container. Neither thread has to win for the answer to be right.
+
+## Reading a repository's pipeline config
+
+`service/…/githost/HttpGitConfigSource` is the only implementation of `CiConfigSource`, and it is
+two `GET`s against the git host:
+
+    <qits.ci.git-host-url>/git/<repoId>/blob/<rev>/<path>    the bytes
+    <qits.ci.git-host-url>/git/<repoId>/tree/<rev>[/<path>]  {"entries":[{"name","type"}]}
+
+Both answer the commit they resolved in a `Git-Commit-Sha` header, and `<rev>` is a sha **or** a ref
+name. Four things follow, and each of them replaced something:
+
+- **The push path reads at the pushed sha.** No branch, no mirror, no race with a second push. What
+  went with it is the whole contended-fetch machinery — a bare mirror per repository under a data
+  dir, `git init --bare`, a fetch into a ci-private ref two workers could lose a CAS on, the bounded
+  retry, `ConfigLookup.CONTENDED` and `CiRunService`'s requeue. All of it existed because the wire
+  protocol has no blob-at-path verb, so reading one file meant cloning first. Do not reintroduce any
+  of it: the host serves any commit it holds, reachable from a ref or not.
+- **A 404 on the blob still means "this commit declares no pipeline"**, which is the opt-in case and
+  discards the row. It is told apart from a commit the repository does not hold by one more read —
+  the tree at that same sha — because those two mean opposite things to the record. So `GONE`
+  narrowed on purpose: it is *held*, not *reachable*, and a commit the branch has moved past now
+  builds instead of being discarded.
+- **The event path lists `.config/qits/` at the branch, takes the head off the header, and reads each
+  file at that sha.** The listing and the reads are one commit even if a push lands in between; a run
+  must never be recorded against one commit with a trigger file from another. A 404 on the directory
+  costs one more read (the root tree) to tell "declares nothing" from "could not ask".
+- **`ci/` stays free of `java.net.http`.** The port is `CiConfigSource` in `ci/control`, the client
+  is in `service/`, exactly as `CdNotifier` and `GitHostRepoListing` are. That split is also why the
+  logging differs by path: the push path WARNs (a repository and a branch existed a moment ago),
+  the trigger listing stays at DEBUG (it asks every known repository on every frame, and a deleted
+  one is simply not a candidate — a warning per green build forever is how a log stops being read).
+
+The host's side of the contract, including the 8 MiB blob cap and why a slashy branch is written
+`feature%2Fx`, is qits-artifacts' `README.md` under "Reading one file without cloning". **qits-ci
+spawns no `git`**, and the image no longer carries one.
 
 ## The run queue, and what a run row means
 
@@ -552,11 +589,12 @@ follows is what biting it feels like.
   `CiEventTriggerCausationTest` reads it off the stub to keep that from being a belief.
 - **Three threads, and each boundary is deliberate.** `onFrame` runs on the bus's websocket worker,
   one frame at a time for *every* consumer, so it only enqueues. Evaluation runs on its own
-  single-threaded `ci-trigger-worker`: not the dispatch thread because it does a `git fetch` per
+  single-threaded `ci-trigger-worker`: not the dispatch thread because it reads the git host once per
   candidate repository, and **not `ci-run-worker`** either, though that is the obvious reuse — that
   thread is inside a running pipeline for minutes, and an event evaluated when the build ends is
-  evaluated against a `main` that has moved. Single-threaded because two evaluations of one
-  repository would race on the same bare cache. The queue is bounded; a full one is a WARN naming
+  evaluated against a `main` that has moved. Single-threaded was once a correctness rule (two
+  evaluations of one repository raced for one bare cache on disk); with the caches gone it is a
+  budget — one fan-out at the git host at a time. The queue is bounded; a full one is a WARN naming
   the event that was not evaluated, which beats turning a burst into heap.
 - **The causation edge crosses those threads as data, not as context.** `CausationScope` is a plain
   `ThreadLocal` and does not follow work — that is its design, not its limitation. So the frame's
@@ -598,7 +636,7 @@ follows is what biting it feels like.
   `StepChunk` and `StepFinished`, and a stdout sentinel is forbidden by design.
 - **The candidate list was the feature's one acknowledged compromise, and it is the worked example of
   a seam paying for itself.** It read: qits-artifacts exposes no listing, so `KnownCiRepos` answers
-  with what qits-ci already knows — recorded runs' repo ids plus its own bare caches — and a
+  with what qits-ci already knows — recorded runs' repo ids — and a
   repository that has never pushed cannot event-trigger until it does. That cost was real: it blocked
   bootstrapping a platform seeded straight onto the git host, which is exactly what `POST
   /ci/api/events/trigger` exists for. The git host has since grown the listing, the swap was the one
@@ -612,29 +650,30 @@ follows is what biting it feels like.
   answer is then the known set alone, which is precisely what shipped before. **A read failure must
   never shrink the candidate set**, the same rule the run queue states for an unreachable git host one
   section up. The two halves also age in opposite directions: the listing is what the host has now,
-  the known set still covers a repository the host has stopped listing but ci holds a cache or a row
-  for.
+  the known set still covers a repository the host has stopped listing but ci holds a row for.
 
   Four things about the HTTP half, which is `service/…/githost/HttpGitHostRepoListing` and is in
   `service/` because **`ci/` stays free of `java.net.http`** — the rule `DaemonReleaseLog` states and
   `CdNotifier` set:
 
   - **The url is derived, never configured.** It is the git host's own base plus the same `/git`
-    segment `GitConfigFetcher` appends to fetch a ref, so the listing and the fetch move together.
+    segment `HttpGitConfigSource` reads content under, so the listing and the config read move
+    together.
   - **The timeouts are short because of which thread this is on.** 2s connect, 3s for the whole
     exchange. It runs on the single-threaded `ci-trigger-worker` in front of every evaluation, so an
-    untimed call would stall *every* arriving event; and the evaluation it precedes does a `git fetch`
+    untimed call would stall *every* arriving event; and the evaluation it precedes reads the host
     per candidate, so the listing must never be the slow part. Past the deadline the known set is a
     correct answer.
-  - **The cache is five seconds and deliberately trivial.** One evaluation already costs a fetch per
+  - **The cache is five seconds and deliberately trivial.** One evaluation already costs a read per
     candidate, so this is not an optimisation — it is so a burst on the bus is one listing read rather
     than one per frame. Only a *successful* read is cached, because caching a failure would keep a git
     host that came back up invisible for the window.
-  - **A non-HTTP git host is a DEBUG, not a WARN.** Both suites point `qits.ci.git-host-url` at a
-    `file://` directory, which serves no listing and never could; warning on it would be a line per
-    event forever, which is the failure `GitConfigFetcher#fetchBranch`'s `expected` parameter exists
-    to avoid. Ids off the listing are filtered through `CiIdentifiers` before they reach a git argv,
-    exactly as `KnownCiRepos` filters its own directory names.
+  - **A non-HTTP git host is a DEBUG, not a WARN.** A value that is not an HTTP url serves no
+    listing and never could; warning on it would be a line per event forever, which is the same
+    argument `HttpGitConfigSource` makes for keeping the trigger-listing path's failures at DEBUG —
+    that path asks every known repository on every frame, so one deleted repository would otherwise
+    cost a warning per green build forever. Ids off the listing are filtered through `CiIdentifiers`
+    before they reach a url.
 
   `KnownCiRepos` stays `@DefaultBean` and `ListedAndKnownCiRepos` is an ordinary bean, which is the
   whole of the CDI arrangement: the ordinary bean wins the engine's injection point while the default
@@ -679,9 +718,9 @@ Four things reaching this code are attacker-controlled and must stay that way in
   daemon dialled outbound, and executes as that daemon's child inside a sandbox with
   `--cap-drop=ALL`, `no-new-privileges` and resource caps. qits-ci's whole docker
   vocabulary is container lifecycle — `run`, `logs`, `rm`, `ps`, `network inspect`/`create` — and
-  `exec` is not in it, not even as a way to deliver the daemon binary. The only host processes this
-  service spawns are that CLI and its own `git` against its own bare cache: ci tooling over
-  ci-owned state, never pipeline content.
+  `exec` is not in it, not even as a way to deliver the daemon binary. That CLI is now the **only**
+  program this service spawns at all: reading a repository's config is an HTTP call to the git host,
+  so there is no `git` on the host and nothing left that could be handed pipeline content.
 
   `bash -c <anything from a repository>` appearing anywhere in this repo, in `src/main` or
   `src/test`, host-side or inside a docker argv, is the regression this paragraph exists to make
@@ -817,7 +856,18 @@ contract, tested where it lives.
   `src/test/resources/application.properties` shadow it. **Never re-declare an app-level setting in
   test resources**: a suite green because the *test* copy is right proves nothing about what ships,
   and the two silently drift. `src/test/resources/application.properties` carries only genuine
-  test-only overrides (in-memory H2, `target/` data dir, the `file://` git-host stand-in).
+  test-only overrides (in-memory H2, `target/` working dirs, a git-host url nothing answers on).
+- **The git host in the suite is `githost/StubGitHost`, and it is a server rather than a
+  directory.** Reading pipeline config is HTTP now (below), so the old stand-in — a `file://`
+  directory laid out as `<base>/git/<repoId>` — answers nothing, and the shipped test config points
+  `qits.ci.git-host-url` at `http://127.0.0.1:1/artifacts`: an address nothing listens on, so a suite
+  that never seeds a repository fails its reads fast and honestly. A suite that *does* declares
+  `@WithTestResource(value = StubGitHost.class, scope = TestResourceScope.GLOBAL)`, which is how the
+  port reaches the application's config **before it boots** — the same arrangement as
+  `StubEventsServer`, and `GLOBAL` so it costs no restart. The stub still serves ordinary bares the
+  suites build with real `git`; it shells `git` to answer the two content routes, so what is faked is
+  the wire shape and nothing else. The ITs call `StubGitHost.start(root)` from their profile instead,
+  because they own their own root directory.
 - `OpenApiSchemaExportTest` writes `docs/openapi.yml`. Regenerate and commit when the surface
   changes: `./mvnw -pl service -am test -Dtest=OpenApiSchemaExportTest
   -Dsurefire.failIfNoSpecifiedTests=false`. Both extra flags are load-bearing: `-am` because the
@@ -958,8 +1008,7 @@ contract, tested where it lives.
   whole content is which beans it composes — `KnownCiRepos` by its own type past its `@DefaultBean`,
   the port through an `Instance` — and a hand-wired instance would prove none of it. And
   `CiManualTriggerTest`'s last case is the production gap itself: a repository seeded onto the git
-  host with a trigger file, asserted to have **no run row and no bare cache**, firing a run off a
-  hand-supplied event. Only the whole engine can show that, which is why it lives there and not
+  host with a trigger file, asserted to have **no run row**, firing a run off a hand-supplied event. Only the whole engine can show that, which is why it lives there and not
   beside the listing.
   There is a `FakeGitHostRepoListing` in each module's test sources, duplicated for the reason both
   `FakeCiStepRunner`s are. The service module's is a `@Mock`, so the real client is out of the way of

@@ -10,6 +10,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.ci.control.FakeCiStepRunner;
+import eu.wohlben.qits.ci.githost.StubGitHost;
+import io.quarkus.test.common.TestResourceScope;
 import io.quarkus.test.common.WithTestResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -22,7 +24,6 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -45,6 +46,7 @@ import org.junit.jupiter.api.Test;
  * through a real qits-events belongs to the platform.
  */
 @QuarkusTest
+@WithTestResource(value = StubGitHost.class, scope = TestResourceScope.GLOBAL)
 @TestProfile(BuildSuccessfulPublishTest.EventstreamOn.class)
 @WithTestResource(StubEventsServer.class)
 public class BuildSuccessfulPublishTest {
@@ -68,9 +70,6 @@ public class BuildSuccessfulPublishTest {
   }
 
   private final ObjectMapper json = new ObjectMapper();
-
-  @ConfigProperty(name = "qits.ci.git-host-url")
-  String gitHostUrl;
 
   @Inject FakeCiStepRunner fakeRunner;
 
@@ -150,7 +149,7 @@ public class BuildSuccessfulPublishTest {
         .statusCode(202);
   }
 
-  // --- git plumbing (the git host stands in as <base>/git/<repoId> over file://) ---
+  // --- git plumbing (StubGitHost serves these bares as <base>/git/<repoId>) ---
 
   /**
    * Seeds a bare origin at {@code <git-host>/git/<repoId>} whose {@code main} already carries the
@@ -179,7 +178,7 @@ public class BuildSuccessfulPublishTest {
 
   /** The directory this suite's {@code qits.ci.git-host-url} points at. */
   private Path gitHostRoot() {
-    return Path.of(gitHostUrl.replaceFirst("^file://", ""), "git");
+    return StubGitHost.ROOT.resolve("git");
   }
 
   private String git(Path cwd, String... args) throws Exception {

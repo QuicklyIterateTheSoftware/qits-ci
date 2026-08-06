@@ -25,15 +25,14 @@
 #
 # That `?` is `${user.home}`. UID 1001 has no /etc/passwd entry in ubi-minimal, and a native image
 # resolves user.home through getpwuid(2) rather than $HOME — so exporting HOME does not fix it, and
-# the two `${user.home}`-rooted defaults the `ci` jar ships (the H2 file and `qits.ci.data-dir`, the
-# parent of the per-repo bare git caches) have nowhere to land.
+# the `${user.home}`-rooted default the `ci` jar ships (the H2 file) has nowhere to land.
 #
 # An /etc/passwd line for 1001 would make it boot with no environment at all. IT IS DELIBERATELY NOT
 # HERE, and re-adding it is not a fix. The H2-on-local-disk arrangement is a PROTOTYPE — one file
 # database, single writer, sitting next to the process — and not a committed data architecture. An
 # image that comes up healthy on an empty environment resolves both of those paths into the
 # container's own writable layer: it presents the prototype as decided, and it silently discards
-# every recorded run and every bare cache on the next redeploy. Booting unconfigured is not a
+# every recorded run on the next redeploy. Booting unconfigured is not a
 # supported mode of this image. A container that refuses to start is the failure you see; one that
 # starts on ephemeral storage is the failure that hides.
 #
@@ -44,17 +43,15 @@
 #     -e QUARKUS_DATASOURCE_CI_JDBC_URL=jdbc:h2:file:/data/ci/h2/ci \
 #     ...
 #
-# `qits.ci.data-dir` is NOT in that list: the image names it (/data/ci, see the runtime stage). It is
-# where GitConfigFetcher's per-repository bare caches live — files on disk, nothing of it in SQL — so
-# it is not part of the prototype and simply works. The two are separable precisely because the H2
-# default interpolates `${user.home}` directly rather than deriving from that key, so naming the data
-# dir cannot accidentally revive the database.
+# That is the whole of what this image needs on disk. ci used to keep a bare git mirror per
+# repository beside it under `qits.ci.data-dir`; it reads pipeline config off the git host's content
+# routes now, mirrors nothing, and that key is gone.
 #
 # Four more have defaults that are wrong QUIETLY — nothing will tell you they are unset:
 #
-#   QITS_CI_GIT_HOST_URL        where ci's own git fetches the pushed ref. The default is
+#   QITS_CI_GIT_HOST_URL        where ci reads the pushed commit's pipeline config. The default is
 #                               localhost:8080/artifacts, which standalone means THIS service — and
-#                               this service hosts no git, so the fetch 404s and every push records
+#                               this service hosts no git, so the read 404s and every push records
 #                               "no pipeline", indistinguishable from a repository that never opted
 #                               in. Point it at qits-artifacts on qits-net.
 #   QITS_CI_CONTAINER_GIT_URL   the same base as reachable from inside a step container. Its
@@ -73,15 +70,9 @@
 #
 # --- READ THIS BEFORE DEPLOYING: ci is not a self-contained process -------------------------------
 # ci is HOST-SIDE by design (README.md, "How a step runs") — it does its work by shelling out,
-# so the runtime stage below is deliberately NOT the usual "the binary and nothing else". Two
-# external programs are part of this service's *runtime*, and neither is something a config value
-# can substitute:
-#
-#   git     `GitConfigFetcher` shells ci's own git against a per-repo bare cache to read
-#           `.config/qits/ci-post-receive.yml` back out of the pushed commit. It runs on EVERY
-#           intake event, before any step exists. Absent, a fetch fails and every push records "no
-#           pipeline" — the same silent shape as a wrong git-host url above. Installed below, from
-#           the image's own UBI repositories.
+# so the runtime stage below is deliberately NOT the usual "the binary and nothing else". ONE
+# external program is part of this service's *runtime*, and it is not something a config value can
+# substitute:
 #
 #   docker  `CiDaemonLauncher` starts one detached container per step (and removes it again, and
 #           sweeps orphans at boot); its `ensureNetwork()` observer fires on `StartupEvent`. The CLI
@@ -205,19 +196,22 @@ RUN d=service/src/main/webui/dist/qits-spa-ci/browser; \
 FROM localhost:8081/redhat/ubi9/ubi-minimal:9.6
 WORKDIR /work
 
-# git-core rather than git: ci runs `init --bare`, `fetch`, `show`, `cat-file` and `merge-base` and
-# nothing that needs perl, the remote helpers or the docs — see the header for why it is not
-# optional. The docker CLI comes from Docker's own repository because no UBI repository carries a
+# The docker CLI comes from Docker's own repository because no UBI repository carries a
 # docker-compatible client at all; the repo definition is removed again afterwards so the shipped
 # image does not carry a third-party package source it has no reason to consult.
 #
-# No ENV HOME accompanies them. Checked rather than assumed: run as 1001 with HOME=/ (unwritable,
-# which is what an image with no passwd entry gets) both programs do everything ci asks of them. And
-# a HOME here would read like the user.home workaround the header refuses, which is worse than
+# `git-core` used to stand beside it, for the bare mirror ci fetched pipeline config into. The config
+# is an HTTP read off the git host's content routes now — no clone, no mirror, no git — so the
+# package is gone rather than kept "just in case": what a runtime image carries is what a deployment
+# has to trust, and nothing here shells `git` any more.
+#
+# No ENV HOME accompanies it. Checked rather than assumed: run as 1001 with HOME=/ (unwritable,
+# which is what an image with no passwd entry gets) the CLI does everything ci asks of it. And a
+# HOME here would read like the user.home workaround the header refuses, which is worse than
 # useless — it does not make user.home resolve either.
 RUN printf '[docker-ce-stable]\nname=Docker CE Stable\nbaseurl=https://download.docker.com/linux/centos/9/$basearch/stable\nenabled=1\ngpgcheck=1\ngpgkey=https://download.docker.com/linux/centos/gpg\n' \
       > /etc/yum.repos.d/docker-ce.repo \
- && microdnf -y --setopt=install_weak_deps=0 --nodocs install git-core docker-ce-cli \
+ && microdnf -y --setopt=install_weak_deps=0 --nodocs install docker-ce-cli \
  && microdnf -y clean all \
  && rm -f /etc/yum.repos.d/docker-ce.repo
 
@@ -229,7 +223,7 @@ RUN printf '[docker-ce-stable]\nname=Docker CE Stable\nbaseurl=https://download.
 COPY --from=build --chown=1001:root /src/service/target/qits-ci /work/qits-ci
 RUN chmod +x /work/qits-ci
 
-# The mount point for QITS_CI_DATA_DIR and the H2 url, created here so it is OWNED. Docker seeds a
+# The mount point for the H2 url, created here so it is OWNED. Docker seeds a
 # fresh named volume from whatever the image has at the mount path, ownership included; with no such
 # directory it makes one root-owned 0755, and the boot then dies on an AccessDeniedException rather
 # than on the config error the header documents — which reads like a bug in this image and is not
@@ -237,16 +231,6 @@ RUN chmod +x /work/qits-ci
 # arbitrary UID with GID 0. (A bind mount still takes its ownership from the host — nothing in an
 # image can fix that.)
 RUN mkdir -p /data/ci && chown -R 1001:root /data && chmod -R 775 /data
-
-# The git caches, named here rather than left to a deployment. `qits.ci.data-dir` is where
-# GitConfigFetcher keeps a bare cache per repository — files on disk, nothing of it in SQL — so it is
-# not the prototype and it resolves correctly out of the box.
-#
-# The datasource is NOT set beside it, and that asymmetry is the point: the H2 default interpolates
-# `${user.home}` DIRECTLY rather than deriving from this key, so naming the data dir cannot
-# accidentally revive the database. The prototype still refuses to start until a deployment says
-# where it goes.
-ENV QITS_CI_DATA_DIR=/data/ci
 
 EXPOSE 8080
 USER 1001

@@ -31,8 +31,8 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * what lets a client compute that set and show it, rather than quietly omitting it.
  *
  * <p>Deliberately narrower than {@code CiCandidateRepos}, which the trigger engine asks: that one
- * also counts the bare caches on disk, because a repository ci has merely fetched from is still a
- * candidate to be triggered. A repository with no run has no history to explore, so it does not
+ * also counts every repository the git host lists, because a repository ci has never built is still
+ * a candidate to be triggered. A repository with no run has no history to explore, so it does not
  * belong in an answer a UI draws nodes from.
  *
  * <p>A separate resource rather than a second method on {@code CiRunController}, because {@code

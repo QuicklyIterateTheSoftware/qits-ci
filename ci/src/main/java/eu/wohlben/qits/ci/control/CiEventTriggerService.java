@@ -27,9 +27,9 @@ import org.jboss.logging.Logger;
  * <h2>The executor, and why it is not the dispatch thread and not the run worker</h2>
  *
  * <p><b>Not the dispatch thread.</b> {@code onFrame} runs on the bus's websocket worker, one frame at
- * a time for the whole subscription. Evaluation does a {@code git fetch} <em>per candidate
- * repository</em>, so doing it inline would hold up every other consumer's frames for however long a
- * git host takes — and the typed {@code BuildSuccessfulListener} is on that same thread.
+ * a time for the whole subscription. Evaluation reads the git host <em>per candidate repository</em>,
+ * so doing it inline would hold up every other consumer's frames for however long a git host takes —
+ * and the typed {@code BuildSuccessfulListener} is on that same thread.
  *
  * <p><b>Not {@code ci-run-worker} either</b>, though it is the obvious reuse. That thread is occupied
  * by a running pipeline for minutes at a time; queueing evaluation behind it would mean an event that
@@ -37,10 +37,10 @@ import org.jboss.logging.Logger;
  * moved since. Evaluation-before-enqueue is a different latency class from run execution and gets its
  * own thread.
  *
- * <p><b>Single-threaded, though</b>, and that is not caution: two evaluations of the same repository
- * would race on the same bare cache under {@code <data-dir>/repos/<repoId>.git}, which is one
- * directory and one git index lock. Serialising is the only correct shape without a per-repo lock,
- * and it matches the run worker's own.
+ * <p><b>Single-threaded, though.</b> It was once a correctness rule — two evaluations of one
+ * repository raced for the same bare cache on disk — and the caches are gone, so what is left is a
+ * budget: one evaluation reads the git host once per candidate repository, and a thread per arriving
+ * frame would point that fan-out at the host all at once. It matches the run worker's own shape.
  *
  * <p>The queue is <b>bounded</b>. An unbounded one turns a burst on the bus into heap; a bounded one
  * turns it into a WARN naming the event that was dropped, which is a thing a person can act on. At

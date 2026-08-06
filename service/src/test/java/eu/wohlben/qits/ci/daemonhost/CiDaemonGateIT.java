@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import eu.wohlben.qits.ci.githost.StubGitHost;
 import io.quarkus.arc.ClientProxy;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -125,14 +126,16 @@ public class CiDaemonGateIT {
    *
    * <p>{@code getConfigOverrides()} is the only hook that runs early enough to hand the application
    * a port that does not exist yet, so the fixture is started here rather than in a {@code @BeforeAll}
-   * — by then {@code CiDaemonLauncher} has already been configured. The git host is pointed at the
-   * same directory twice: {@code file://} for ci's own config fetch, {@code http://} for the
-   * containers' clones, which is exactly the split the two production keys have.
+   * — by then {@code CiDaemonLauncher} has already been configured. One directory is served twice,
+   * which is exactly the split the two production keys have: {@link StubGitHost} answers the content
+   * reads ci makes for itself, {@code GitHttpBackend} answers the containers' clones over the smart
+   * protocol.
    */
   public static class GateProfile implements QuarkusTestProfile {
 
     static final Path GIT_ROOT = Path.of("target", "ci-gate-it-git-host").toAbsolutePath();
     static GitHttpBackend fixture;
+    static StubGitHost.Server contentHost;
 
     @Override
     public Map<String, String> getConfigOverrides() {
@@ -141,6 +144,7 @@ public class CiDaemonGateIT {
         Files.createDirectories(GIT_ROOT.resolve("git"));
         byte[] binary = BINARY == null ? new byte[0] : Files.readAllBytes(Path.of(BINARY));
         fixture = GitHttpBackend.start(GIT_ROOT, binary);
+        contentHost = StubGitHost.start(GIT_ROOT);
       } catch (Exception e) {
         throw new IllegalStateException("could not start the gate fixture", e);
       }
@@ -150,7 +154,7 @@ public class CiDaemonGateIT {
       // FakeCiStepRunner — and it would do it in under a second, which is exactly how long it takes
       // to believe a green gate that proved nothing.
       overrides.put(eu.wohlben.qits.ci.control.FakeCiStepRunner.ENABLED, "false");
-      overrides.put("qits.ci.git-host-url", "file://" + GIT_ROOT);
+      overrides.put("qits.ci.git-host-url", contentHost.gitHostUrl());
       overrides.put("qits.ci.container-git-url", fixture.containerGitUrl());
       // No {version} placeholder: the fixture serves one binary, and the version is what lands on
       // the run row. The two still travel together, which is the point of the template.
@@ -163,7 +167,6 @@ public class CiDaemonGateIT {
       overrides.put("qits.ci.daemon-init-timeout-seconds", "180");
       overrides.put("qits.ci.step-timeout-grace-seconds", "30");
       overrides.put("qits.ci.output-max-chars", String.valueOf(OUTPUT_MAX_CHARS));
-      overrides.put("qits.ci.data-dir", "target/ci-gate-it-data");
       return overrides;
     }
   }
