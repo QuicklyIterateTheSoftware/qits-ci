@@ -47,7 +47,7 @@
 # repository beside it under `qits.ci.data-dir`; it reads pipeline config off the git host's content
 # routes now, mirrors nothing, and that key is gone.
 #
-# Four more have defaults that are wrong QUIETLY — nothing will tell you they are unset:
+# These have defaults that are wrong QUIETLY — nothing will tell you they are unset:
 #
 #   QITS_CI_GIT_HOST_URL        where ci reads the pushed commit's pipeline config. The default is
 #                               localhost:8080/artifacts, which standalone means THIS service — and
@@ -66,7 +66,8 @@
 #                               the other direction: present a bearer to qits-platform-deployments.
 #                               A separate switch, so either end of the platform can be turned on
 #                               first.
-#   QITS_PD_INTAKE_URL          where a green run is announced — the whole url, path included. Its
+#   QITS_PLATFORM_DEPLOYMENTS_INTAKE_URL
+#                               where a green run is announced — the whole url, path included. Its
 #                               qits-net default is right on that network; a wrong value is silent,
 #                               because the POST is fire-and-forget.
 #

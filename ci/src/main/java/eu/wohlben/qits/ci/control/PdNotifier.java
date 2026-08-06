@@ -8,8 +8,8 @@ package eu.wohlben.qits.ci.control;
  *
  * <p>An interface rather than a call so this module stays free of any web stack: the sole
  * production implementation is {@code service/…/notify/PdBuildNotifier}, a fire-and-forget HTTP
- * POST behind {@code qits.pd.intake-url}. It is resolved via {@code Instance} and absent is a
- * supported configuration — a deployment without a deployer runs CI exactly as before.
+ * POST behind {@code qits.platform.deployments.intake-url}. It is resolved via {@code Instance} and
+ * absent is a supported configuration — a deployment without a deployer runs CI exactly as before.
  *
  * <p><b>An implementation must never block the caller.</b> It runs on a run
  * worker, between one run and the next; anything slower than queueing an async send delays every

@@ -51,7 +51,7 @@ public class PdBuildNotifier implements PdNotifier {
   private final HttpClient client =
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
 
-  @ConfigProperty(name = "qits.pd.intake-url")
+  @ConfigProperty(name = "qits.platform.deployments.intake-url")
   String intakeUrl;
 
   @Inject ObjectMapper objectMapper;
