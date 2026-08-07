@@ -50,6 +50,7 @@ public class CiDaemonLauncherTest {
     launcher.artifactsNpmHostedUrl = "http://qits-artifacts:8080/artifacts/npm/npm/";
     launcher.artifactsNpmProxyUrl = "http://qits-artifacts:8080/artifacts/npm/npmjs/";
     launcher.artifactsMavenRegistryUrl = "http://qits-artifacts:8080/artifacts/maven/maven";
+    launcher.artifactsDocsUrl = "http://qits-artifacts:8080/artifacts/docs/docs";
     launcher.workspacesUrl = "http://qits-workspaces:8080";
     return launcher;
   }
@@ -139,6 +140,8 @@ public class CiDaemonLauncherTest {
             "--env",
             "QITS_MAVEN_REGISTRY_URL=http://qits-artifacts:8080/artifacts/maven/maven",
             "--env",
+            "QITS_DOCS_URL=http://qits-artifacts:8080/artifacts/docs/docs",
+            "--env",
             "QITS_WORKSPACES_URL=http://qits-workspaces:8080",
             "--entrypoint",
             "/bin/sh",
@@ -219,6 +222,18 @@ public class CiDaemonLauncherTest {
       assertTrue(
           argv.contains(
               "QITS_MAVEN_REGISTRY_URL=http://qits-artifacts:8080/artifacts/maven/maven"),
+          argv.toString());
+    }
+  }
+
+  @Test
+  public void everyStepIsToldWhereItsDocumentationGoes() {
+    // Including the `docs` namespace segment: there is one docs repository and a pipeline that got
+    // to name one could publish into a namespace nothing serves.
+    for (LaunchSpec each : List.of(spec, publishing())) {
+      List<String> argv = launcher().buildArgv(each);
+      assertTrue(
+          argv.contains("QITS_DOCS_URL=http://qits-artifacts:8080/artifacts/docs/docs"),
           argv.toString());
     }
   }

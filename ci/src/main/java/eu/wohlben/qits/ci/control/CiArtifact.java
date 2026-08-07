@@ -43,12 +43,20 @@ public record CiArtifact(Type type, String name) {
    * exactly as it publishes no npm package — the PUT to qits-artifacts is a step in the daemon
    * repository's own release pipeline, and the declaration here is what turns that pipeline's green
    * run into an announcement.
+   *
+   * <p>{@code docs} names a published documentation site, for example {@code @qits/ui-components} —
+   * a built static bundle qits-artifacts holds per version and qits-platform-docs serves. The name
+   * is the <b>site</b> name, which for a library is conventionally its package name, so one release
+   * declaring both {@code npm} and {@code docs} repeats it; that repetition is the point, since the
+   * two entries announce two different things arriving at two different addresses. Its publish is a
+   * step in the documented repository's own release pipeline like every other type here.
    */
   public enum Type {
     NPM("npm"),
     MAVEN("maven"),
     DOCKER("docker"),
-    DAEMON("daemon");
+    DAEMON("daemon"),
+    DOCS("docs");
 
     private final String declared;
 

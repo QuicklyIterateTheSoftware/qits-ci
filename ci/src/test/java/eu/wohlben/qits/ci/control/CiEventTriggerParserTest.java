@@ -437,7 +437,7 @@ public class CiEventTriggerParserTest {
     assertTrue(e.getMessage().contains("rubygems"), e.getMessage());
     // The vocabulary is derived from the enum, so an added type cannot leave the error message
     // refusing a keyword it does not admit to knowing.
-    assertTrue(e.getMessage().contains("npm, maven, docker and daemon"), e.getMessage());
+    assertTrue(e.getMessage().contains("npm, maven, docker, daemon and docs"), e.getMessage());
     // A missing type is the same failure: there is no default registry to fall back to.
     assertThrows(
         CiConfigException.class,

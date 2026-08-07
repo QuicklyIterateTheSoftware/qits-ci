@@ -188,6 +188,18 @@ public class CiDaemonLauncher {
   String artifactsMavenRegistryUrl;
 
   /**
+   * qits-artifacts' docs repository root, including the {@code docs} namespace segment. Dialled by
+   * the step container over qits-net like the npm and maven roots, and injected so a release
+   * pipeline publishing its documentation names no deployment address.
+   *
+   * <p>The namespace is part of the value rather than the step's to choose: there is one docs
+   * repository, seeded on first boot, and a pipeline that got to name one could publish into a
+   * namespace nothing serves.
+   */
+  @ConfigProperty(name = "qits.artifacts.docs.url")
+  String artifactsDocsUrl;
+
+  /**
    * qits-workspaces' root, injected into every step container so the release train's maintenance
    * step names no deployment fact of its own. Scheme, host and port only — the path is the caller's,
    * and a step spells {@code /workspaces/api/branches/release} itself.
@@ -442,7 +454,8 @@ public class CiDaemonLauncher {
    * while the registry speaks plain HTTP.
    *
    * <p><b>The package registry roots go into every container too, and their caveat is the exact
-   * inverse.</b> {@code QITS_MAVEN_REGISTRY_URL} follows the same rule as the npm pair below.
+   * inverse.</b> {@code QITS_MAVEN_REGISTRY_URL} and {@code QITS_DOCS_URL} follow the same rule as
+   * the npm pair below.
    * {@code QITS_NPM_REGISTRY_URL} and {@code QITS_NPM_PROXY_URL} are dialled by the <b>step
    * container itself</b> — an npm CLI speaking plain HTTP to a service alias on the shared network,
    * needing no socket, no privilege and no {@code docker: true}. So the value that is right here is
@@ -511,6 +524,7 @@ public class CiDaemonLauncher {
     env(argv, "QITS_NPM_REGISTRY_URL", artifactsNpmHostedUrl);
     env(argv, "QITS_NPM_PROXY_URL", artifactsNpmProxyUrl);
     env(argv, "QITS_MAVEN_REGISTRY_URL", artifactsMavenRegistryUrl);
+    env(argv, "QITS_DOCS_URL", artifactsDocsUrl);
     // And where a step asks for its own repository to be released — same network, same reading of
     // "reachable from where" as the npm pair.
     env(argv, "QITS_WORKSPACES_URL", workspacesUrl);
