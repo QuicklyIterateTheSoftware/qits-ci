@@ -10,7 +10,7 @@
 # SoftwareRelease, and this file neither listens for it nor publishes it.
 #
 # THE VERSION TAG IS A NEW COORDINATE BESIDE THE SHA, NOT A REPLACEMENT FOR IT.
-# ci-post-receive.yml's `:$QITS_CI_SHA` push is the whole contract with qits-cd and is untouched;
+# ci-post-receive.yml's `:$QITS_CI_SHA` push is the whole contract with qits-deployments and is untouched;
 # every deployment still comes from a sha. What this adds is a name a human and a downstream
 # consumer can say out loud, on the same image content.
 #
@@ -19,8 +19,8 @@
 # packageName}` on the strength of these two lines. Keep them true.
 #
 # THE NAME IS UNQUALIFIED ON PURPOSE. No registry-qualified docker reference is portable here — the
-# registry is `qits-artifacts:8080` inside a step container and `localhost:8081` to qits-ci and
-# qits-cd — and an OCI reference cannot carry a path prefix. So the declaration carries
+# registry is `qits-platform-artifacts:8080` inside a step container and `localhost:8081` to qits-ci and
+# qits-deployments — and an OCI reference cannot carry a path prefix. So the declaration carries
 # `qits/<application>` and the reader supplies its own host, exactly as the push below composes one
 # from environment.
 #
@@ -102,7 +102,7 @@ steps:
       # --- half two: the image ------------------------------------------------------------------
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-ci:$QITS_CI_SHA"
       docker build --network qits-net \
-        --build-arg QITS_MAVEN_REPOSITORY_URL=http://qits-artifacts:8080/artifacts/maven/maven \
+        --build-arg QITS_MAVEN_REPOSITORY_URL=http://qits-platform-artifacts:8080/artifacts/maven/maven \
         -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
       docker rmi "$ref" || true
