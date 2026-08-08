@@ -30,6 +30,12 @@ import org.junit.jupiter.api.Test;
 @TestProfile(MachineGuardTest.GateOn.class)
 class MachineGuardTest {
 
+  /** The audience this service's machine guard expects — its config default, injected in prod. */
+  private static final String OWN_AUDIENCE = "qits-ci";
+
+  /** A valid platform audience that is not ours; the guard must refuse it. */
+  private static final String FOREIGN_AUDIENCE = "prod-qits-deployments";
+
   /**
    * The gate on, and the {@code %test} dev user off.
    *
@@ -66,7 +72,7 @@ class MachineGuardTest {
   @TestSecurity(user = QitsClaims.ARTIFACTS)
   @OidcSecurity(
       claims = {
-        @Claim(key = "aud", value = QitsClaims.CI),
+        @Claim(key = "aud", value = OWN_AUDIENCE),
         @Claim(key = QitsClaims.PROJECT, value = "guarded-repo")
       })
   void aTokenNamingThisRepositoryIsAccepted() {
@@ -83,7 +89,7 @@ class MachineGuardTest {
   @TestSecurity(user = QitsClaims.ARTIFACTS)
   @OidcSecurity(
       claims = {
-        @Claim(key = "aud", value = QitsClaims.CI),
+        @Claim(key = "aud", value = OWN_AUDIENCE),
         @Claim(key = QitsClaims.PROJECT, value = "*")
       })
   void aWildcardTokenIsAcceptedForAnyRepository() {
@@ -102,7 +108,7 @@ class MachineGuardTest {
   @TestSecurity(user = QitsClaims.ARTIFACTS)
   @OidcSecurity(
       claims = {
-        @Claim(key = "aud", value = QitsClaims.CI),
+        @Claim(key = "aud", value = OWN_AUDIENCE),
         @Claim(key = QitsClaims.PROJECT, value = "some-other-repo")
       })
   void aTokenNamingAnotherRepositoryIs403() {
@@ -118,7 +124,7 @@ class MachineGuardTest {
 
   @Test
   @TestSecurity(user = QitsClaims.ARTIFACTS)
-  @OidcSecurity(claims = {@Claim(key = "aud", value = QitsClaims.CI)})
+  @OidcSecurity(claims = {@Claim(key = "aud", value = OWN_AUDIENCE)})
   void aTokenGrantedNoProjectClaimIs403() {
     // An absent claim is a mismatch, never a wildcard.
     given()
@@ -134,7 +140,7 @@ class MachineGuardTest {
   @TestSecurity(user = QitsClaims.ARTIFACTS)
   @OidcSecurity(
       claims = {
-        @Claim(key = "aud", value = QitsClaims.CD),
+        @Claim(key = "aud", value = FOREIGN_AUDIENCE),
         @Claim(key = QitsClaims.PROJECT, value = "guarded-repo")
       })
   void aTokenMintedForAnotherServiceIs403() {
@@ -190,7 +196,7 @@ class MachineGuardTest {
   @TestSecurity(user = QitsClaims.ARTIFACTS)
   @OidcSecurity(
       claims = {
-        @Claim(key = "aud", value = QitsClaims.CI),
+        @Claim(key = "aud", value = OWN_AUDIENCE),
         @Claim(key = QitsClaims.PROJECT, value = "*")
       })
   void theManualTriggerNeedsATokenGrantedEveryProject() {
@@ -207,7 +213,7 @@ class MachineGuardTest {
   @TestSecurity(user = QitsClaims.ARTIFACTS)
   @OidcSecurity(
       claims = {
-        @Claim(key = "aud", value = QitsClaims.CI),
+        @Claim(key = "aud", value = OWN_AUDIENCE),
         @Claim(key = QitsClaims.PROJECT, value = "guarded-repo")
       })
   void aTokenScopedToOneRepositoryMayNotTriggerAcrossAllOfThemIs403() {
@@ -226,7 +232,7 @@ class MachineGuardTest {
   @TestSecurity(user = QitsClaims.ARTIFACTS)
   @OidcSecurity(
       claims = {
-        @Claim(key = "aud", value = QitsClaims.CI),
+        @Claim(key = "aud", value = OWN_AUDIENCE),
         @Claim(key = QitsClaims.PROJECT, value = "*")
       })
   void readsAreNotGuarded() {
