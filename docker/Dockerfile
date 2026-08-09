@@ -18,34 +18,37 @@
 # builder stage packages a bundle that was already built.
 #
 # --- this image does NOT run with an empty environment, and that is not a packaging bug ------------
-# `docker run --rm qits/ci:latest` dies before the HTTP listener with
+# `docker run --rm qits/ci:latest` dies before the HTTP listener, on an unresolvable config
+# expression naming QITS_RESOURCE_DB_URL. That is the refuse-to-boot stance, and it is deliberate:
+# both stores this process opens — its own `ci` database and the qits-eventstream outbox — read a
+# QITS_RESOURCE_<NAME>_URL / _USERNAME / _PASSWORD triple with NO default behind it, so a container
+# that has not been given a database has nothing to be usefully started as.
 #
-#   FlywaySqlUnableToConnectToDbException: ... A file path that is implicitly relative to the current
-#   working directory is not allowed in the database URL "jdbc:h2:file:?/.qits/data/ci/h2/ci"
+# THIS IMAGE HAS NO STATE ON DISK AT ALL ANY MORE, and both of the things that used to make it need
+# some are gone. It kept a bare git mirror per repository under `qits.ci.data-dir` until it started
+# reading pipeline config off the git host's content routes; and it kept a file H2 under
+# `${user.home}` until the platform grew resource provisioning. That H2 is what made an empty
+# environment fail on a path rather than on a name — UID 1001 has no /etc/passwd entry in
+# ubi-minimal, a native image resolves user.home through getpwuid(2) rather than $HOME, so
+# `${user.home}` came out `?` and no exported HOME could fix it. Nothing resolves user.home now, and
+# there is no /data mount to arrange.
 #
-# That `?` is `${user.home}`. UID 1001 has no /etc/passwd entry in ubi-minimal, and a native image
-# resolves user.home through getpwuid(2) rather than $HOME — so exporting HOME does not fix it, and
-# the `${user.home}`-rooted default the `ci` jar ships (the H2 file) has nowhere to land.
+# What a deployment supplies instead is two triples, and it does not type them by hand: this
+# repository declares
 #
-# An /etc/passwd line for 1001 would make it boot with no environment at all. IT IS DELIBERATELY NOT
-# HERE, and re-adding it is not a fix. The H2-on-local-disk arrangement is a PROTOTYPE — one file
-# database, single writer, sitting next to the process — and not a committed data architecture. An
-# image that comes up healthy on an empty environment resolves both of those paths into the
-# container's own writable layer: it presents the prototype as decided, and it silently discards
-# every recorded run on the next redeploy. Booting unconfigured is not a
-# supported mode of this image. A container that refuses to start is the failure you see; one that
-# starts on ephemeral storage is the failure that hides.
+#   resources: postgresql:db, postgresql:eventstream:qits_ci_eventstream
 #
-# So a deployment mounts a volume at /data (which this image owns, see the runtime stage) and names
-# the database. This is what the boot needs:
+# in .config/qits/deployments.yml, and qits-platform-deployments creates the roles and the databases
+# on the tier's postgres before this container starts and injects the six variables into it. A
+# `docker run` by hand supplies them itself:
 #
-#   docker run -v qits-ci-data:/data \
-#     -e QUARKUS_DATASOURCE_CI_JDBC_URL=jdbc:h2:file:/data/ci/h2/ci \
+#   docker run \
+#     -e QITS_RESOURCE_DB_URL=jdbc:postgresql://<host>:5432/qits_ci \
+#     -e QITS_RESOURCE_DB_USERNAME=qits_ci -e QITS_RESOURCE_DB_PASSWORD=... \
+#     -e QITS_RESOURCE_EVENTSTREAM_URL=jdbc:postgresql://<host>:5432/qits_ci_eventstream \
+#     -e QITS_RESOURCE_EVENTSTREAM_USERNAME=qits_ci_eventstream \
+#     -e QITS_RESOURCE_EVENTSTREAM_PASSWORD=... \
 #     ...
-#
-# That is the whole of what this image needs on disk. ci used to keep a bare git mirror per
-# repository beside it under `qits.ci.data-dir`; it reads pipeline config off the git host's content
-# routes now, mirrors nothing, and that key is gone.
 #
 # These have defaults that are wrong QUIETLY — nothing will tell you they are unset:
 #
@@ -228,14 +231,11 @@ RUN printf '[docker-ce-stable]\nname=Docker CE Stable\nbaseurl=https://download.
 COPY --from=build --chown=1001:root /src/service/target/qits-ci /work/qits-ci
 RUN chmod +x /work/qits-ci
 
-# The mount point for the H2 url, created here so it is OWNED. Docker seeds a
-# fresh named volume from whatever the image has at the mount path, ownership included; with no such
-# directory it makes one root-owned 0755, and the boot then dies on an AccessDeniedException rather
-# than on the config error the header documents — which reads like a bug in this image and is not
-# one. Group-writable and group-root because a ubi image is meant to survive being assigned an
-# arbitrary UID with GID 0. (A bind mount still takes its ownership from the host — nothing in an
-# image can fix that.)
-RUN mkdir -p /data/ci && chown -R 1001:root /data && chmod -R 775 /data
+# NO /data, AND NOTHING TO OWN. This image used to create and chown a mount point for the H2 file,
+# so that a fresh named volume was seeded with the right ownership rather than landing root-owned and
+# failing the boot on an AccessDeniedException. The store is a postgres database now — see the
+# header — so there is no volume to mount, no directory to own, and this image writes nothing outside
+# its own process.
 
 EXPOSE 8080
 USER 1001

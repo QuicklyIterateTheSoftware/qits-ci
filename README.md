@@ -40,15 +40,15 @@ path, and it is worth recognising by name when a build that normally takes two m
 downloading a container image. Note the coincidence: this service *runs* docker, per step, by
 design (below) — the **build** must not touch it.
 
-Most of the 0.2s is opening the H2 file and running Flyway; the framework itself is up in
+Most of the 0.2s is connecting to postgres and running Flyway; the framework itself is up in
 milliseconds. That is the point of packaging it this way — a restart is a non-event rather than a
 window in which pushes arrive and record nothing.
 
 It was extracted as a library, on the assumption that a consuming Quarkus application would pull it
 in and gain the routes. That application was never written and under the gateway topology never will
-be. `ci` owns its **own datasource, persistence unit and Flyway lineage** (`db/ci/migration` plus the
-one Java migration in `eu.wohlben.qits.ci.migration`, on a separate H2 under `~/.qits/data/ci`),
-which is what makes this a standalone deployable rather than a checkout of the monorepo. The directory names are `ci/` and `service/` because the extracted git history is
+be. `ci` owns its **own datasource, persistence unit and Flyway lineage** (`db/ci/migration`, one V1, on
+its own postgres database), which is what makes this a standalone deployable rather than a checkout
+of the monorepo. The directory names are `ci/` and `service/` because the extracted git history is
 anchored to them; the maven coordinates are `eu.wohlben.qits:qits-ci-domain` and `…-service`.
 
 ## Addressing
@@ -833,9 +833,19 @@ a repository's own listing will show.
 - Leave `qits.ci.workspaces-url` alone for the same reason: it is qits-workspaces' root as reached
   **from a step container**, and the shipped `http://qits-workspaces:8080` is already right on
   qits-net. Scheme, host and port, **no path** — a step appends `/workspaces/api/…` itself.
-- Give the process a persistent `~/.qits/data/ci` (or override `quarkus.datasource.ci.jdbc.url`).
-  The H2 there is a plain **single-writer file** — no `AUTO_SERVER`, so nothing
-  else may open it while ci runs, and nothing listens on a database port.
+- **Give the process its two databases, and the deployment spec is how.**
+  `.config/qits/deployments.yml` declares
+
+      resources: postgresql:db, postgresql:eventstream:qits_ci_eventstream
+
+  and qits-platform-deployments creates a role and a database per entry on the tier's postgres
+  before the container starts, then injects `QITS_RESOURCE_DB_URL` / `_USERNAME` / `_PASSWORD` and
+  `QITS_RESOURCE_EVENTSTREAM_URL` / `_USERNAME` / `_PASSWORD`. The two jars read those variables in
+  their own shipped defaults — the `ci` jar the first triple, the qits-eventstream jar the second —
+  so a deployment sets no datasource key of its own. **The resource names are load-bearing**: the
+  variable names follow them, and renaming either in that file silently stops matching the jar that
+  reads it. There is no default behind any of the six, so an unset one leaves the expression
+  unresolvable and the process refuses to boot at Flyway rather than opening a store nobody meant.
 - Point `QITS_EVENTS_URL` (`qits.events.url`) at qits-events — scheme, host and port, **no path**:
   the client appends `/events/api/events/{id}` and `/events/stream` itself, and a path here yields a
   doubled one and a 404 nothing retries out of. The shipped default is the qits-net alias
@@ -843,18 +853,12 @@ a repository's own listing will show.
   host-run process. `qits.eventstream.enabled=false` turns the whole thing off, which is what a
   deployment with no qits-events wants — the keys and their defaults are the qits-eventstream
   jar's, not this module's.
-- **Set `QUARKUS_DATASOURCE_EVENTSTREAM_JDBC_URL` — this one is not optional in a container**, and
-  it is the exact counterpart of the `QUARKUS_DATASOURCE_CI_JDBC_URL` a deployment already sets:
-  `jdbc:h2:file:/data/eventstream/h2/eventstream`, on the same data volume. The shipped default
-  is `${user.home}/.qits/…`, and in a container with no `HOME` the native binary resolves
-  `user.home` to `?`, which H2 refuses outright — *"A file path that is implicitly relative to the
-  current working directory is not allowed"* — so the process **fails to boot**, at Flyway, before
-  anything serves. Measured, on the first rollout of this change: loud rather than silent, and cd
-  keeps the previous container while the new one restarts, but a deployment that adds the event bus
-  without adding this variable does not come up. The outbox itself is a second single-writer
-  H2 beside ci's own with its own Flyway lineage, holding exactly the events a publish could not
-  deliver — empty in a healthy process, so losing the *file* is survivable in a way that omitting the
-  *variable* is not.
+- The outbox is the second of those two databases, with its own Flyway lineage, holding exactly the
+  events a publish could not deliver — empty in a healthy process. It used to be a single-writer H2
+  under `${user.home}`, and that default cost a rollout: in a container with no `HOME` the native
+  binary resolves `user.home` to `?`, H2 refuses a path implicitly relative to the working
+  directory, and the process failed to boot at Flyway before anything served. What replaced it
+  cannot fail that way, because there is nothing left to default to.
 
 ## What is deliberately *not* here
 

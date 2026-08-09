@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.ci.daemonhost.FakeCiDaemon;
 import eu.wohlben.qits.ci.githost.StubGitHost;
+import eu.wohlben.qits.ci.testdb.EmbeddedPg;
 import io.quarkus.test.junit.QuarkusIntegrationTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -16,8 +17,11 @@ import io.restassured.http.ContentType;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.time.Duration;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -38,9 +42,13 @@ import org.junit.jupiter.api.Test;
  *   <li>the routes are where the config says — {@code quarkus.rest.path} and {@code
  *       quarkus.http.non-application-root-path} are <b>build-time</b> settings baked into the image,
  *       so a segment regression here can only be caught from the artifact;
- *   <li>the shipped datasource default connects — it is a file H2 opened by the process itself, and
- *       an {@code AUTO_SERVER=TRUE} on that URL is what first broke this binary (H2 starts its own
- *       TCP server, whose classes the image does not contain), invisibly to every other test here;
+ *   <li>the shipped datasource <b>expressions</b> resolve and connect. Both of them: this
+ *       deployable's own {@code ci} store and the qits-eventstream jar's outbox, each reading a
+ *       {@code QITS_RESOURCE_*} triple with no default behind it. The variables are what this IT
+ *       supplies, never the datasource keys, so what is under test is the shipped file — which is
+ *       where this repo's oldest native break lived (an {@code AUTO_SERVER=TRUE} that wanted H2's
+ *       TCP server, a class the image does not contain) and where its container break lived too (a
+ *       {@code ${user.home}} UID 1001 has no passwd entry for);
  *   <li>{@code db/ci/migration/V1__init.sql} survived as a resource and Flyway applied it — a
  *       migration is loaded by scanning a classpath location, exactly the shape native-image drops;
  *   <li>a real run reaches SnakeYAML and Panache: the intake queues, ci fetches the pushed commit
@@ -83,42 +91,58 @@ public class CiPackagedSurfaceIT {
   private static final String BASE_HREF = "<base href=\"/ci/\">";
 
   /**
-   * Relocates the launched artifact's state under {@code target/} by moving {@code user.home}, not
-   * by restating the settings. That is deliberate: ci's datasource URL and data-dir defaults are
-   * {@code ${user.home}}-rooted in the ci jar's {@code META-INF/microprofile-config.properties}, so
-   * overriding {@code user.home} leaves the <b>shipped</b> values themselves under test — including
-   * the JDBC URL, which is where the native break lived (an {@code AUTO_SERVER=TRUE} that wants
-   * H2's TCP server, a class the image does not contain). Spelling a URL out here instead would
-   * have made this IT pass against a default no deployment can boot.
+   * Hands the launched artifact its two databases the way a deployment does — as the generic
+   * resource triples, not as the datasource keys. The ci jar ships {@code
+   * jdbc.url=${QITS_RESOURCE_DB_URL}} and the qits-eventstream jar ships {@code
+   * ${QITS_RESOURCE_EVENTSTREAM_URL}}, each with two siblings and no default behind any of them, so
+   * supplying the VARIABLES leaves the <b>shipped</b> expressions themselves under test. Spelling
+   * datasource urls out here instead would make this IT pass against defaults no deployment can
+   * boot, which is exactly the failure this IT was written for.
    *
-   * <p>Only the git host is genuinely restated: its default points at a live qits-artifacts, and
-   * this repo builds without one. The overrides ride to the process as {@code -D} arguments, so
-   * every one of them has to be runtime config.
+   * <p>The databases are an embedded postgres this JVM starts. <b>Their urls travel through system
+   * properties rather than static fields</b>: a test profile is instantiated in more than one
+   * classloader, so a field written by one copy is not the field the other reads, while the process
+   * has exactly one property table.
+   *
+   * <p><b>The git host is NOT one of these, and it used to be.</b> This profile started a stub of
+   * its own under {@code target/ci-packaged-it-git-host} and named it here — while {@link
+   * StubGitHost} is also declared {@code @WithTestResource(scope = GLOBAL)} by the {@code
+   * @QuarkusTest} classes, which makes it start for the whole test run, this one included, and a
+   * test resource's properties OUTRANK a profile's overrides. So the launched process was always
+   * pointed at the shared root while this class seeded a private one, every read 404'd, and the run
+   * was discarded as a commit the repository no longer holds. Two servers where one silently loses
+   * is worse than one: the stub is left to the resource that already runs it, and this class seeds
+   * into {@link StubGitHost#ROOT}, which is the root that resource serves.
    */
   public static class PackagedUnderTarget implements QuarkusTestProfile {
-    static final Path HOME = Path.of("target", "ci-packaged-it-home").toAbsolutePath();
-    static final Path GIT_HOST = Path.of("target", "ci-packaged-it-git-host").toAbsolutePath();
 
-    /**
-     * The stub git host this JVM serves to the launched process. It has to be started here, before
-     * the artifact boots, because its port is what the override names — and it is a real HTTP server
-     * because content reads are HTTP: the launched process reads the pushed commit's config back out
-     * of it exactly as it would out of qits-artifacts.
-     */
-    static StubGitHost.Server gitHost;
+    /** Where each url is parked for whichever copy of this class is asked second. */
+    private static final String CI_URL_PROPERTY = "qits.test.packaged-it.ci-url";
+
+    private static final String EVENTSTREAM_URL_PROPERTY =
+        "qits.test.packaged-it.eventstream-url";
 
     @Override
     public Map<String, String> getConfigOverrides() {
-      deleteRecursively(HOME);
-      deleteRecursively(GIT_HOST);
-      try {
-        gitHost = StubGitHost.start(GIT_HOST);
-      } catch (Exception e) {
-        throw new IllegalStateException("could not start the stub git host", e);
-      }
       return Map.of(
-          "user.home", HOME.toString(),
-          "qits.ci.git-host-url", gitHost.gitHostUrl());
+          "QITS_RESOURCE_DB_URL", databaseUrl(CI_URL_PROPERTY, "ci_packaged_it"),
+          "QITS_RESOURCE_DB_USERNAME", EmbeddedPg.USER,
+          "QITS_RESOURCE_DB_PASSWORD", EmbeddedPg.PASSWORD,
+          "QITS_RESOURCE_EVENTSTREAM_URL",
+              databaseUrl(EVENTSTREAM_URL_PROPERTY, "eventstream_packaged_it"),
+          "QITS_RESOURCE_EVENTSTREAM_USERNAME", EmbeddedPg.USER,
+          "QITS_RESOURCE_EVENTSTREAM_PASSWORD", EmbeddedPg.PASSWORD);
+    }
+
+    private static synchronized String databaseUrl(String property, String database) {
+      String recorded = System.getProperty(property);
+      if (recorded != null) {
+        return recorded;
+      }
+      // localhost resolves for the launched process too — it is a child of this JVM on this host.
+      String url = EmbeddedPg.url(database);
+      System.setProperty(property, url);
+      return url;
     }
   }
 
@@ -255,18 +279,41 @@ public class CiPackagedSurfaceIT {
     assertEquals("SUCCESS", run.get("status"));
     assertEquals(sha, run.get("commitSha"));
 
-    // The run above would look identical against an in-memory database, so pin that the process
-    // really opened the ${user.home}-rooted file H2 the ci jar ships — that URL is the one this IT
-    // is here to keep bootable.
-    assertTrue(
-        Files.isDirectory(PackagedUnderTarget.HOME.resolve(".qits/data/ci/h2")),
-        "the shipped file-H2 default must be what the packaged process opened");
+    // The run above proves the ci store. Read the row back out of the database this JVM handed the
+    // process to pin WHICH store that was: the launched artifact resolved the shipped
+    // ${QITS_RESOURCE_DB_URL} expression rather than falling back to anything, which is the whole
+    // claim of the triple having no default.
+    try (Connection ci =
+            DriverManager.getConnection(
+                EmbeddedPg.url("ci_packaged_it"), EmbeddedPg.USER, EmbeddedPg.PASSWORD);
+        PreparedStatement rows =
+            ci.prepareStatement("select count(*) from ci_run where commit_sha = ?")) {
+      rows.setString(1, sha);
+      try (ResultSet found = rows.executeQuery()) {
+        assertTrue(found.next() && found.getInt(1) == 1, "the run must be in the injected database");
+      }
+    }
+  }
+
+  @Test
+  public void theOutboxLineageIsInTheArtifactToo() throws Exception {
+    // The second datasource, and the second Flyway lineage — the qits-eventstream jar's, migrated at
+    // boot whether or not the bus is enabled. A packaged process that dropped it would fail at
+    // startup rather than here, but the table is what says the migration resource survived.
+    try (Connection outbox =
+            DriverManager.getConnection(
+                EmbeddedPg.url("eventstream_packaged_it"), EmbeddedPg.USER, EmbeddedPg.PASSWORD);
+        PreparedStatement rows = outbox.prepareStatement("select count(*) from outbox_event")) {
+      try (ResultSet found = rows.executeQuery()) {
+        assertTrue(found.next(), "outbox_event must exist in the injected eventstream database");
+      }
+    }
   }
 
   // --- the git host is StubGitHost over <base>/git/<repoId>, as in CiPipelineBoundaryTest ---
 
   private Path gitHostRoot() {
-    return PackagedUnderTarget.GIT_HOST.resolve("git");
+    return StubGitHost.ROOT.resolve("git");
   }
 
   private String seedOrigin() throws Exception {
@@ -336,16 +383,5 @@ public class CiPackagedSurfaceIT {
       throw new RuntimeException("git " + String.join(" ", args) + " failed:\n" + out);
     }
     return out;
-  }
-
-  private static void deleteRecursively(Path root) {
-    if (!Files.exists(root)) {
-      return;
-    }
-    try (var walk = Files.walk(root)) {
-      walk.sorted(Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
-    } catch (Exception e) {
-      throw new IllegalStateException("could not clear " + root, e);
-    }
   }
 }

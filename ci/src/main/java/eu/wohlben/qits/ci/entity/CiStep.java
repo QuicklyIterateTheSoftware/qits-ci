@@ -6,7 +6,6 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
-import jakarta.persistence.Lob;
 import jakarta.persistence.Table;
 import java.time.Instant;
 
@@ -60,5 +59,14 @@ public class CiStep extends PanacheEntityBase {
   @Column(name = "finished_at")
   public Instant finishedAt;
 
-  @Lob public String output;
+  /**
+   * The step's combined output, bounded and tail-truncated while it arrives.
+   *
+   * <p>{@code columnDefinition = "text"} rather than {@code @Lob}, and that is the one mapping the
+   * move to postgres had to change. On H2 a {@code @Lob String} was a clob and the two agreed; on
+   * postgres {@code @Lob} means a LARGE OBJECT — Hibernate binds an oid and the insert fails against
+   * the {@code text} column the migration creates. Unbounded either way.
+   */
+  @Column(columnDefinition = "text")
+  public String output;
 }

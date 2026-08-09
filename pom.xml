@@ -57,6 +57,21 @@
         <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
         <quarkus.platform.version>3.34.6</quarkus.platform.version>
 
+        <!-- Embedded PostgreSQL for the suites. Both stores this repo boots are postgres now — its
+             own `ci` datasource and the qits-eventstream jar's `eventstream` outbox — so every test
+             that starts a persistence unit runs against one, and the first rule here is still that
+             a CLONE TESTS GREEN WITH NO DOCKER. That rules out Testcontainers and Quarkus dev
+             services alike. Zonky resolves real postgres binaries as ordinary Maven artifacts and
+             spawns them as a child process: a dependency, not a container.
+
+             Two coordinates, on purpose. The BOM pins which POSTGRES the binaries are (18.4.0 — the
+             tag the platform's own qits-oci-postgresql image is built from), the library version is
+             the harness around them, and they move independently. Every architecture the suites may
+             run on is named explicitly in the modules: the binaries are per-arch artifacts, and a
+             missing one fails in the middle of a suite rather than during resolution. -->
+        <zonky.embedded-postgres.version>2.2.2</zonky.embedded-postgres.version>
+        <zonky.postgres-binaries.version>18.4.0</zonky.postgres-binaries.version>
+
         <compiler-plugin.version>3.15.0</compiler-plugin.version>
         <surefire-plugin.version>3.5.4</surefire-plugin.version>
         <failsafe-plugin.version>3.5.4</failsafe-plugin.version>
@@ -97,6 +112,23 @@
                 <version>${quarkus.platform.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+            <dependency>
+                <!-- Which postgres the embedded binaries ARE — 18.4.0, the tag the platform's own
+                     qits-oci-postgresql image is built from, so the suites prove the lineage
+                     against the engine it ships on. Imported as a BOM because the per-arch
+                     artifacts the modules name are separate coordinates. -->
+                <groupId>io.zonky.test.postgres</groupId>
+                <artifactId>embedded-postgres-binaries-bom</artifactId>
+                <version>${zonky.postgres-binaries.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.zonky.test</groupId>
+                <artifactId>embedded-postgres</artifactId>
+                <version>${zonky.embedded-postgres.version}</version>
+                <scope>test</scope>
             </dependency>
             <dependency>
                 <groupId>org.projectlombok</groupId>

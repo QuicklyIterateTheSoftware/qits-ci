@@ -10,3 +10,17 @@
 # ENVIRONMENT service: every environment runs its own instance, and a green build deploys into
 # whichever tier listens to the built branch.
 deployment_target: environment
+
+# TWO DATABASES, because this deployable joins two jars that each own a store, and each one maps the
+# generic contract in its own shipped defaults. qits-platform-deployments creates a role and a
+# database per entry on the tier's postgres before the successor container starts, and injects
+# QITS_RESOURCE_<NAME>_URL / _USERNAME / _PASSWORD. The NAMES are what the variable names follow, so
+# they are not free: `db` is what the ci jar's microprofile-config.properties reads, `eventstream` is
+# what the qits-eventstream jar's does, and renaming either here silently stops matching.
+#
+# `db` takes the derived default database — `qits_` + the application name minus its `qits-` prefix,
+# so qits_ci — and says so by omitting the third segment. `eventstream` cannot: the default would be
+# qits_ci too, and one database cannot be two stores with two Flyway lineages, so it is named. The
+# name carries this repository, because every consumer of that jar declares a resource called
+# `eventstream` and they must not collide on one postgres.
+resources: postgresql:db, postgresql:eventstream:qits_ci_eventstream

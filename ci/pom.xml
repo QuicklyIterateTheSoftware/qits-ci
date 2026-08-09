@@ -16,10 +16,13 @@
          over the surfaces it declares: the git host's smart-HTTP URL and its own docker CLI
          shell-out.
 
-         It owns its OWN named datasource + persistence unit + Flyway lineage — a separate
-         file-based H2 under ~/.qits/data/ci (see src/main/resources/META-INF/microprofile-config.properties).
-         That lineage is carried over from the monorepo UNCHANGED (`db/ci/migration/V1__init.sql`);
-         it was never part of the monorepo's shared V1-V45 lineage, so there was nothing to squash.
+         It owns its OWN named datasource + persistence unit + Flyway lineage — its own postgres
+         database on the platform's postgres, provisioned by the deployment spec's `resources:` line
+         and injected as QITS_RESOURCE_DB_* (see
+         src/main/resources/META-INF/microprofile-config.properties). It was a file-based H2 under
+         ~/.qits/data/ci until that mechanism landed, and the H2 lineage went with the file: there is
+         ONE V1 again (`db/ci/migration/V1__init.sql`), the nine H2 migrations translated to where
+         they arrived. See that file's header for why a clean start was allowed.
 
          The directory stays `ci/` (the extracted git history is anchored to it) while the
          artifactId is `qits-ci-domain`: this module is the domain layer of the qits-ci repo, and
@@ -42,12 +45,24 @@
             <artifactId>quarkus-jackson</artifactId>
         </dependency>
         <dependency>
+            <!-- This context's store. It was a file H2 under ${user.home} until the platform grew
+                 resource provisioning; the datasource is the generic `QITS_RESOURCE_DB_*` contract
+                 now, and this repo's deployment spec declares `postgresql:db` to have it filled in.
+                 See src/main/resources/META-INF/microprofile-config.properties. -->
             <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-jdbc-h2</artifactId>
+            <artifactId>quarkus-jdbc-postgresql</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Flyway 10 split its database support out of the core: without this module Flyway
+                 refuses a postgres url with "no database found to handle". It sits in this jar
+                 because this jar owns the lineage — a consumer that did not carry it would fail at
+                 boot on a migration it does not own. -->
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>
@@ -71,6 +86,35 @@
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The store every @QuarkusTest here boots against. Zonky spawns real postgres
+                 binaries as a child process — a maven dependency rather than a container — which is
+                 what keeps the clone-alone, docker-free rule true now that this context's store is
+                 postgres. EmbeddedPg + EmbeddedPgConfigSource hand the running instance to
+                 Quarkus. -->
+            <groupId>io.zonky.test</groupId>
+            <artifactId>embedded-postgres</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- Named per architecture on purpose: the binaries are separate artifacts and zonky
+                 picks one at run time, so an unnamed arch fails in the middle of a suite rather
+                 than during resolution. These three are what this platform is built and developed
+                 on. -->
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

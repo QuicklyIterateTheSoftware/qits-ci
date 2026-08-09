@@ -103,14 +103,14 @@ public class CiRun extends PanacheEntityBase {
   public Instant triggerEventOccurredAt;
 
   /** The triggering event's canonical JSON payload, preserved verbatim across a restart. */
-  @Column(name = "trigger_event_payload", columnDefinition = "clob")
+  @Column(name = "trigger_event_payload", columnDefinition = "text")
   public String triggerEventPayload;
 
   /**
    * The exact trigger file that matched this event. Parsing this snapshot, rather than the current
    * branch head, makes a recovered run execute the pipeline it originally accepted.
    */
-  @Column(name = "trigger_config", columnDefinition = "clob")
+  @Column(name = "trigger_config", columnDefinition = "text")
   public String triggerConfig;
 
   /**

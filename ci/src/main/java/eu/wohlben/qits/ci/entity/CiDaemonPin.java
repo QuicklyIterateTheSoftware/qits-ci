@@ -54,6 +54,6 @@ public class CiDaemonPin extends PanacheEntityBase {
 
   /** The probe's own account of its verdict -- a docker logs tail for a REJECTED candidate, the
    *  reason for an UNKNOWN one. Null while unproven. */
-  @Column(columnDefinition = "clob")
+  @Column(columnDefinition = "text")
   public String detail;
 }

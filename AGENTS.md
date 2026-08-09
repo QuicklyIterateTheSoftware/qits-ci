@@ -42,17 +42,21 @@ second rule of the same kind, and three things follow:
 - **So is every config default the app boots with.** `quarkus.datasource.ci.jdbc.url` carried
   `AUTO_SERVER=TRUE` out of the monorepo; it asks H2 to start its own TCP server, whose classes are
   not in the image, and the binary died at boot on a default no JVM test ever used. It was dropped
-  rather than registered — see the note in `ci/src/main/resources/META-INF/microprofile-config.properties`.
-  `CiPackagedSurfaceIT` is the guard, and it relocates `user.home` rather than restating the
-  settings precisely so that the shipped values stay the ones under test.
+  rather than registered. That URL has since gone entirely — **the store is PostgreSQL, reached
+  through the platform's generic resource contract** (`${QITS_RESOURCE_DB_URL}` and its two
+  siblings), with no default behind it at all, so the whole class of "a default only the packaged
+  artifact ever finds out about" is closed rather than fixed. `CiPackagedSurfaceIT` remains the
+  guard, and it hands the launched artifact the ENVIRONMENT VARIABLES rather than the datasource
+  keys, precisely so that the shipped expressions stay the ones under test.
 
 ## Package and module conventions
 
 `eu.wohlben.qits.ci.*`, split across maven modules with disjoint sub-packages so there is no split
 package:
 
-- `ci/` — `entity`, `persistence`, `dto`, `mapper`, `control`, `error`, and `migration` (the one
-  Flyway migration that cannot be SQL — see "Schema changes"). Framework-free in the sense
+- `ci/` — `entity`, `persistence`, `dto`, `mapper`, `control` and `error`. There is no `migration`
+  package any more: the one Flyway migration that had to be Java went with the H2 lineage it was
+  answering — see "Schema changes". Framework-free in the sense
   that matters: no JAX-RS, no websockets. Entities are Panache; mappers are MapStruct
   `@Mapper(componentModel = "jakarta")`.
 - `service/` — `api` (the JAX-RS routes and the `ExceptionMapper`), `bus`, `githost`, `notify`, and
@@ -488,24 +492,28 @@ to get right rather than the library's:
   restated there: `qits.events.url`, the outbox datasource, the timeouts and the retry budget are
   ordinal-100 defaults in the jar, and a copy in the app's file would be a second place to change.
 - **Dark does not mean absent.** `enabled=false` stops publishing, sweeping and dialling; it does
-  not stop the datasource. Quarkus opens the connection and runs Flyway at boot regardless, so
-  `service/src/test/resources/application.properties` points that datasource at in-memory H2 for the
-  same reason it does for `ci` — measured, not assumed: without those lines the suite creates and
-  migrates a real `~/.qits/data/eventstream`, and two builds on one host race for its
-  single-writer file.
+  not stop the datasource. Quarkus opens the connection and runs Flyway at boot regardless, which is
+  why `service`'s `EmbeddedPgConfigSource` hands out SIX values rather than three: the outbox gets a
+  database of its own on the same embedded postgres or the suite does not start.
 
   **The deployment side of that same sentence cost a rollout, so it is worth stating plainly: adding
-  this module to the deployable adds a MANDATORY deployment variable.**
-  `QUARKUS_DATASOURCE_EVENTSTREAM_JDBC_URL` must point at the data volume, exactly as
-  `QUARKUS_DATASOURCE_CI_JDBC_URL` already does. The shipped default interpolates `${user.home}`,
-  which is the platform's convention and right for a host-run process — but in a container with no
-  `HOME` the native binary resolves it to `?`, and H2 rejects a path implicitly relative to the
-  working directory rather than falling back to one. The process then dies at Flyway before serving
-  anything: `Failed to start quarkus` / `FlywaySqlUnableToConnectToDbException`. This is the third
-  member of the family this file already names (the `AUTO_SERVER=TRUE` that killed the binary, the
-  IPv4 bind, this) — **a config default no JVM test exercises, failing only in the packaged artifact
-  in its real environment**. It fails loudly and safely, since cd's health gate keeps the previous
-  container, but it fails.
+  this module to the deployable adds a MANDATORY deployment resource.** It used to be a mandatory
+  VARIABLE — `QUARKUS_DATASOURCE_EVENTSTREAM_JDBC_URL`, which had to point at the data volume — and
+  the rollout it cost was the shipped `${user.home}` default behind it: right for a host-run process,
+  and in a container with no `HOME` the native binary resolved it to `?`, which H2 rejected outright.
+  The process died at Flyway before serving anything. That was **a config default no JVM test
+  exercises, failing only in the packaged artifact in its real environment**, alongside the
+  `AUTO_SERVER=TRUE` that killed the binary and the IPv4 bind.
+
+  What replaced it cannot fail that way, because there is no default left to be wrong:
+  `.config/qits/deployments.yml` declares `resources: postgresql:db,
+  postgresql:eventstream:qits_ci_eventstream`, qits-platform-deployments creates both roles and
+  databases before the container starts and injects `QITS_RESOURCE_DB_*` and
+  `QITS_RESOURCE_EVENTSTREAM_*`, and the two jars read those variables in their own shipped
+  defaults. **The resource NAMES are load-bearing** — the variable names follow them — so renaming
+  either in that file silently stops matching the jar that reads it. An unset variable leaves the
+  expression unresolvable and the process refuses to boot, loudly and safely, since the health gate
+  keeps the previous container.
 
   **The fourth member is not a config default at all, and it is the one that failed quietly.**
   `service/…/bus/EventWireReflection` is a class with no code: a `@RegisterForReflection` naming
@@ -610,7 +618,9 @@ follows is what biting it feels like.
   a restart. **Every post-receive run has a null `trigger_event_id`** with the same repo and the same
   config path as the last one, so a database treating those as duplicates would break the second push
   to every repository — SQL says rows collide only when all corresponding values are non-null and
-  equal, and `CiEventTriggerDedupeTest` pins that H2 agrees rather than trusting it. The constraint
+  equal, and `CiEventTriggerDedupeTest` pins that the engine agrees rather than trusting it — plain
+  `unique`, never postgres' `nulls not distinct`, which is exactly what must not be asked for. The
+  constraint
   kills replays, not descendants, which is why it is **no loop guard**: see the footgun in
   `README.md`, and note that nothing here is built that the future DAG feature would have to undo.
 
@@ -759,67 +769,52 @@ Keep it that way; do not buffer a step's output whole.
 
 ## Schema changes
 
-`ci/src/main/resources/db/ci/migration/`, hand-written, its own lineage on its own datasource. It
-was never part of the monorepo's shared `db/migration` lineage, so it came across from the
-extraction unsquashed and unchanged — keep appending to it. One member of that lineage is a **Java**
-migration in `eu.wohlben.qits.ci.migration` rather than a script, and the bottom of this section is
-why; a new migration is SQL in the directory unless it needs to read the catalogue.
+`ci/src/main/resources/db/ci/migration/`, hand-written, its own lineage on its own datasource —
+**PostgreSQL**, provisioned by this repository's own deployment spec and never shared with another
+context's database or migration history.
 
-`V3__event_triggers.sql` is worth reading as the worked example of backfilling a `not null` column
-into a live table: add it **with a default**, so every existing row is written correctly by the
-`alter` itself, then `drop default`, so a future insert that forgets the value fails loudly rather
-than getting a silent one. Its unique constraint is the trigger engine's at-most-once guarantee and
-its `NULL` behaviour is load-bearing — see "The trigger engine".
+**There is ONE migration, and the ordinary rule is back: keep appending, never edit an applied one.**
+`V1__init.sql` is the whole schema. The nine H2 migrations it replaces (V1-V8 plus a Java V9) are
+history in this repository's log and are not a prefix of this lineage: the move off H2 is a
+re-bootstrap rather than a data migration, so no postgres database anywhere ever ran them and no
+`V10__move_to_postgres.sql` had a reader. Read that file's header before adding anything — it argues
+each of the schema's remaining decisions, and the check constraints in particular.
 
-**`V4__queued_runs.sql` is the worked example of the other kind: widening a check constraint the
-original script never named.** V1 declared the status domain inline — `status varchar(32) not null
-check (status in (...))` — so H2 generated the name, and there is no portable way to drop an
-anonymous constraint. Three things came out of that and none of them should be undone:
+**What the H2 lineage taught, kept here because the lessons outlive the files.**
 
-- **The generated name was measured, not guessed.** `CONSTRAINT_76`, on a database created by V1 and
-  on this platform's live `~/.qits/data/ci/h2/ci.mv.db` alike; H2 derives it from an object counter
-  and V1 is the same script everywhere. Reproduce it with `java -cp <h2.jar> org.h2.tools.RunScript`
-  over the lineage and `select constraint_name, constraint_type from
-  information_schema.table_constraints where table_name='CI_RUN'`.
-- **The replacement is named** (`ck_ci_run_status`), so the next widening is one line with nothing to
-  measure.
-- **The migration then writes one `QUEUED` row and deletes it**, and that probe is the load-bearing
-  part. A database whose V1 check landed under a different generated name would take the drop as a
-  no-op, add the named constraint beside the surviving one, and reject **every** accepted run at
-  insert — silently in every JVM test, loudly only in the deployment. That is precisely this repo's
-  worst failure family (the `AUTO_SERVER=TRUE` that killed the binary, the eventstream datasource
-  url). The probe turns it into a Flyway failure at boot with the offending constraint named in the
-  error, and cd's health gate keeps the previous container. Verified by renaming the constraint in a
-  scratch database and watching V4 refuse to apply.
+- **Backfilling a `not null` column into a live table** (V3): add it *with a default*, so the
+  `alter` writes every existing row correctly, then `drop default`, so a future insert that forgets
+  the value fails loudly rather than getting a silent one. The fresh V1 needs neither step, since
+  every database reaching it is empty — but the next such column will.
+- **Widening a check constraint the original script never named** (V4). V1 declared its status
+  domains inline — `status varchar(32) not null check (status in (...))` — so H2 generated the
+  names, and there is no portable way to drop an anonymous constraint. V4 could name `CONSTRAINT_76`
+  only because it had *measured* that one database. Its replacement was named, and it wrote one
+  `QUEUED` row and deleted it again as a probe: a database whose V1 check had landed under a
+  different generated name would have taken the drop as a no-op and then rejected every accepted run
+  at insert — silently in every JVM test, loudly only in the deployment. **If you ever declare a
+  constraint, name it.**
+- **The defect that ended the whole story.** H2 2.4.240 keeps a checked IN-set tied to the session
+  that compiled it: once the pool retires that session, a valid write fails with `23514 Check
+  constraint invalid`. V5 dropped the three checks it could name — but two of those names never
+  existed, so `ci_step` kept its generated one, and on a freshly bootstrapped platform every `insert
+  into ci_step` failed 23514 after a few long builds and runs died step-less. `V9` had to be a
+  **Java** migration reading `INFORMATION_SCHEMA.TABLE_CONSTRAINTS`, because the generated names
+  depend on the order the DDL was replayed and no script can name what it cannot know.
 
-**`V5` then dropped those checks again, and `V9__drop_generated_check_constraints.java` is what
-finished the job.** H2 2.4.240 keeps a checked IN-set tied to the session that compiled it: once the
-pool retires that session, a valid write fails with `23514 Check constraint invalid`. V5 removed
-`ck_ci_run_trigger_type`, `ck_ci_run_status` and `ck_ci_step_status` for that reason — but two of
-those three names never existed, because V1 declared the status domains **inline and unnamed** and
-H2 named them itself, so V5's `drop constraint if exists` was a silent no-op and `ci_step` kept its
-generated check. That is the bug that killed every run on a freshly bootstrapped platform: after a
-few long builds every `insert into ci_step` failed 23514 and the run died step-less.
+**Postgres has none of that defect, and the checks did not come back anyway.** `ci_run.status`,
+`ci_run.trigger_type` and `ci_step.status` are catalogues that have grown once already — V4 added
+`QUEUED`, `EVENT` joined `POST_RECEIVE` — so the invariant lives where the writes are:
+`CiRunStatus`, `CiTriggerType` and `CiStepStatus` are `@Enumerated(EnumType.STRING)` and no code
+path writes a status any other way. **A new status value is one enum constant and no migration.**
+V8's `ck_ci_daemon_pin_verdict` is the one check that stays, because a verdict is a closed statement
+about one probe's outcome rather than a growing catalogue — and because it is named, so widening it
+would cost one line. `CiSchemaTest` runs the real migration against a real postgres and pins all of
+that, including that the unbounded columns came out `text` and not a large object.
 
-V9 is a **Java** migration and has to be, which is the one thing to carry away from it. V4 could
-name `CONSTRAINT_76` because it had measured that one database; the generated names depend on the
-order the DDL was replayed, live and fresh do not agree, and no SQL script can name what it cannot
-know. So V9 reads `INFORMATION_SCHEMA.TABLE_CONSTRAINTS` and drops every `CHECK` on `ci_run` and
-`ci_step`, whatever they are called — and nothing else: the primary keys, `uq_ci_run_event_trigger`,
-`fk_ci_step_run` and V8's named `ck_ci_daemon_pin_verdict` all survive, asserted by
-`CiSchemaCheckConstraintsTest`. Flyway finds the class because `quarkus.flyway.ci.locations` names
-its package beside the SQL directory; Quarkus filters discovered `JavaMigration`s by that list, and
-that filter is also what keeps this migration off the eventstream outbox's lineage in the same
-application. Move the class, move the location — and note the location list is shipped **once**, in
-the jar's `META-INF/microprofile-config.properties`, with no copy in either test resources file.
-
-So the old rule here — *add a status value ⇒ add a line to `ck_ci_run_status`* — is gone with the
-constraint. `CiRunStatus` and `CiStepStatus` are the whole of the guard now, and that is a
-deliberate trade rather than a loss: the entities are `@Enumerated(EnumType.STRING)`, no code path
-writes a status any other way, and a database engine that cannot hold the invariant reliably was
-never enforcing it. A new status value is one enum constant and no migration. V8's verdict check is
-the exception left standing, and only because it is named: the day it bites, one line of SQL drops
-it.
+The locations list is shipped **once**, in the jar's `META-INF/microprofile-config.properties`, with
+no copy in either test resources file — and it names one directory now that there is no Java
+migration to point at. `baseline-on-migrate` is gone with the H2 file it existed for.
 
 ## Authentication
 
@@ -886,7 +881,21 @@ contract, tested where it lives.
   `src/test/resources/application.properties` shadow it. **Never re-declare an app-level setting in
   test resources**: a suite green because the *test* copy is right proves nothing about what ships,
   and the two silently drift. `src/test/resources/application.properties` carries only genuine
-  test-only overrides (in-memory H2, `target/` working dirs, a git-host url nothing answers on).
+  test-only overrides (`clean-at-start`, `target/` working dirs, a git-host url nothing answers on).
+- **The databases in the suites are a real PostgreSQL, spawned as a child process.** Zonky resolves
+  postgres binaries as ordinary Maven artifacts, so the clone-alone, docker-free rule survives the
+  move off H2: never Testcontainers, never a dev service (`quarkus.devservices.enabled=false` says
+  so out loud in both modules). `testdb/EmbeddedPg` starts ONE instance per surefire JVM and tracks
+  its port in a **system property**, because a Quarkus run loads config sources in more than one
+  classloader and a static field is not shared across them; `testdb/EmbeddedPgConfigSource` hands the
+  url/username/password to every `@QuarkusTest` at an ordinal above `application.properties`, since
+  the port is chosen at run time and cannot be written into a file. Every (module, datasource) pair
+  names its own database — `ci_domain`, `ci_svc`, `eventstream_svc`, and the IT's `ci_packaged_it` /
+  `eventstream_packaged_it` — so two suites on one host can never mean the same one. The suites set
+  the datasource VALUES rather than the `QITS_RESOURCE_*` variables, deliberately: a suite that had
+  to export the variables could not also say what happens when they are missing.
+  `CiPackagedSurfaceIT` is where the shipped expressions themselves are exercised, and it passes the
+  variables through **system properties**, not a static field, for the two-classloader reason above.
 - **The git host in the suite is `githost/StubGitHost`, and it is a server rather than a
   directory.** Reading pipeline config is HTTP now (below), so the old stand-in — a `file://`
   directory laid out as `<base>/git/<repoId>` — answers nothing, and the shipped test config points
@@ -956,7 +965,8 @@ contract, tested where it lives.
   `-DskipITs=false`, the binary under `-Dnative`. It is not a second boundary test and behaviour
   does not belong in it: it asserts the handful of things a `@QuarkusTest` structurally cannot see,
   because they only exist once the app is built (the routes' build-time prefixes, the shipped
-  datasource URL, Flyway's migration surviving as a resource, SnakeYAML and Panache on a real run,
+  datasource EXPRESSIONS — both of them, handed the `QITS_RESOURCE_*` variables rather than the
+  datasource keys — Flyway's migrations surviving as resources, SnakeYAML and Panache on a real run,
   that `/ci/daemon` is on the artifact's router, and — the same argument, applied to Quinoa — **how
   the client and the machine surface divide `/ci`**). Its pipeline declares no steps, so it needs no
   container; step execution stays in `CiDaemonGateIT`.
