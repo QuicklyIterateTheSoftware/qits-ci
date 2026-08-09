@@ -1,7 +1,12 @@
 # How qits-platform-deployments deploys this repo. It reads this file from the git host at
 # the built sha, so the answer travels with the commit.
 #
-# ENVIRONMENT service: every environment runs its own instance. Today prod is the only
-# environment, so it deploys from prod's branch.
+# CARRYING THE FILE AT ALL is the other thing it says. qits-workspaces reads it on a release to
+# decide whether this repository deploys — a library or an SPA carries none and its release is
+# the trunk push alone — and then promotes onto the branch it is configured with
+# (`qits.workspaces.release.entry-branch`). `deploy_branches` used to name that branch here, in
+# thirteen copies of one platform-wide answer, and a release pushed onto every entry it named.
+#
+# ENVIRONMENT service: every environment runs its own instance, and a green build deploys into
+# whichever tier listens to the built branch.
 deployment_target: environment
-deploy_branches: environment/prod
