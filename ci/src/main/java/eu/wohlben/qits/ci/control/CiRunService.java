@@ -935,12 +935,30 @@ public class CiRunService {
    * has no session at all; and a check in its own transaction would be answering about a moment that
    * has already passed by the time the insert happens.
    */
+  /** The event id as a cause, or null for one that is not a UUID — never a reason to drop a run. */
+  private static UUID parseCause(String eventId) {
+    if (eventId == null) {
+      return null;
+    }
+    try {
+      return UUID.fromString(eventId);
+    } catch (IllegalArgumentException e) {
+      return null;
+    }
+  }
+
   private CiRun acceptEventRun(EventRun request) {
     String configPath = request.trigger().configPath();
     CiRun run = newRun(request.repoId(), request.branch(), request.sha());
     run.triggerType = CiTriggerType.EVENT;
     run.configPath = configPath;
     run.triggerEventId = request.eventId();
+    // The generic causation column gets the same value EXPLICITLY, because the ambient scope died
+    // at the queue hop behind this call — CausationScope does not follow work, so the CausationStamp
+    // listener would read null here and record a decision nobody made. An author-set value is what
+    // the stamp yields to. Defensive parse: an id that is not a UUID costs the row its causation
+    // edge and nothing else, the same trade CausingEvent.parentOf makes on the announce side.
+    run.causationId = parseCause(request.eventId());
     run.triggerEventName = request.eventName();
     run.triggerEventOccurredAt = request.occurredAt();
     run.triggerEventPayload = request.payload();
