@@ -45,6 +45,18 @@ class MachineGuardTest {
   private static final String FOREIGN_AUDIENCE = "prod-qits-deployments";
 
   /**
+   * The calling client every case below installs — qits-artifacts, which reads the daemon pin from
+   * qits-net. It is a subject, never an audience, and no case asserts it: what is under test is the
+   * token's claims, and the caller only has to be some machine.
+   *
+   * <p>Spelled here rather than taken from {@code QitsClaims}, like the two audiences above and for
+   * the same reason. It used to be {@code QitsClaims.ARTIFACTS}, the last service id that library
+   * held; the byte-plane split deleted it, because every service is an environment service now and
+   * an id carries its environment — {@code <env>-qits-artifacts} — which no constant can know.
+   */
+  private static final String ARTIFACTS = "prod-qits-artifacts";
+
+  /**
    * The gate on, and the {@code %test} dev user off.
    *
    * <p>Blanking the dev user is not a convenience — it is what makes the suite match a deployment.
@@ -83,7 +95,7 @@ class MachineGuardTest {
   }
 
   @Test
-  @TestSecurity(user = QitsClaims.ARTIFACTS)
+  @TestSecurity(user = ARTIFACTS)
   @OidcSecurity(
       claims = {
         @Claim(key = "aud", value = OWN_AUDIENCE),
@@ -105,7 +117,7 @@ class MachineGuardTest {
   }
 
   @Test
-  @TestSecurity(user = QitsClaims.ARTIFACTS)
+  @TestSecurity(user = ARTIFACTS)
   @OidcSecurity(
       claims = {
         @Claim(key = "aud", value = FOREIGN_AUDIENCE),
@@ -125,7 +137,7 @@ class MachineGuardTest {
   }
 
   @Test
-  @TestSecurity(user = QitsClaims.ARTIFACTS)
+  @TestSecurity(user = ARTIFACTS)
   @OidcSecurity(claims = {@Claim(key = "aud", value = OWN_AUDIENCE)})
   void aTokenGrantedNoProjectClaimIs403() {
     // An absent claim is a mismatch, never a wildcard.
@@ -139,7 +151,7 @@ class MachineGuardTest {
   }
 
   @Test
-  @TestSecurity(user = QitsClaims.ARTIFACTS)
+  @TestSecurity(user = ARTIFACTS)
   @OidcSecurity(
       claims = {
         @Claim(key = "aud", value = OWN_AUDIENCE),
@@ -158,7 +170,7 @@ class MachineGuardTest {
   }
 
   @Test
-  @TestSecurity(user = QitsClaims.ARTIFACTS)
+  @TestSecurity(user = ARTIFACTS)
   @OidcSecurity(
       claims = {
         @Claim(key = "aud", value = OWN_AUDIENCE),
