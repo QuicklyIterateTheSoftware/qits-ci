@@ -332,10 +332,13 @@ route and can no longer detach it. The fail-open shape that replaced the old one
 still real: a **new** write method that simply omits the call ships unguarded, and nothing says so.
 `MachineGuardTest` is what stands between that and shipping. It runs with
 `qits.auth.machine.required=true` and POSTs each write's absolute address, demanding 401 with no
-token, 403 for a token whose `aud` or `project` claim does not cover the target, and 202 for one that
-does — and it asserts the reads answer 200 unguarded, so "guarded" stays a statement about which
-endpoints rather than about the service. Add a write endpoint, add its case there, and keep every
-address in that test absolute: a moved prefix then shows up as a 404 rather than as a pass.
+token, 403 for a token whose `aud` or `project` claim does not cover the target, and **the
+endpoint's own answer** for one that does — 202 at the intake, 503 at the manual trigger, which
+evaluates before it answers and has no git host to ask in that profile. Either way the case rules
+out 401 and 403, which is the whole of what a guard test can say. It also asserts the reads answer
+200 unguarded, so "guarded" stays a statement about which endpoints rather than about the service.
+Add a write endpoint, add its case there, and keep every address in that test absolute: a moved
+prefix then shows up as a 404 rather than as a pass.
 
 ## The Angular client
 
@@ -638,15 +641,45 @@ follows is what biting it feels like.
   publishing side, pointed the other way, and it is why `CiEventTriggerService` — which does the real
   work — imports no `eu.wohlben.qits.eventstream` type. Keep it that way; the extraction rule protects
   the library, and this one protects the domain.
-- **`onEvent` has a second inbound adapter, and that is all it is.** `POST /ci/api/events/trigger`
-  (`CiEventController`) builds the same `Arrival` from a JSON body, so the engine cannot tell a
-  hand-supplied event from a frame — no branch, no flag, no second code path, and nothing web-shaped
-  reaching `ci/`. It lives on the intake's resource rather than in one of its own so the guard, the
-  path and the accept-and-return shape stay shared; it demands `project=*` where the intake demands
+- **The manual trigger is a second inbound adapter of the same evaluation, on a different thread.**
+  `POST /ci/api/events/trigger` (`CiEventController`) builds the same `Arrival` from a JSON body, so
+  the engine cannot tell a hand-supplied event from a frame — no branch, no flag, no second code
+  path, and nothing web-shaped reaching `ci/`. It lives on the intake's resource rather than in one
+  of its own so the guard and the path stay shared; it demands `project=*` where the intake demands
   the pushed repository, because an event names no repository. The **id default is load-bearing**: a
   fresh random UUID per call, or the dedupe below silently drops every rerun. A caller that passes
   one is opting into the dedupe, which is what makes a bootstrap script idempotent. Both are in
   `README.md` under "Triggering one by hand", and both are pinned by `CiManualTriggerTest`.
+
+  **What it does NOT share is the queue, and that is a fix rather than an inconsistency.** It calls
+  `evaluateNow`, which runs the evaluation on the request thread and answers what it did:
+  **200** with the run ids it recorded (empty and nothing skipped = "asked everybody, matched none"),
+  or **503** when no candidate repository could be read. It used to call `onEvent` and answer 202
+  whatever came back.
+
+  **The reason is a property only the bus has.** A frame that is not evaluated stays *owed*: the
+  claim rolls back and the next catch-up sweep offers it again. A caller-supplied event rides no bus,
+  is on no log and holds no claim — nothing anywhere will ever offer it a second time — so "handed to
+  a queue" and "lost" were the same outcome for it. Two ways that queue swallows an event and neither
+  says a word about it: it is bounded, so a full one is a `false` the endpoint used to discard; and
+  it is one thread, so a worker slow or stuck inside a git-host read holds everything behind it with
+  no log line at any level. On **2026-08-10** a bootstrap's release replay was answered 2xx for an
+  event that was never evaluated — no run, nothing logged, thirty minutes. `CiEventTriggerServiceTest`
+  stages exactly that state (worker wedged, queue refusing) and asserts a manual evaluation still
+  records its run.
+
+  **The price is stated rather than hidden:** "one git-host fan-out at a time" is now a statement
+  about *bus* traffic, and a manual call fans out beside the worker. That is the right way round —
+  the budget exists to keep a burst of machine events from storming the git host, and a manual
+  trigger is one request from one person, already bounded by the HTTP worker pool. The call is also
+  as long as the evaluation, so `qits.ci.trigger-deadline-seconds` (60) bounds it; candidates not
+  reached come back in `repositoriesSkipped` rather than being dropped silently.
+
+  **A skipped repository is not a repository that said no.** `EventTriggerLookup.UNREACHABLE` mixes
+  "the git host is down", "the repository is gone" and "it has no `main`" on purpose, so the endpoint
+  reports the count it *read* beside the ids it could not, and refuses (503) only when it read none.
+  Every candidate silent is a statement about the git host, never about the event — the same rule the
+  candidate list and the run queue state for an unreachable host.
 - **`signatures()` is `Set.of(ALL)` permanently, and it is not laziness.** The wire set is derived
   only when the connection is opened and **the subscriber does not dial at all when the union is
   empty**, so a listener that answered `Set.of()` until it had read some config would never open the
@@ -673,11 +706,12 @@ follows is what biting it feels like.
   evaluations of one repository raced for one bare cache on disk); with the caches gone it is a
   budget — one fan-out at the git host at a time. The queue is bounded.
 
-  **A full queue is a failure now, not a WARN and a shrug**, and that is what `onEvent` returning a
+  **A full queue is a failure, not a WARN and a shrug**, and that is what `onEvent` returning a
   boolean bought. The engine answers whether it *accepted* the event; a `false` means it was not
   evaluated, which is a statement about this process being busy rather than a verdict about the
-  event, so the listener throws and the next catch-up sweep offers it again. The WARN stays for the
-  caller that cannot retry, which is the manual-trigger endpoint.
+  event, so the listener throws and the next catch-up sweep offers it again. **`onEvent` is the bus
+  listener's and nothing else's now**: everything that reaches it has a redelivery channel behind
+  it, which the manual trigger never had — see that bullet above.
 
   **State the residual window plainly: the claim commits when the event is ACCEPTED, not when the run
   row exists.** A crash in the gap between the enqueue and the evaluation loses that event. It is a

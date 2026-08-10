@@ -13,6 +13,7 @@ import io.quarkus.test.common.TestResourceScope;
 import io.quarkus.test.common.WithTestResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import io.restassured.path.json.JsonPath;
 import jakarta.inject.Inject;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -29,9 +30,11 @@ import org.junit.jupiter.api.Test;
  *
  * <p>It is the second inbound adapter of one seam, so what is under test here is the adapter and
  * nothing beneath it — that an ordinary trigger file fires, that the snapshot the run carries is the
- * one the request named, and that the id decides whether a repeat is a rerun or a no-op. The bus
+ * one the request named, that the id decides whether a repeat is a rerun or a no-op, and <b>what the
+ * answer promises</b>: 200 with the rows it wrote, never 202 for work handed to a queue. The bus
  * half of the same engine is {@code bus/CiEventTriggerCausationTest}; selection semantics belong to
- * the {@code ci} module's own suite.
+ * the {@code ci} module's own suite, and so does the 503 (no candidate readable), which cannot be
+ * staged here because this instance has a live git host and other classes' repositories on it.
  *
  * <p>It runs with the shipped {@code %test} configuration — the event bus dark, the machine gate off
  * — so it shares a Quarkus instance with {@code CiPipelineBoundaryTest} rather than costing a
@@ -179,6 +182,58 @@ public class CiManualTriggerTest {
     assertEquals(TRIGGER_PATH, run.get("configPath"));
   }
 
+  // --- what a 200 promises, and why it is not a 202 ---
+
+  /**
+   * <b>The answer is what the call did, not that it was taken.</b> This endpoint used to hand the
+   * event to the trigger worker's bounded queue and answer 202 whatever came back — and on
+   * 2026-08-10 a bootstrap's release replay was answered 2xx for an event that was never evaluated.
+   * A bus frame survives that (unevaluated, it stays owed and the next catch-up sweep offers it
+   * again); a caller-supplied event is on no log and nothing will ever offer it again. So the
+   * evaluation happens before the answer, and the answer names the rows it wrote.
+   */
+  @Test
+  public void theAnswerNamesTheRunsItRecorded() throws Exception {
+    String upstream = upstream();
+    String repoId = seedOrigin(upstream);
+    pushOnce(repoId);
+
+    JsonPath answer =
+        triggerResult("""
+            {"name":"SoftwareRelease","payload":%s}""".formatted(payload(upstream)));
+
+    List<String> runIds = answer.getList("runIds");
+    assertEquals(1, runIds.size(), "one trigger file selected the event, so one run");
+    assertTrue(answer.getInt("repositoriesRead") >= 1, "it really asked somebody");
+    // The row exists as the call returns. Nothing is polled for here on purpose: that is the
+    // difference between this and the 202 it replaced.
+    List<Map<String, Object>> recorded = eventRunsOf(repoId);
+    assertEquals(1, recorded.size());
+    assertEquals(runIds.get(0), recorded.get(0).get("id"));
+    assertEquals(answer.getString("eventId"), recorded.get(0).get("triggerEventId"));
+    awaitRuns(repoId, 2);
+  }
+
+  @Test
+  public void anEventNothingSelectsAnswersTwoHundredWithNoRuns() throws Exception {
+    String upstream = upstream();
+    String repoId = seedOrigin(upstream);
+    pushOnce(repoId);
+
+    JsonPath answer =
+        triggerResult(
+            """
+            {"name":"NothingDeclaresThisEvent","payload":%s}""".formatted(payload(upstream)));
+
+    // "Asked somebody, matched none of them", which a 503 is what says the opposite of — see
+    // MachineGuardTest, where there is no git host to ask. Only the read count is asserted here: the
+    // shared instance carries every other class's repositories, so the skipped list is not this
+    // test's to predict. It is pinned exactly in the engine's own suite.
+    assertEquals(List.of(), answer.getList("runIds"));
+    assertTrue(answer.getInt("repositoriesRead") >= 1);
+    assertEquals(List.of(), eventRunsOf(repoId));
+  }
+
   @Test
   public void badInputIs400WithTheMessageEnvelope() {
     assertBadRequest("""
@@ -233,17 +288,22 @@ public class CiManualTriggerTest {
         .formatted(upstream);
   }
 
-  /** POSTs the trigger and returns the event id it answered with. */
-  private static String trigger(String body) {
+  /** POSTs the trigger and returns the whole answer — 200, because the call evaluates before it answers. */
+  private static JsonPath triggerResult(String body) {
     return given()
         .contentType(ContentType.JSON)
         .body(body)
         .when()
         .post(TRIGGER)
         .then()
-        .statusCode(202)
+        .statusCode(200)
         .extract()
-        .path("eventId");
+        .jsonPath();
+  }
+
+  /** POSTs the trigger and returns the event id it answered with. */
+  private static String trigger(String body) {
+    return triggerResult(body).getString("eventId");
   }
 
   // --- plumbing, the shape CiEventTriggerCausationTest uses ---

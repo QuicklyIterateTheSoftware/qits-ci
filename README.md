@@ -93,7 +93,7 @@ rest of qits it reaches over a URL it is configured with:
 | Direction | Surface | Config |
 |---|---|---|
 | in | `POST /ci/api/events/post-receive` — `{repoId, branch, oldSha, newSha}`, one per updated branch ref | `machineAuth.requireProject(repoId)` — a qits-idp bearer carrying `aud=qits-ci` and a `project` claim covering the pushed repository (`*` covers any). Behind the platform-wide gate `qits.auth.machine.required`, shipped **off** |
-| in | `POST /ci/api/events/trigger` — `{name, payload, occurredAt?, eventId?}` → 202 `{eventId}`, one domain event supplied by hand instead of by the bus ("Triggering one by hand") | guarded on the same resource, and it needs the wider grant: a machine token covering **every** project, because the event names no repository |
+| in | `POST /ci/api/events/trigger` — `{name, payload, occurredAt?, eventId?}` → 200 `{eventId, runIds, repositoriesRead, repositoriesSkipped}`, one domain event supplied by hand instead of by the bus; it **evaluates before it answers**, and a 503 means it could not ("Triggering one by hand") | guarded on the same resource, and it needs the wider grant: a machine token covering **every** project, because the event names no repository |
 | in | `GET /ci/api/runs?repositoryId={repoId}[&limit={n}]`, `GET /ci/api/runs/{runId}` | not machine-guarded; they carry build logs, so a deployment must keep them behind its auth policy |
 | in | `GET /ci/api/runs/active` → `{"runs": [...]}` — every `QUEUED` or `RUNNING` run on the instance, all repositories, newest first, no parameters | same; unscoped, because "what is CI doing right now" has no repository to scope to |
 | in | `GET /ci/api/repositories` → `{"repositoryIds": [...]}` — the distinct repo ids this instance has runs for, ascending | same; it is the one read here that is not scoped to a repository, because it answers *which* |
@@ -633,17 +633,47 @@ POST /ci/api/events/trigger
   "eventId": "1b6f0d2a-4f0e-4b8a-9a12-2a3e6f8c0d11"
 }
 
-202 Accepted
-{"eventId": "1b6f0d2a-4f0e-4b8a-9a12-2a3e6f8c0d11"}
+200 OK
+{
+  "eventId": "1b6f0d2a-4f0e-4b8a-9a12-2a3e6f8c0d11",
+  "runIds": ["3f0c…"],
+  "repositoriesRead": 8,
+  "repositoriesSkipped": []
+}
 ```
 
 `name` and `payload` are required; `payload` must be a JSON object and is passed through as sent,
 never bound to a type. `occurredAt` defaults to now and lands on the run row as the event snapshot's
-timestamp, exactly as a bus arrival's does. Evaluation is async on `ci-trigger-worker`, which is why
-the answer is **202** carrying the event id and not a run id: one event may match any number of
-trigger files in any number of repositories, and none of them exists yet when the call returns.
-Match the id against `triggerEventId` on `GET /ci/api/runs?repositoryId=…` to see what it caused.
-A blank name, a missing payload, or an unparseable `occurredAt` or `eventId` is a 400.
+timestamp, exactly as a bus arrival's does. A blank name, a missing payload, or an unparseable
+`occurredAt` or `eventId` is a 400.
+
+**It evaluates before it answers, and that is the guarantee.**
+
+- **200** — the evaluation happened. Every id in `runIds` is a run row that exists now, findable by
+  `triggerEventId` on `GET /ci/api/runs?repositoryId=…`. An empty `runIds` with an empty
+  `repositoriesSkipped` means the event was offered to every candidate repository and matched none.
+- **503** — it did not happen: no candidate repository could be read, or the evaluation threw.
+  `Retry-After` says when to come back. Nothing was lost that a retry cannot recover, because
+  nothing was accepted.
+
+`repositoriesSkipped` names the candidates that did not answer — the git host did not reply, the
+repository is gone, it has no `main`, or `qits.ci.trigger-deadline-seconds` arrived before its turn.
+A skipped repository is not a repository that said no, and the two are reported apart so that
+"nothing matched" is never a lie about an unreachable git host.
+
+**This replaced a 202, and the replacement is the fix for a measured loss.** The call used to hand
+the event to `ci-trigger-worker`'s bounded queue and answer "accepted" whatever came back. A bus
+frame can afford that: unevaluated, it stays owed and the next catch-up sweep offers it again. A
+caller-supplied event rides no bus, is on no log and holds no claim, so nothing anywhere will ever
+offer it a second time — for this endpoint, "queued" and "lost" were the same answer. On 2026-08-10 a
+bootstrap's release replay was answered 2xx for an event that was never evaluated: no run, and no
+line at any level for thirty minutes. An event nobody can redeliver must be evaluated by the process
+that accepts it, or refused.
+
+The cost is that the call is as long as the evaluation — one git-host read per candidate repository
+— and that a manual trigger fans out beside the trigger worker rather than behind it. That is the
+right way round: the single worker exists to keep a burst of *machine* events from storming the git
+host, and this is one request from one person.
 
 **The id is the whole contract, and both of its behaviours are wanted.** The dedupe above is a
 constraint on `(trigger_event_id, repo_id, config_path)`, so:
@@ -652,7 +682,9 @@ constraint on `(trigger_event_id, repo_id, config_path)`, so:
   as often as you ask. This is the default because a rerun is what a person wants.
 - **Pass `eventId`** and you opt into the dedupe. The call is then idempotent — a second one records
   no run — which is what makes it safe in a bootstrap script that may run twice. Pass the *original*
-  event's id to say "only if this never triggered".
+  event's id to say "only if this never triggered". It is also what makes a **retry after a 503**
+  free: an evaluation that reached some repositories before it gave up leaves rows the retry will
+  not duplicate.
 
 Nothing else about a triggered run changes: it reads the trigger files from the head of `main`, the
 step containers get the same four `QITS_EVENT_*` variables, and a green release pipeline announces

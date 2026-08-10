@@ -140,11 +140,6 @@ components:
           $ref: "#/components/schemas/CiRunDto"
         lastMainRun:
           $ref: "#/components/schemas/CiRunDto"
-    TriggerEventAccepted:
-      type: object
-      properties:
-        eventId:
-          type: string
     TriggerEventRequest:
       type: object
       properties:
@@ -164,6 +159,22 @@ components:
         eventId:
           type: string
           description: "UUID. Absent: a fresh random one — see the dedupe note."
+    TriggerEventResult:
+      type: object
+      properties:
+        eventId:
+          type: string
+        runIds:
+          type: array
+          items:
+            type: string
+        repositoriesRead:
+          type: integer
+          format: int32
+        repositoriesSkipped:
+          type: array
+          items:
+            type: string
   securitySchemes:
     SecurityScheme:
       type: openIdConnect
@@ -193,15 +204,22 @@ paths:
               $ref: "#/components/schemas/TriggerEventRequest"
         required: true
       responses:
-        "202":
-          description: "Accepted for evaluation, with the event id it ran under"
+        "200":
+          description: "Evaluated, with the runs it recorded and which repositories\
+            \ it could ask"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/TriggerEventAccepted"
+                $ref: "#/components/schemas/TriggerEventResult"
         "400":
           description: "Blank name, missing payload, or an unparseable timestamp or\
             \ id"
+        "503":
+          description: Not evaluated — no candidate repository could be read. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TriggerEventResult"
       tags:
       - Ci Event Controller
   /ci/api/repositories:
@@ -339,4 +357,4 @@ paths:
       - Ci Run Controller
 info:
   title: qits-ci API
-  version: 2026.807.150352
+  version: 2026.810.110535

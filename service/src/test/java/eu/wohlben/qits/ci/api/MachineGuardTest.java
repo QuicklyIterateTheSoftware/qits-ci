@@ -182,7 +182,7 @@ class MachineGuardTest {
   void theManualTriggerWithNoMachineTokenIs401() {
     // The manual trigger runs other repositories' pipelines, so it is guarded exactly as the intake
     // is. This test is what keeps that true: the endpoint sits on the same resource, and a guard
-    // dropped from it would otherwise show up as a cheerful 202.
+    // dropped from it would otherwise show up as an ordinary answer.
     given()
         .contentType(MediaType.APPLICATION_JSON)
         .body(TRIGGER_BODY)
@@ -200,13 +200,18 @@ class MachineGuardTest {
         @Claim(key = QitsClaims.PROJECT, value = "*")
       })
   void theManualTriggerNeedsATokenGrantedEveryProject() {
+    // 503 is the guard PASSING here, and it is deterministic in this profile: the trigger evaluates
+    // before it answers, this instance has no git host (qits.ci.git-host-url answers on nothing), so
+    // no candidate repository can be read and the endpoint says so rather than inventing a 2xx. What
+    // a dropped or tightened guard looks like is 401 or 403, which is what this case rules out.
+    // The endpoint's own contract is CiManualTriggerTest's.
     given()
         .contentType(MediaType.APPLICATION_JSON)
         .body(TRIGGER_BODY)
         .when()
         .post(TRIGGER)
         .then()
-        .statusCode(202);
+        .statusCode(503);
   }
 
   @Test

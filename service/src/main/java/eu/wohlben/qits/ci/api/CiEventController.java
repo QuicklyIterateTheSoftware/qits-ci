@@ -14,15 +14,18 @@ import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.enums.SchemaType;
 import org.eclipse.microprofile.openapi.annotations.media.Content;
 import org.eclipse.microprofile.openapi.annotations.media.Schema;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
+import org.jboss.logging.Logger;
 
 /**
  * The CI event intake (docs/epics/qits-ci/) — the wire contract between the git host's post-receive
@@ -40,7 +43,12 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * <p>{@code POST /ci/api/events/trigger} is the sibling and is <b>not</b> hidden, on the same
  * criterion pointed the other way: a person invokes it on purpose and its contract is written down
  * nowhere else. It replays a domain event by hand, so both operations live on this one resource —
- * the guard, the path and the "accept and return" shape are the same in each.
+ * the guard and the path are the same in each.
+ *
+ * <p>What they no longer share is the answer. The intake accepts and returns: its sender is the git
+ * host's hook, whose push is already on the record, and its work becomes a {@code QUEUED} row before
+ * the 202. The manual trigger <b>evaluates before it answers</b>, because the event it carries is on
+ * no log and nothing anywhere can offer it a second time — see {@link #trigger}.
  *
  * <h2>What the guard names, and why it is the repoId</h2>
  *
@@ -71,6 +79,11 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class CiEventController {
+
+  private static final Logger LOG = Logger.getLogger(CiEventController.class);
+
+  /** What a caller told to retry should wait. Short: the usual cause is a git host coming back. */
+  private static final String RETRY_AFTER_SECONDS = "5";
 
   @Inject CiRunService runService;
 
@@ -116,8 +129,18 @@ public class CiEventController {
       @Schema(description = "UUID. Absent: a fresh random one — see the dedupe note.")
           String eventId) {}
 
-  /** The id the evaluation ran under, so a caller can find the runs it caused. */
-  public record TriggerEventAccepted(String eventId) {}
+  /**
+   * What the evaluation did, which is what the caller waited for.
+   *
+   * @param eventId the id the evaluation ran under, canonical lowercase
+   * @param runIds the runs it recorded. Every id is a row that exists now, findable by
+   *     {@code triggerEventId} on {@code GET /ci/api/runs}.
+   * @param repositoriesRead how many candidate repositories answered and were evaluated
+   * @param repositoriesSkipped the candidates that did not answer — unreachable, gone, no {@code
+   *     main}, or not reached before the deadline
+   */
+  public record TriggerEventResult(
+      String eventId, List<String> runIds, int repositoriesRead, List<String> repositoriesSkipped) {}
 
   /**
    * Evaluates every repository's {@code .config/qits/ci-event-*.yml} against an event the caller
@@ -127,9 +150,27 @@ public class CiEventController {
    * <p>The bus stays the primary trigger. This is the second inbound adapter of the same seam: it
    * builds a {@link CiEventTriggerService.Arrival} exactly as {@code bus/CiEventTriggerListener}
    * does, so the engine cannot tell the two apart and nothing web-shaped reaches the {@code ci}
-   * module. Evaluation is async on {@code ci-trigger-worker} as ever, which is why this answers
-   * <b>202</b> and carries the event id rather than a run id: one event may match any number of
-   * trigger files in any number of repositories, and none of them exists yet when this returns.
+   * module.
+   *
+   * <h2>It evaluates before it answers, and that is the guarantee</h2>
+   *
+   * <p><b>200 means the evaluation happened.</b> Every id in {@code runIds} is a run row that exists
+   * now; an empty list with an empty {@code repositoriesSkipped} means the event was offered to
+   * every candidate repository and matched none of them. <b>503 means it did not happen</b> — no
+   * candidate could be read, or the evaluation threw — and the caller should retry.
+   *
+   * <p>This <b>replaced a 202</b>, and the replacement is the fix for a measured loss. The endpoint
+   * used to hand the event to {@code ci-trigger-worker}'s bounded queue and answer "accepted"
+   * whatever came back. A bus frame can afford that, because a frame that is not evaluated stays
+   * owed and the next catch-up sweep offers it again. A caller-supplied event is on no log, holds no
+   * claim, and nothing anywhere will offer it a second time — so for this endpoint "queued" and
+   * "lost" were the same answer, and on 2026-08-10 a bootstrap's release replay was answered 2xx for
+   * an event that was never evaluated, with no line at any level to say so. An event nobody can
+   * redeliver must be evaluated by the process that accepts it, or refused.
+   *
+   * <p>So the call is as long as the evaluation: one git-host read per candidate repository, bounded
+   * by {@code qits.ci.trigger-deadline-seconds}. Candidates not reached in time are reported as
+   * skipped rather than silently dropped.
    *
    * <h2>The id decides rerun or dedupe, and that is the whole contract</h2>
    *
@@ -147,7 +188,9 @@ public class CiEventController {
    * </ul>
    *
    * <p>The id comes back in the response body in canonical lowercase form, and it is what a caller
-   * matches against {@code triggerEventId} on {@code GET /ci/api/runs} to find what it caused.
+   * matches against {@code triggerEventId} on {@code GET /ci/api/runs} to find what it caused. It is
+   * also what makes a retry after a 503 safe: pass one, and a retry that follows an evaluation which
+   * did reach some repositories records no second run there.
    *
    * <p>{@code occurredAt} lands on the run row as the event snapshot's timestamp, exactly as a bus
    * arrival's would, and reaches the step containers as {@code $QITS_EVENT_OCCURRED_AT}. The payload
@@ -164,12 +207,16 @@ public class CiEventController {
   @Path("/trigger")
   @Operation(summary = "Run every event pipeline that selects a caller-supplied domain event")
   @APIResponse(
-      responseCode = "202",
-      description = "Accepted for evaluation, with the event id it ran under",
-      content = @Content(schema = @Schema(implementation = TriggerEventAccepted.class)))
+      responseCode = "200",
+      description = "Evaluated, with the runs it recorded and which repositories it could ask",
+      content = @Content(schema = @Schema(implementation = TriggerEventResult.class)))
   @APIResponse(
       responseCode = "400",
       description = "Blank name, missing payload, or an unparseable timestamp or id")
+  @APIResponse(
+      responseCode = "503",
+      description = "Not evaluated — no candidate repository could be read. Retry.",
+      content = @Content(schema = @Schema(implementation = TriggerEventResult.class)))
   public Response trigger(TriggerEventRequest request) {
     if (request == null || request.name() == null || request.name().isBlank()) {
       throw new BadRequestException("Event name is required");
@@ -184,10 +231,37 @@ public class CiEventController {
     Instant occurredAt = occurredAt(request.occurredAt());
 
     machineAuth.requireProject(QitsClaims.ANY);
-    triggers.onEvent(
-        new CiEventTriggerService.Arrival(
-            eventId, request.name(), occurredAt, payloadText(request.payload())));
-    return Response.accepted().entity(new TriggerEventAccepted(eventId)).build();
+    CiEventTriggerService.Evaluation done;
+    try {
+      done =
+          triggers.evaluateNow(
+              new CiEventTriggerService.Arrival(
+                  eventId, request.name(), occurredAt, payloadText(request.payload())));
+    } catch (RuntimeException notEvaluated) {
+      // The one thing this endpoint may never do is answer 2xx for an event it did not evaluate:
+      // nothing will redeliver it. So the caller is told to come back, loudly.
+      LOG.errorf(
+          notEvaluated, "Event %s (%s) could not be evaluated", eventId, request.name());
+      return unavailable(new TriggerEventResult(eventId, List.of(), 0, List.of()));
+    }
+    TriggerEventResult result =
+        new TriggerEventResult(
+            eventId, done.runIds(), done.repositoriesRead(), done.repositoriesSkipped());
+    if (!done.answered()) {
+      LOG.warnf(
+          "Event %s (%s) reached no readable repository — answering 503 so the caller retries",
+          eventId, request.name());
+      return unavailable(result);
+    }
+    return Response.ok(result).build();
+  }
+
+  /** 503 with the same body, and the standard way to say when to come back. */
+  private static Response unavailable(TriggerEventResult result) {
+    return Response.status(Response.Status.SERVICE_UNAVAILABLE)
+        .header(HttpHeaders.RETRY_AFTER, RETRY_AFTER_SECONDS)
+        .entity(result)
+        .build();
   }
 
   private static String eventId(String supplied) {

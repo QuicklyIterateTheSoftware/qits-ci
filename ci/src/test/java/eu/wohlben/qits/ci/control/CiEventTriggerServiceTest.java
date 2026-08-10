@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.RejectedExecutionException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -307,5 +308,130 @@ public class CiEventTriggerServiceTest extends CiTestSupport {
     fakeCandidates.set();
     deliver(arrival(UUID.randomUUID().toString(), "BuildSuccessful", PAYLOAD));
     assertNotNull(runService.runsFor(repoId));
+  }
+
+  // --- evaluateNow: what a caller who cannot be redelivered to is owed ---
+
+  /**
+   * The manual trigger's whole contract in one assertion: when it returns, the rows are there and it
+   * says which. {@code onEvent} can only promise that something was queued.
+   */
+  @Test
+  public void evaluateNowAnswersWithTheRunsItRecorded() throws Exception {
+    seedTrigger(TRIGGER_PATH, TRIGGER);
+    String eventId = UUID.randomUUID().toString();
+
+    CiEventTriggerService.Evaluation done =
+        engine.evaluateNow(arrival(eventId, "BuildSuccessful", PAYLOAD));
+
+    assertTrue(done.answered());
+    assertEquals(1, done.repositoriesRead());
+    assertEquals(List.of(), done.repositoriesSkipped());
+    assertEquals(1, done.runIds().size());
+    // No waiting for a worker: the row the caller was told about exists as the call returns.
+    assertEquals(done.runIds(), runService.runsFor(repoId).stream().map(r -> r.id).toList());
+    runService.awaitIdle();
+  }
+
+  @Test
+  public void evaluateNowRecordsNothingWhenNothingSelectsTheEvent() {
+    seedTrigger(TRIGGER_PATH, TRIGGER);
+
+    CiEventTriggerService.Evaluation done =
+        engine.evaluateNow(arrival(UUID.randomUUID().toString(), "NobodyListens", PAYLOAD));
+
+    // Empty runs AND nothing skipped is the only shape that means "asked everybody, matched none" —
+    // which is why the endpoint answers with both lists rather than with a run count.
+    assertTrue(done.answered());
+    assertEquals(List.of(), done.runIds());
+    assertEquals(List.of(), done.repositoriesSkipped());
+  }
+
+  /**
+   * A repository that could not be read is not a repository that said no, and conflating the two is
+   * how "nothing matched" becomes a lie about an unreachable git host.
+   */
+  @Test
+  public void aCandidateThatCannotBeReadIsReportedRatherThanCountedAsNoMatch() {
+    fakeConfig.putTriggersUnreachable(repoId, CiEventTriggerService.TRIGGER_BRANCH);
+
+    CiEventTriggerService.Evaluation done =
+        engine.evaluateNow(arrival(UUID.randomUUID().toString(), "BuildSuccessful", PAYLOAD));
+
+    assertFalse(done.answered(), "nothing answered, so there is no answer — the endpoint 503s");
+    assertEquals(0, done.repositoriesRead());
+    assertEquals(List.of(repoId), done.repositoriesSkipped());
+    assertEquals(List.of(), done.runIds());
+  }
+
+  @Test
+  public void anEmptyCandidateSetIsNotAnAnswerEither() {
+    fakeCandidates.set();
+
+    CiEventTriggerService.Evaluation done =
+        engine.evaluateNow(arrival(UUID.randomUUID().toString(), "BuildSuccessful", PAYLOAD));
+
+    assertFalse(done.answered(), "qits-ci knows no repository, so it cannot say the event matched none");
+  }
+
+  /**
+   * <b>The 2026-08-10 loss, and the reason this endpoint no longer shares a queue with the bus.</b>
+   *
+   * <p>The trigger worker is one thread in front of a bounded queue. Stick it — inside a git-host
+   * read, which is where it spends its time — and two things follow, both of them silent: the queue
+   * fills, and everything in it waits. A caller-supplied event handed to that queue is lost, because
+   * unlike a bus frame it is on no log, holds no claim, and nothing will ever offer it again. That
+   * is what happened: a 2xx, no run, and no line at any level for thirty minutes.
+   *
+   * <p>So the manual path evaluates on the caller's own thread. This stages the worst state the
+   * worker can be in — wedged AND its queue refusing — and asserts a manual evaluation still records
+   * its run and says so.
+   */
+  @Test
+  public void aWedgedWorkerAndAFullQueueCannotSwallowAManualEvaluation() throws Exception {
+    seedTrigger(TRIGGER_PATH, TRIGGER);
+    fakeCandidates.wedgeTheTriggerWorker();
+    try {
+      // One arrival to occupy the worker. The fillers select nothing, so releasing them later costs
+      // one config read each and no runs.
+      assertTrue(engine.onEvent(arrival(UUID.randomUUID().toString(), "NobodyListens", PAYLOAD)));
+      fakeCandidates.awaitTriggerWorkerWedged();
+
+      boolean refused = false;
+      for (int i = 0; i < CiEventTriggerService.QUEUE_CAPACITY + 2 && !refused; i++) {
+        refused = !engine.onEvent(arrival(UUID.randomUUID().toString(), "NobodyListens", PAYLOAD));
+      }
+      assertTrue(refused, "the bounded queue refuses once it is full — the bus path's retry signal");
+
+      String eventId = UUID.randomUUID().toString();
+      CiEventTriggerService.Evaluation done =
+          engine.evaluateNow(arrival(eventId, "BuildSuccessful", PAYLOAD));
+
+      assertEquals(1, done.runIds().size(), "evaluated beside the wedge, not behind it");
+      forgetLoadedEntities();
+      List<CiRun> recorded = runService.runsFor(repoId);
+      assertEquals(1, recorded.size());
+      assertEquals(eventId, recorded.get(0).triggerEventId);
+    } finally {
+      fakeCandidates.freeTheTriggerWorker();
+      awaitEvaluatorDrained();
+      runService.awaitIdle();
+    }
+  }
+
+  /**
+   * {@code awaitIdle} submits, so it cannot be called while the queue is still full — the drain has
+   * to be waited for before it can be waited on.
+   */
+  private void awaitEvaluatorDrained() throws Exception {
+    for (int attempt = 0; attempt < 300; attempt++) {
+      try {
+        engine.awaitIdle();
+        return;
+      } catch (RejectedExecutionException stillFull) {
+        Thread.sleep(100);
+      }
+    }
+    throw new IllegalStateException("the trigger queue never drained");
   }
 }

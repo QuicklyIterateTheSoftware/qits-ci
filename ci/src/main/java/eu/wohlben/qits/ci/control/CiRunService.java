@@ -358,16 +358,21 @@ public class CiRunService {
    * repo_id, config_path)} and is still dropped as already-triggered rather than re-run, just on the
    * trigger worker rather than on the run worker, and before a queue slot is spent rather than after.
    * A duplicate frame therefore never reaches the queue at all.
+   *
+   * @return the id of the run this recorded, or {@code null} when the dedupe dropped it. The manual
+   *     trigger endpoint answers with these ids, which is what lets a 2xx there mean "these rows
+   *     exist" rather than "something was handed to a queue".
    */
-  public void onEventTrigger(EventRun request) {
+  public String onEventTrigger(EventRun request) {
     CiIdentifiers.requireRepoId(request.repoId());
     CiIdentifiers.requireBranch(request.branch());
     CiIdentifiers.requireSha(request.sha());
     CiRun run = acceptEventRun(request);
     if (run == null) {
-      return;
+      return null;
     }
     enqueue(run.id);
+    return run.id;
   }
 
   /** Rebuilds an accepted event run solely from its durable row. */
