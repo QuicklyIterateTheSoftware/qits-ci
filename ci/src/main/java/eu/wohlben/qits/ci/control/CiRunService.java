@@ -308,12 +308,28 @@ public class CiRunService {
    * a branch moved to a commit — and the row it writes is still {@code POST_RECEIVE}. What used to
    * be an HTTP intake is {@code bus/ScmPublishCommitListener}, and the suppression the git host used
    * to apply for its consumers ({@code -o qits.no-ci}) is decided there, before this is called.
+   *
+   * <p><b>{@code eventId} is the {@code SCMPublishCommit} that announced the push</b>, and it lands
+   * on the row's {@code triggerEventId} exactly as an event trigger's frame id does. That is what
+   * closes the platform's causation chain across this hop: {@code announceRun} reads it back off the
+   * row minutes later, on another thread, and stamps the run's {@code BuildSuccessful} with it — so
+   * release → push → commit event → CI run → deploy is one chain rather than two halves with a root
+   * event in the middle. It also puts push runs inside the unique constraint that used to see only
+   * event runs, which is a second guarantee and not a cost: see {@link #acceptPostReceive}.
+   *
+   * <p>Null is accepted and means "no event announced this", which is the {@link #execute} test
+   * entry and nothing in production. Such a run publishes a root event, which is the truthful
+   * answer for a push nobody can name a cause for.
    */
-  public void onPostReceive(String repoId, String branch, String oldSha, String newSha) {
+  public void onPostReceive(
+      String repoId, String branch, String oldSha, String newSha, String eventId) {
     CiIdentifiers.requireRepoId(repoId);
     CiIdentifiers.requireBranch(branch);
     CiIdentifiers.requireSha(newSha);
-    enqueue(acceptPostReceive(repoId, branch, newSha).id);
+    CiRun accepted = acceptPostReceive(repoId, branch, newSha, eventId);
+    if (accepted != null) {
+      enqueue(accepted.id);
+    }
   }
 
   /** Puts an already-accepted (QUEUED) run on the worker. */
@@ -478,10 +494,10 @@ public class CiRunService {
 
   /**
    * Accept and run a push in one call — package-private so tests drive the whole state machine
-   * without the worker's timing.
+   * without the worker's timing. No announcing event, so the run publishes a root.
    */
   void execute(String repoId, String branch, String sha) {
-    runQueued(acceptPostReceive(repoId, branch, sha).id);
+    runQueued(acceptPostReceive(repoId, branch, sha, null).id);
   }
 
   /**
@@ -868,26 +884,59 @@ public class CiRunService {
   }
 
   /**
-   * Records an accepted push as a {@code QUEUED} run: the constant config path, no event, {@code
-   * POST_RECEIVE}. Called on the intake's own thread, before the 202.
+   * Records an accepted push as a {@code QUEUED} run: the constant config path, {@code
+   * POST_RECEIVE}, and the id of the {@code SCMPublishCommit} that announced it. Called on the bus
+   * adapter's thread, inside the claiming transaction of that event.
+   *
+   * <p><b>Two things collapse the moment {@code eventId} is non-null, and both are wanted.</b> The
+   * run gains a causation parent for what it publishes; and it joins the unique constraint on
+   * {@code (trigger_event_id, repo_id, config_path)}, which now means "one run per announced push"
+   * as well as "one run per (event, trigger file)". A push's config path is the constant
+   * {@code ci-post-receive.yml}, so the event id is the whole of what distinguishes one push row
+   * from the next — which is exactly right, because two runs for one announcement are two builds of
+   * one commit.
+   *
+   * <p>The durable claim already makes that near-unreachable: the funnel calls the listener at most
+   * once per (consumer, event), so a redelivery does not arrive here at all. The constraint is the
+   * backstop underneath, on ci's own datasource where the claim is not — and a duplicate is
+   * <b>settled, not retried</b>: it comes back null, the caller enqueues nothing, and the event is
+   * handled. Throwing would leave a push owed forever over a run that already exists.
+   *
+   * <p>A null {@code eventId} is the {@link #execute} test entry. Nothing is deduped for it, which
+   * is what plain SQL {@code unique} gives for free — rows collide only when every column is
+   * non-null and equal.
+   *
+   * @return the accepted run, or null when this push had already been recorded
    */
-  private CiRun acceptPostReceive(String repoId, String branch, String sha) {
+  private CiRun acceptPostReceive(String repoId, String branch, String sha, String eventId) {
     CiRun run = newRun(repoId, branch, sha);
     run.triggerType = CiTriggerType.POST_RECEIVE;
     run.configPath = CiConfigParser.CONFIG_PATH;
+    run.triggerEventId = eventId;
     // No step rows: they are written one at a time, terminal, as each step ends.
-    QuarkusTransaction.requiringNew()
-        .run(
-            () -> {
-              runs.persist(run);
-              runs.flush();
-              for (CiRun older : runs.listQueuedPushes(repoId, branch, run.id)) {
-                older.status = CiRunStatus.FAILED;
-                older.finishedAt = run.createdAt;
-                older.cancellationReason = DEDUPED;
-                older.supersededByRunId = run.id;
-              }
-            });
+    try {
+      QuarkusTransaction.requiringNew()
+          .run(
+              () -> {
+                runs.persist(run);
+                runs.flush();
+                for (CiRun older : runs.listQueuedPushes(repoId, branch, run.id)) {
+                  older.status = CiRunStatus.FAILED;
+                  older.finishedAt = run.createdAt;
+                  older.cancellationReason = DEDUPED;
+                  older.supersededByRunId = run.id;
+                }
+              });
+    } catch (RuntimeException e) {
+      if (eventId == null || !isUniqueViolation(e)) {
+        throw e;
+      }
+      // The flush is what threw, so nothing was superseded either — which is right: a push that was
+      // already recorded cannot cancel the queue a second time.
+      LOG.infof(
+          "Push %s already recorded a run for %s@%s — the first run stands", eventId, repoId, branch);
+      return null;
+    }
     return run;
   }
 

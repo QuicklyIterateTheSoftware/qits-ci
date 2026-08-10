@@ -241,9 +241,11 @@ unaffected, because dispatch filters and the wire never did.
 chain in the log rather than a set of rows distinguishable from coincidence only by their
 timestamps. It is envelope data, stamped by `QitsEventBus.publish` and never declared by an event
 class, and it is filled in from an explicit argument or from `CausationScope`, the ambient
-thread-local the dispatcher establishes around each listener call. A `BuildSuccessful` from a push
-is a root and carries null; when the trigger engine lands, an event-triggered run's will carry the
-event that triggered it. The rules that bite are in AGENTS.md under "The event bus" and, for the library itself, in
+thread-local the dispatcher establishes around each listener call. **Every run qits-ci records has a
+cause and says so**: an event-triggered run's `BuildSuccessful` carries the event that triggered it,
+and a push-triggered run's carries the `SCMPublishCommit` that announced the push — which is what
+makes release → push → build → deploy one chain rather than two halves with a root in the middle.
+A root is what is left for a run nothing announced. The rules that bite are in AGENTS.md under "The event bus" and, for the library itself, in
 qits-eventstream's own AGENTS.md.
 
 Both halves are **dark in `%dev` and `%test`** (`qits.eventstream.enabled`), the same posture the
@@ -616,10 +618,11 @@ was added: one class, nothing in the engine moved.
 However many groups of a `when:` match, matching is boolean rather than multiplicative. The
 guarantee that survives a redelivery and a race is a **database unique constraint** on
 `(trigger_event_id, repo_id, config_path)`: a second arrival of the same event — bus replays are
-legal, and the future catch-up feature will redeliver on purpose — is dropped as already-triggered
-and records no second run. Every run records why it exists (`triggerType`, `triggerEventId`,
-`triggerEventName`, `configPath` on `GET /ci/api/runs`), and a triggered run's own
-`BuildSuccessful` carries the triggering event as its `parentId`, so a release train is a chain in
+legal and catch-up redelivers on purpose — is dropped as already-triggered and records no second run.
+It covers pushes too, since a push run is named by the `SCMPublishCommit` that announced it: one
+announced push is one run. Every run records why it exists (`triggerType`, `triggerEventId`,
+`triggerEventName`, `configPath` on `GET /ci/api/runs`), and its own
+`BuildSuccessful` carries that event as its `parentId`, so a release train is a chain in
 the event log rather than a set of rows distinguishable from coincidence only by their timestamps.
 
 ### Triggering one by hand

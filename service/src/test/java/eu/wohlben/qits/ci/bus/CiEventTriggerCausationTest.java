@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.ci.control.FakeCiStepRunner;
 import eu.wohlben.qits.eventstream.control.EventDispatcher;
+import eu.wohlben.qits.eventstream.control.EventFrame;
 import eu.wohlben.qits.ci.githost.StubGitHost;
 import io.quarkus.test.common.TestResourceScope;
 import io.quarkus.test.common.WithTestResource;
@@ -37,6 +38,12 @@ import org.junit.jupiter.api.Test;
  * ci-run-worker}, where no {@code CausationScope} survives. So a {@code parentId} on that PUT equal
  * to the frame's id is the whole of Decision 7 proved end to end, and it is the platform's first
  * automatic causation edge.
+ *
+ * <p><b>Both trigger types draw that edge now, and the push is the half that used to be missing.</b>
+ * A push run published a <b>root</b> event while the intake was an HTTP POST with no event behind it
+ * — so a chain that ran release → push → build → deploy broke in the middle and nothing downstream
+ * could be traced past the build. A push is an {@code SCMPublishCommit} now, its id lands on the run
+ * row like any trigger's, and the assertion below is the same one, made twice on one run history.
  *
  * <p><b>The release fan-out is the same claim in its plural form</b>, which is why it lives here
  * rather than beside the seam test: N {@code SoftwareRelease} events under one parent proves that
@@ -115,16 +122,23 @@ public class CiEventTriggerCausationTest {
     String repoId = seedOrigin(upstream);
 
     // A push first: it makes the repository one qits-ci has heard of, which is what the shipped
-    // candidate source means by a candidate — and it is also the root-event half of the assertion.
-    announcePush(repoId, tipOf(repoId));
+    // candidate source means by a candidate — and it is the push half of the causation assertion.
+    String pushEventId = announcePush(repoId, tipOf(repoId));
     Map<String, Object> pushed = awaitRuns(repoId, 1).get(0);
     assertEquals("POST_RECEIVE", pushed.get("triggerType"));
     assertEquals(".config/qits/ci-post-receive.yml", pushed.get("configPath"));
-    assertEquals(null, pushed.get("triggerEventId"));
+    assertEquals(
+        pushEventId,
+        pushed.get("triggerEventId"),
+        "the SCMPublishCommit that announced the push is what caused this run");
 
     List<StubEventsServer.Put> afterPush = awaitPuts(1);
-    JsonNode rootEnvelope = json.readTree(afterPush.get(0).body());
-    assertTrue(rootEnvelope.get("parentId").isNull(), "a push is not caused by an event");
+    JsonNode pushEnvelope = json.readTree(afterPush.get(0).body());
+    assertEquals(
+        pushEventId,
+        pushEnvelope.get("parentId").asText(),
+        "a push run's BuildSuccessful is caused by the push event, which is what keeps"
+            + " release → push → build → deploy one chain");
 
     // Now the event. It arrives exactly as the socket would deliver it.
     String eventId = UUID.randomUUID().toString();
@@ -295,8 +309,11 @@ public class CiEventTriggerCausationTest {
 
   // --- plumbing, the same shape BuildSuccessfulPublishTest uses ---
 
-  private void announcePush(String repoId, String newSha) {
-    pushes.onFrame(ScmPushFrames.push(repoId, "main", ZERO_SHA, newSha));
+  /** @return the announcing event's id, which is what the run it records is caused by */
+  private String announcePush(String repoId, String newSha) {
+    EventFrame frame = ScmPushFrames.push(repoId, "main", ZERO_SHA, newSha);
+    pushes.onFrame(frame);
+    return frame.id();
   }
 
   /** A bare origin carrying both trigger types, so one repository exercises both paths. */

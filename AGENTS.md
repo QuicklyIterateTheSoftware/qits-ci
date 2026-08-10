@@ -487,11 +487,24 @@ it:
   decision — it skipped the POST — and is a fact on the event now, so a run engine skips the build
   while another consumer may ignore the flag entirely. Skipping records **no row**: nothing to
   supersede, nothing to cancel.
-- **A push run still carries a NULL `trigger_event_id`.** That column means "the domain event a
-  trigger file selected", which is the other path's; every push sharing a null there is what the
-  dedupe constraint is written around. Putting the frame's id on a push row would give push runs a
-  causation parent and put them in that constraint's key space — worth doing deliberately, not as a
-  side effect of changing transports. It is the one thing this migration left on the table.
+- **A push run carries the frame's id in `trigger_event_id`, and that is what closes the causation
+  chain.** `announceRun` reads it back off the row and `CausingEvent.parentOf` makes it the parent of
+  the run's `BuildSuccessful`, so release → push → commit event → CI run → deploy is **one** chain.
+  It used to be two halves with a root event in the middle, because the intake was an HTTP POST with
+  no event behind it to name. Carried as data on the row rather than in `CausationScope`, for the
+  reason the trigger engine already had: that scope is a `ThreadLocal` and the publish happens on
+  `ci-run-worker`, possibly after a restart.
+
+  **It puts push runs inside `unique (trigger_event_id, repo_id, config_path)`, which is a second
+  guarantee rather than a cost.** A push's config path is the constant `ci-post-receive.yml`, so the
+  event id is the whole of what tells one push row from the next — one announced push, one run. The
+  claim ledger settles a redelivery before the handler is called at all; the constraint is the net
+  underneath, on ci's own datasource where the claim is not. A duplicate is **settled**:
+  `acceptPostReceive` catches the violation, returns null, nothing is enqueued and nothing is
+  superseded (the flush threw before the supersede loop, which is right — a push already recorded
+  must not cancel the queue a second time). Throwing would leave a push owed forever over a run that
+  already exists. `NULL` there now means "nothing announced this", which is `CiRunService.execute`,
+  the synchronous test entry, and nothing in production.
 - **Its failure policy is the usual pair**: a payload that will not bind and an identifier
   `CiIdentifiers` refuses are poison (WARN, settled — what was a 400 when there was a caller to
   answer), and anything `onPostReceive` throws is left to throw.
@@ -760,10 +773,12 @@ follows is what biting it feels like.
 - **The dedupe is a database constraint and the `NULL` behaviour is load-bearing.** `unique
   (trigger_event_id, repo_id, config_path)` is the at-most-one-run-per-(event, trigger file)
   guarantee, and it has to be a constraint rather than a check because what it survives is a race and
-  a restart. **Every post-receive run has a null `trigger_event_id`** with the same repo and the same
-  config path as the last one, so a database treating those as duplicates would break the second push
-  to every repository — SQL says rows collide only when all corresponding values are non-null and
-  equal, and `CiEventTriggerDedupeTest` pins that the engine agrees rather than trusting it — plain
+  a restart. **It covers pushes too**, since a push run is named by the `SCMPublishCommit` that
+  announced it — one announced push, one run. What carries a null there is a run nothing announced
+  (`CiRunService.execute`, the test entry), and a database treating two nulls as duplicates would
+  make the second such row fail to insert — SQL says rows collide only when all corresponding values
+  are non-null and equal, and `CiEventTriggerDedupeTest` pins that the database agrees rather than
+  trusting it — plain
   `unique`, never postgres' `nulls not distinct`, which is exactly what must not be asked for. The
   constraint
   kills replays, not descendants, which is why it is **no loop guard**: see the footgun in
@@ -772,9 +787,9 @@ follows is what biting it feels like.
   **It fires at accept now**, since the run row is written by `onEventTrigger` before it returns
   rather than by the worker later. Nothing about the semantics moved with it: a redelivery still hits
   the constraint and is still dropped as already-triggered, just on `ci-trigger-worker` instead of
-  `ci-run-worker`, and before a queue slot is spent rather than after. The `NULL` behaviour is
-  untouched — post-receive rows still carry a null `trigger_event_id`, they are just inserted a few
-  milliseconds earlier in the life of a push.
+  `ci-run-worker`, and before a queue slot is spent rather than after. The push path reaches the same
+  constraint on the bus's dispatch thread, in `acceptPostReceive`, and answers a duplicate the same
+  way: null, and an INFO saying the first run stands.
 
   **The durable claim sits above it and neither replaces the other.** A `consumed_event` row makes
   one event reach the engine at most once, so the constraint fires far less often than it used to —

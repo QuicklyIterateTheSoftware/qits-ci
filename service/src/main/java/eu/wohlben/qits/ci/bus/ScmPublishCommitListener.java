@@ -22,15 +22,25 @@ import org.jboss.logging.Logger;
  * existed for. The same push is now a durable event through the qits-eventstream outbox, so a
  * consumer that was away reads it back off the log.
  *
- * <p><b>The effect is unchanged, deliberately.</b> {@link CiRunService#onPostReceive} is called with
+ * <p><b>The build is unchanged, deliberately.</b> {@link CiRunService#onPostReceive} is called with
  * the same four values and does the same three things: validate, insert a {@code QUEUED} row, and
- * supersede any older queued push for the same {@code (repoId, branch)}. The run row still carries
- * {@code POST_RECEIVE} as its trigger type and still carries a <b>null</b> {@code trigger_event_id}
- * — the column means "the domain event a trigger file selected", which is the other path's, and
- * every push sharing a null there is what the dedupe constraint is written around ({@code
- * CiEventTriggerDedupeTest}). A push carrying the frame's id would be a different feature: it would
- * put push runs into that constraint's key space and give them a causation parent, which is worth
- * doing on purpose and not as a side effect of changing transports.
+ * supersede any older queued push for the same {@code (repoId, branch)}. The row still carries
+ * {@code POST_RECEIVE} as its trigger type.
+ *
+ * <h2>The fifth value is the frame's id, and it closes the causation chain</h2>
+ *
+ * <p>It lands on {@code ci_run.trigger_event_id}, which {@code announceRun} reads back minutes later
+ * to stamp the run's {@code BuildSuccessful} through {@code CausingEvent.parentOf}. Without it a
+ * push run published a <b>root</b> event and the platform's chain broke in the middle: a release
+ * causes a push, the push causes this event, and the deploy that follows the build could not be
+ * traced back past it. It is carried as data on the row rather than in {@code CausationScope},
+ * because that scope is a {@code ThreadLocal} and the publish happens on {@code ci-run-worker},
+ * possibly after a restart — the same reason, and the same mechanism, the trigger engine uses.
+ *
+ * <p>It also puts push runs inside the unique constraint on {@code (trigger_event_id, repo_id,
+ * config_path)}, which is a second guarantee rather than a cost: one announced push is one run, and
+ * a duplicate is settled rather than built twice. The claim ledger already makes that unreachable
+ * through this listener; the constraint sits underneath it on ci's own datasource.
  *
  * <h2>{@code suppressCi} is honoured HERE, because nobody honours it earlier any more</h2>
  *
@@ -108,7 +118,13 @@ public class ScmPublishCommitListener implements QitsDurableEventListener {
       return;
     }
     try {
-      runService.onPostReceive(push.repoId(), push.branch(), push.oldSha(), push.sha());
+      // The frame's id, never the payload's: SCMPublishCommit's own eventId is excluded from the
+      // canonical payload by CanonicalJson's mix-in, so the instance bound above carries a freshly
+      // minted one that qits-events never stored. Identity travels in the envelope, and the envelope
+      // is the frame. Nor its parentId — the arriving event is what causes this run; its own parent
+      // is the previous hop's business, which is the same rule CiEventTriggerListener follows.
+      runService.onPostReceive(
+          push.repoId(), push.branch(), push.oldSha(), push.sha(), frame.id());
     } catch (BadRequestException refused) {
       // Poison: the identifiers are what they are on every offer, so no later attempt could accept
       // this push. Loud, because a git host publishing a ref name qits-ci refuses is a fact

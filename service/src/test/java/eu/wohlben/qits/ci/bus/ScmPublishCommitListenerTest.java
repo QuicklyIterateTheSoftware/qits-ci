@@ -51,11 +51,12 @@ public class ScmPublishCommitListenerTest {
   @Inject ScmPublishCommitListener listener;
 
   @Test
-  public void aPushBecomesARun() throws Exception {
+  public void aPushBecomesARunCausedByTheEventThatAnnouncedIt() throws Exception {
     String repoId = seedOrigin();
     String sha = pushBranchWithConfig(repoId, "scm-green", CONFIG);
+    EventFrame frame = ScmPushFrames.push(repoId, "scm-green", ScmPushFrames.ZERO_SHA, sha);
 
-    listener.onFrame(ScmPushFrames.push(repoId, "scm-green", ScmPushFrames.ZERO_SHA, sha));
+    listener.onFrame(frame);
 
     Map<String, Object> run = awaitTerminalRun(repoId);
     assertEquals("SUCCESS", run.get("status"));
@@ -65,6 +66,38 @@ public class ScmPublishCommitListenerTest {
         "POST_RECEIVE",
         run.get("triggerType"),
         "a push is still a push; only the transport under it changed");
+    // The row is where causation waits for the run worker: CausationScope is a ThreadLocal and the
+    // publish happens on another thread, minutes later, possibly after a restart. What that publish
+    // is stamped with is asserted end to end in CiEventTriggerCausationTest.
+    assertEquals(
+        frame.id(),
+        run.get("triggerEventId"),
+        "the announcing event is the run's cause, and the row is how it survives the hand-off");
+  }
+
+  /**
+   * One announced push is one run, whatever mix of live frame and catch-up row produced the
+   * arrivals. The claim ledger settles this before the listener is called twice at all — {@code
+   * DurableBusConsumptionTest} asserts that half — so what is under test here is the net underneath
+   * it: the unique constraint on {@code (trigger_event_id, repo_id, config_path)}, which lives on
+   * ci's own datasource where the claim does not.
+   *
+   * <p><b>The duplicate is settled, not thrown.</b> A throw would leave the push owed forever over a
+   * run that already exists, and the second offer really is handled: the answer is "this is already
+   * recorded".
+   */
+  @Test
+  public void oneAnnouncedPushIsOneRunEvenIfTheHandlerRunsTwice() throws Exception {
+    String repoId = seedOrigin();
+    String sha = pushBranchWithConfig(repoId, "scm-once", CONFIG);
+    EventFrame frame = ScmPushFrames.push(repoId, "scm-once", ScmPushFrames.ZERO_SHA, sha);
+
+    listener.onFrame(frame);
+    listener.onFrame(frame);
+
+    Map<String, Object> run = awaitTerminalRun(repoId);
+    assertEquals("SUCCESS", run.get("status"));
+    assertEquals(1, listRuns(repoId).size(), "the second delivery must not build the commit again");
   }
 
   /**
