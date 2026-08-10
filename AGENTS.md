@@ -33,7 +33,7 @@ second rule of the same kind, and three things follow:
   when they are missing the failure lands at *runtime, in the binary*, while the JVM suite stays
   green. Prefer what is already in the image — `ProcessBuilder` over a process library (which is why
   `CiProcess` shells out rather than links a docker client) and `java.net.http` over a REST client
-  library (which is why every client in `service/…/githost` and `notify` is hand-rolled), and
+  library (which is why every client in `service/…/githost` is hand-rolled), and
   `java.lang.foreign` over JNA. If a native build needs configuration to pass, that configuration is
   part of the change. The repo's one explicit registration is `EventWireReflection` in
   `service/…/bus/`, and it is worth reading as the worked example of this bullet: the types are
@@ -59,18 +59,26 @@ package:
   answering — see "Schema changes". Framework-free in the sense
   that matters: no JAX-RS, no websockets. Entities are Panache; mappers are MapStruct
   `@Mapper(componentModel = "jakarta")`.
-- `service/` — `api` (the JAX-RS routes and the `ExceptionMapper`), `bus`, `githost`, `notify`, and
+- `service/` — `api` (the JAX-RS routes and the `ExceptionMapper`), `bus`, `githost` and
   `daemonhost` (the ci-daemon control socket, the launch registry, the container
   launcher, the live relay and `CiDaemonStepRunner` — the sole implementation of the step seam). It
   read "`api` only" until the daemon control plane landed; the transport lives beside the API because
   it needs a web stack, which is the same line that put `api` here rather than in `ci/`, and it is
   where qits-workspaces keeps its own `daemonhost` for the same reason. `ci/` keeps the
   `CiStepRunner` seam and the orchestrator and gains no web dependency — the step runner is in
-  `service/` because it *is* the transport. Three more packages of the same kind: `notify`, the deploy
-  announcement; `bus`, both ends of the event bus (below); and `githost`, the two clients for the git
+  `service/` because it *is* the transport. Two more packages of the same kind: `bus`, both ends of
+  the event bus (below); and `githost`, the two clients for the git
   host — the pipeline-config reads and the repository listing (both below). Every one of them is an *adapter* for a seam that lives in
   `ci/control`; that is what the package split says — and every `java.net.http` client living here
   rather than in `ci/` is that same rule applied.
+
+  There was a third, `notify`, holding the deploy announcement — one POST per green run to
+  qits-platform-deployments' intake, plus the qits-idp credential it carried. It is **gone**, and so
+  is its `PdNotifier` port in `ci/control`: the deployer subscribes to `BuildSuccessful` durably now,
+  so what used to be an outbound HTTP call of ci's is an ordinary consumption of the deployer's. The
+  intake it posted to still exists as the manual/recovery door; nothing here calls it. That also
+  leaves this service presenting a credential to **nobody** — `quarkus-oidc-client` left the pom with
+  the package.
 - `ci-daemon-protocol/` — the vendored wire contract (below). Its package is
   `eu.wohlben.qits.cidaemon.protocol`, deliberately not under `eu.wohlben.qits.ci`: it is a copy of
   another repo's module and its package must stay byte-identical with the original.
@@ -227,7 +235,7 @@ name. Four things follow, and each of them replaced something:
   must never be recorded against one commit with a trigger file from another. A 404 on the directory
   costs one more read (the root tree) to tell "declares nothing" from "could not ask".
 - **`ci/` stays free of `java.net.http`.** The port is `CiConfigSource` in `ci/control`, the client
-  is in `service/`, exactly as `PdNotifier` and `GitHostRepoListing` are. That split is also why the
+  is in `service/`, exactly as `GitHostRepoListing` and `DaemonReleaseLog` are. That split is also why the
   logging differs by path: the push path WARNs (a repository and a branch existed a moment ago),
   the trigger listing stays at DEBUG (it asks every known repository on every frame, and a deleted
   one is simply not a candidate — a warning per green build forever is how a log stops being read).
@@ -483,19 +491,21 @@ repeatedly. The scheduler stays *on*: the outbox sweeper is scheduled too and ha
 disabled. A test that wants a sweep calls `CatchupSweeper.catchUp()` itself, which is what the
 eventstream suite does.
 
-**The publish hook hangs off a seam, and it is a *second* seam beside `PdNotifier` rather than a
-widening of it.** `RunAnnouncer` (in `ci/control`, implemented in `service/`) is what keeps the `ci`
-module free of the bus — the same reason the deploy notifier is arranged that way — but the two
-ports stay separate because they mean different things: qits-platform-deployments is asked to
-deploy, the bus is told a build passed. The one difference in the signature is `finishedAt`, which
-the event needs and the deployer does not,
+**The publish hook hangs off a seam, and it is now the ONLY thing a green run announces.**
+`RunAnnouncer` (in `ci/control`, implemented in `service/`) is what keeps the `ci` module free of the
+bus. It used to be the second of two — `PdNotifier` was beside it, a direct POST asking
+qits-platform-deployments to deploy, and the two were separate ports because a request to one named
+service and a statement to the platform are different things. The deployer consumes `BuildSuccessful`
+durably now, so the request became a consumption and the port retired; the statement is what is left,
+and the shape of it did not change. `finishedAt` is on the signature because an event carries when it
+happened,
 and it comes back out of `finishRun` rather than off the `CiRun` instance: that method mutates a
 freshly loaded entity in its own transaction, so the caller's copy never sees the value. **A null
 `occurredAt` is a 400 from qits-events on every green build**, which is why the seam test asserts
 the timestamp rather than only the coordinates.
 
-**There are now two publishing seams and they are separate for the same reason `PdNotifier` and
-`RunAnnouncer` are.** `ReleaseAnnouncer` (`ci/control`, implemented by
+**There are two publishing seams and they are separate because they say different things.**
+`ReleaseAnnouncer` (`ci/control`, implemented by
 `service/…/bus/SoftwareReleaseAnnouncer`) announces one published *artifact*; `RunAnnouncer`
 announces a run that passed. One green run can go down both, and a release pipeline's does — first
 `BuildSuccessful`, then one `SoftwareRelease` per declared artifact. Folding them would put "the
@@ -742,7 +752,7 @@ follows is what biting it feels like.
 
   Four things about the HTTP half, which is `service/…/githost/HttpGitHostRepoListing` and is in
   `service/` because **`ci/` stays free of `java.net.http`** — the rule `DaemonReleaseLog` states and
-  `PdNotifier` set:
+  `CiConfigSource` set:
 
   - **The url is derived, never configured.** It is the git host's own base plus the same `/git`
     segment `HttpGitConfigSource` reads content under, so the listing and the config read move
@@ -933,9 +943,12 @@ and a deployment that turns it on with no audience configured fails at **startup
 accepting tokens meant for another service. Which endpoints call the guard, and what a new one owes,
 is under "Addressing"; the deployment steps are in `README.md`.
 
-Both directions are switched independently: this service also *asks* qits-idp for a token to present
-to qits-platform-deployments (`notify/PdBearer`, `quarkus.oidc-client.client-enabled`, also shipped
-off). Demanding one and presenting one are separate rollouts.
+**This service demands a credential and presents none, and the asymmetry is now structural.** It
+used to ask qits-idp for a token of its own to present to qits-platform-deployments
+(`notify/PdBearer`, `quarkus.oidc-client.client-enabled`, shipped off) — the deploy announcement was
+the one outbound call that carried one. That call is retired and `quarkus-oidc-client` left the pom
+with it, so there is no outbound identity here to configure, switch on, or forget to rotate. Adding
+one back is adding an extension, not flipping a key.
 
 **`MachineGuardTest` blanks `qits.auth.forward.dev-user` in its profile, and that is not tidiness.**
 Under `%test` the forward-auth mechanism answers every request carrying no `X-Qits-User` with a

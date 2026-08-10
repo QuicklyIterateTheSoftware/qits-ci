@@ -37,7 +37,8 @@ import org.jboss.logging.Logger;
  * one. The evaluation it precedes then reads the git host per candidate, so the listing is the
  * cheapest part of the work and must never be the slowest: {@link #CONNECT_TIMEOUT} 2s and {@link
  * #REQUEST_TIMEOUT} 3s, after which the known set is a correct answer and waiting longer buys
- * nothing. Same 2s connect bound {@code PdBuildNotifier} and {@code EventsDaemonReleaseLog} carry.
+ * nothing. Same 2s connect bound {@code HttpGitConfigSource} and {@code EventsDaemonReleaseLog}
+ * carry.
  *
  * <h2>The cache</h2>
  *
@@ -47,10 +48,12 @@ import org.jboss.logging.Logger;
  * read is cached; a failure is retried by the next event, which is what keeps a git host that came
  * back up from staying invisible for a window.
  *
- * <p>An <b>instance</b> {@code HttpClient}, never a static one — the same native-image constraint
- * {@code PdBuildNotifier} documents: a static client is built at image-build time and native-image
- * refuses the heap it lands in. Reading the body is {@code readTree} and a walk, so nothing here
- * needs reflection registering either.
+ * <p><b>An instance {@code HttpClient}, never a static one</b> — and this is where that constraint is
+ * written down, since the class that used to hold it ({@code notify/PdBuildNotifier}) went with the
+ * direct deploy POST. A static client is created at image-build time and native-image refuses the
+ * heap it lands in; {@code @ApplicationScoped} keeps it one client per process either way. Every
+ * hand-rolled client here follows it. Reading the body is {@code readTree} and a walk, so nothing
+ * here needs reflection registering either.
  */
 @ApplicationScoped
 public class HttpGitHostRepoListing implements GitHostRepoListing {

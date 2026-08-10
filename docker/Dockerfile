@@ -65,14 +65,10 @@
 #                               repo-controlled code — takes any caller on the network. true demands
 #                               a qits-idp bearer, and needs a reachable idp that grants the git
 #                               host's client a project claim.
-#   QUARKUS_OIDC_CLIENT_CLIENT_ENABLED / QUARKUS_OIDC_CLIENT_CREDENTIALS_SECRET
-#                               the other direction: present a bearer to qits-platform-deployments.
-#                               A separate switch, so either end of the platform can be turned on
-#                               first.
-#   QITS_PLATFORM_DEPLOYMENTS_INTAKE_URL
-#                               where a green run is announced — the whole url, path included. Its
-#                               qits-net default is right on that network; a wrong value is silent,
-#                               because the POST is fire-and-forget.
+#   QITS_EVENTS_URL             where a green run is announced. There is no deployer address here
+#                               any more: qits-ci publishes BuildSuccessful and
+#                               qits-platform-deployments subscribes, so an unset or wrong value
+#                               costs every deployment on the platform, not one call.
 #
 # See README.md, "Deploying it", for the whole surface.
 #

@@ -7,9 +7,9 @@ package eu.wohlben.qits.ci.control;
  * read for its reported capability version, then reaped.
  *
  * <p>An interface rather than a call so {@code ci} stays free of the docker vocabulary and the web
- * stack that launching a container needs -- the same reason {@link PdNotifier} is a port here and
- * an HTTP call in {@code service}. <b>Zero implementations is a supported configuration</b>, the
- * {@link PdNotifier} precedent: this port lands before its sole production implementation does
+ * stack that launching a container needs -- the same reason {@link RunAnnouncer} is a port here and
+ * a bus client in {@code service}. <b>Zero implementations is a supported configuration</b>, the
+ * same precedent: this port lands before its sole production implementation does
  * ({@code service/…/daemonhost/CiDaemonContainerProbe}), and a deployment with no implementation
  * probes nothing -- every candidate stays {@code UNPROVEN} forever and the ladder never rises above
  * the configured pin, which is exactly the status quo this feature must not disturb before it is

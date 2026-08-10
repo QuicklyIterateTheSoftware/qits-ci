@@ -15,11 +15,15 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The {@link RunAnnouncer} seam's semantics — the event-bus sibling of {@link PdNotifySeamTest}, and
- * separate from it because the ports are separate: one green run produces exactly one announcement
- * on each, and neither is a fallback for the other.
+ * The {@link RunAnnouncer} seam's semantics: exactly one announcement per green run, carrying the
+ * run's own coordinates, and <b>nothing</b> for a red run or a config error.
  *
- * <p>The assertion this one makes that its sibling cannot is {@code finishedAt}: the wire contract
+ * <p>It is the whole of what a green run announces. There was a second port beside it —
+ * {@code PdNotifier}, a direct POST to qits-platform-deployments' intake — and this file used to say
+ * so; the deployer subscribes to {@code BuildSuccessful} durably now, so the deploy hangs off this
+ * announcement and there is nothing left to be a sibling of.
+ *
+ * <p>The assertion worth naming is {@code finishedAt}: the wire contract
  * requires an {@code occurredAt} on every published event, so a null here would be a 400 from
  * qits-events on every single green build, discovered in a deployment rather than in a suite. It has
  * to be the timestamp on the run's own row — what the announcement says happened is the run
@@ -97,5 +101,15 @@ public class RunAnnounceSeamTest extends CiTestSupport {
     service.execute(repoId, "main", sha);
 
     assertEquals(List.of(), announcer.announced());
+  }
+
+  @Test
+  public void anEmptyPipelineIsStillAGreenRunAndAnnounces() {
+    // The trivially green run: config present, zero steps. It records SUCCESS, so it announces —
+    // and what a subscriber does about a build that published no image is the subscriber's answer.
+    seedConfig("steps: []\n");
+    service.execute(repoId, "main", sha);
+
+    assertEquals(1, announcer.announced().size());
   }
 }

@@ -145,9 +145,6 @@ public class CiRunService {
   @Inject CiRunRepository runs;
   @Inject CiStepRepository steps;
 
-  /** The green-run announcement port (see {@link PdNotifier}); zero implementations is fine. */
-  @Inject Instance<PdNotifier> pdNotifiers;
-
   /** The green-run event port (see {@link RunAnnouncer}); zero implementations is fine. */
   @Inject Instance<RunAnnouncer> runAnnouncers;
 
@@ -716,33 +713,23 @@ public class CiRunService {
     boolean red = failed || cancelled.contains(run.id);
     Instant finishedAt = finishRun(run.id, red ? CiRunStatus.FAILED : CiRunStatus.SUCCESS);
     if (!red) {
-      notifyPd(run);
       announceRun(run, finishedAt);
       announceRelease(run, finishedAt, release);
     }
   }
 
   /**
-   * Announces a green run through the {@link PdNotifier} port — after the terminal row is
-   * committed, so a listener that reads the run back sees {@code SUCCESS}. Absent implementations
-   * are a supported configuration (a deployment with no deployer), and a throwing one must not turn
-   * a green run red: the run <em>is</em> green, delivery is somebody else's outcome.
-   */
-  private void notifyPd(CiRun run) {
-    for (PdNotifier notifier : pdNotifiers) {
-      try {
-        notifier.onRunSucceeded(run.id, run.repoId, run.branch, run.commitSha);
-      } catch (RuntimeException e) {
-        LOG.warnf(e, "Deploy announcement for run %s failed", run.id);
-      }
-    }
-  }
-
-  /**
    * Announces a green run through the {@link RunAnnouncer} port — after the terminal row is
-   * committed, for the same reason {@link #notifyPd} is, and carrying the {@code finishedAt} that
-   * was just written rather than a fresh {@code Instant.now()}: the two are minutes apart in a slow
-   * transition and the event log wants the one on the row.
+   * committed, so a consumer that reads the run back sees {@code SUCCESS}, and carrying the {@code
+   * finishedAt} that was just written rather than a fresh {@code Instant.now()}: the two are minutes
+   * apart in a slow transition and the event log wants the one on the row.
+   *
+   * <p><b>This is the only announcement a green run makes about itself</b>, and it used to be one of
+   * two. The other was a direct POST to qits-platform-deployments' intake, sent from here on every
+   * green run; the deployer now subscribes to {@code BuildSuccessful} on the bus durably and calls
+   * its own announce path, so the deploy follows from this event instead of from a second call. The
+   * intake is still there and is still the manual door a replay knocks on — what went is qits-ci
+   * knocking on it.
    *
    * <p>{@code finishedAt} comes back from {@link #finishRun} instead of being read off {@code run}
    * because it is not there — {@link #finishRun} mutates a freshly loaded entity in its own

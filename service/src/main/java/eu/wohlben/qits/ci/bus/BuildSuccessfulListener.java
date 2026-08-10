@@ -15,10 +15,13 @@ import org.jboss.logging.Logger;
  * records and broadcasts it, and qits-ci receives its own announcement back. That round trip is the
  * acceptance test for the whole bus, and this bean is where it becomes visible.
  *
- * <p><b>An INFO log is the whole behaviour, on purpose.</b> Nothing yet hangs off a green build
- * arriving this way — the deployment path is still {@code PdBuildNotifier}'s direct POST — so
- * anything more here would be a second, competing route to the same outcome. When a real consumer
- * appears, it is another bean beside this one and this one stays as the proof the stream is live.
+ * <p><b>An INFO log is the whole behaviour, on purpose</b> — and the reason has changed under it,
+ * which is worth stating so nobody grows this bean by accident. It used to read "nothing hangs off a
+ * green build arriving this way, the deployment path is still the direct POST". The direct POST is
+ * gone: qits-platform-deployments consumes this very event durably and deploys from it, so a green
+ * build arriving this way is now how the platform deploys at all. That consumer is in <b>that</b>
+ * repository, not this one. Here the line stays a line, because a second route to the same outcome
+ * on this side would be exactly the duplication the retirement removed.
  *
  * <p><b>Durable, so it is now proof of two things rather than one.</b> It used to be a {@code
  * QitsEventListener<BuildSuccessful>} — the typed, live-only seam — which meant the round trip it

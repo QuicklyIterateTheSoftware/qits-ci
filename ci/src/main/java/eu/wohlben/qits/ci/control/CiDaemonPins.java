@@ -54,7 +54,7 @@ import org.jboss.logging.Logger;
  * launch a probe container, and the two containers raced docker's own container-name uniqueness.
  *
  * <p><b>Zero {@link DaemonProbe} implementations is a supported configuration</b>, the {@link
- * PdNotifier} precedent: with none wired, every probe answers {@code UNKNOWN} and the ladder never
+ * RunAnnouncer} precedent: with none wired, every probe answers {@code UNKNOWN} and the ladder never
  * rises above the configured pin -- correct, since nothing exists yet that could have proven a
  * candidate.
  */

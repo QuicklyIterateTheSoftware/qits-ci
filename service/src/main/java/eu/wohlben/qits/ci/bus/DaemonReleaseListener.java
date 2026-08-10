@@ -120,7 +120,7 @@ public class DaemonReleaseListener implements QitsDurableEventListener {
 
   @Inject CiDaemonPins pins;
 
-  /** Zero implementations is supported (the {@code PdNotifier} precedent) -- startup discovery
+  /** Zero implementations is supported (the {@code RunAnnouncer} precedent) -- startup discovery
    *  simply never reconciles, and the durable table is whatever a live event already adopted. */
   @Inject Instance<DaemonReleaseLog> releaseLog;
 

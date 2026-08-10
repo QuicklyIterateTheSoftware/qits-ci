@@ -104,8 +104,7 @@ rest of qits it reaches over a URL it is configured with:
 | out | where the git host answers: ci reads a commit's pipeline config off its content routes (`<base>/git/<repoId>/blob/<rev>/<path>` and `…/tree/<rev>[/<path>]`) and its candidate listing off `GET <base>/git` → `{"repositories": [...]}` | `qits.ci.git-host-url` |
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + the pin ladder's answer (`qits.ci.daemon-version` is the ladder's bottom rung, never demoted) |
-| out | `POST /platform-deployments/api/events/build-succeeded` — `{runId, repoId, branch, commitSha}`, one per **green** run (the `PdNotifier` seam) | `qits.platform.deployments.intake-url` (`QITS_PLATFORM_DEPLOYMENTS_INTAKE_URL`); the call stays on qits-net. `PdBearer` attaches a qits-idp token with `aud=qits-platform-deployments` when `quarkus.oidc-client.client-enabled=true`, and sends the POST bare otherwise — which is the shipped default |
-| out | `PUT /events/api/events/{uuid}` — one `BuildSuccessful` per **green** run, idempotent (the `RunAnnouncer` seam) | `qits.events.url`, `qits.eventstream.enabled` |
+| out | `PUT /events/api/events/{uuid}` — one `BuildSuccessful` per **green** run, idempotent (the `RunAnnouncer` seam), and the **only** thing a green run announces | `qits.events.url`, `qits.eventstream.enabled` |
 | out | the same route — one `SoftwareRelease` per artifact a green **release pipeline** declared (the `ReleaseAnnouncer` seam) | the same two keys |
 | out | `ws://…/events/stream` — dialled out and held open, carrying what qits-events broadcasts back | the same two keys; the address is derived, never configured twice |
 | out | the registry a publishing step pushes to, as `$QITS_REGISTRY` and `$QITS_IMAGE_REPOSITORY` in **every** step container — dialled by the *host's docker daemon*, never by this process | `qits.artifacts.registry-host`, `qits.artifacts.image-repository` |
@@ -159,31 +158,39 @@ only `qits.ci.intake-url` on the sending side changes. That call is **fire-and-f
 delivery failures at debug, so if the two ends disagree about the intake path nothing errors
 anywhere and CI simply never runs. Both ends are pinned to `/ci/api/events/post-receive`.
 
-The same arrangement repeats one hop down: a green run is announced to
+**The arrangement does NOT repeat one hop down, and it used to.** A green run was announced to
 [qits-platform-deployments](https://github.com/QuicklyIterateTheSoftware/qits-platform-deployments)'s
-`/platform-deployments/api/events/build-succeeded` by `service/…/notify/PdBuildNotifier` behind the
-`PdNotifier` seam in `ci/control` — so both ends pin that literal too. Only `SUCCESS` announces (a
-red run, a `CONFIG_ERROR` and a discarded run deploy nothing).
+`/platform-deployments/api/events/build-succeeded` by `service/…/notify/PdBuildNotifier`, behind a
+`PdNotifier` seam in `ci/control`, on every green run. **That whole idiom is retired** — the
+notifier, the `PdBearer` credential it carried, the `qits.platform.deployments.intake-url` key and
+the port itself.
 
-That call **never blocks the run worker, and it is retried**. It used to be one POST whose failure
+What replaced it is the pair below: qits-ci publishes `BuildSuccessful` through the eventstream
+outbox, and qits-platform-deployments consumes that event with a **durable** subscriber which calls
+its own announce path. Both halves are durable where the POST was fire-and-forget — an unreachable
+qits-events leaves the event in this process's outbox, and a disconnected or restarting deployer
+catches up from the log — so a deployment is delayed by an outage rather than lost to one.
+
+That is worth the whole paragraph because the loss was measured. The call was one POST whose failure
 was swallowed at debug, and a bootstrap paid for it: qits-platform-idp was redeployed minutes before
 a green run finished, the single attempt hit the refusal window that left behind, and the deployment
-never happened with nothing anywhere saying so. A failed attempt — no connection, or any non-2xx —
-is now retried after 5s, 15s, 45s and 2m, with the machine token fetched again each time so a retry
-after an idp cutover presents a fresh one. Giving up is a **warning** naming the repository, the
-branch and the last failure. So a deployment with no deployer is still a supported configuration,
-but it costs one warning per green run rather than one invisible debug line, and a refusal that
-arrives after the receiver already acted deploys the same commit twice — the cheaper of the two
-errors. That receiver replaced qits-cd, and the key replaced with it:
-`qits.platform.deployments.intake-url`, overridden as `QITS_PLATFORM_DEPLOYMENTS_INTAKE_URL`. There
-is no alias for the old `qits.cd.intake-url` — a deployment still setting `QITS_CD_INTAKE_URL`
-silently gets the default.
+never happened with nothing anywhere saying so. The first answer was bounded retries in the notifier
+— 5s, 15s, 45s, 2m, then a warning — which narrowed the window and kept the shape: still
+at-most-once past three minutes, still a POST that only this process knew it owed. The bus pair has
+no such window, and the retries retired with the notifier that grew them.
 
-**A green run is also announced to nobody in particular.** The same transition publishes a
+**The deployer's HTTP intake stays.** It is the manual and recovery door, which a bootstrap replay
+knocks on by hand; what went away is qits-ci knocking on it per green run. So this repository
+configures no address for the deployer at all, and presents a credential to nobody — the
+`quarkus.oidc-client` extension went with `PdBearer`.
+
+**A green run is announced to nobody in particular.** The transition publishes a
 `BuildSuccessful` event to [qits-events](https://github.com/QuicklyIterateTheSoftware/qits-events),
-through a second seam in `ci/control` — `RunAnnouncer`, implemented by `service/…/bus/BuildSuccessfulAnnouncer`
-— and the two are separate ports on purpose: the deploy call is a *request* addressed to one service
-that is about to act, this is a *statement* anything on the platform may subscribe to. It is a
+through the `RunAnnouncer` seam in `ci/control`, implemented by
+`service/…/bus/BuildSuccessfulAnnouncer`. Only `SUCCESS` announces — a red run, a `CONFIG_ERROR` and
+a discarded run announce nothing. It is a *statement* anything on the platform may subscribe to
+rather than a request addressed to one service, which is exactly why the deployer could move behind
+it without qits-ci learning anything about deploying. It is a
 `PUT` at a UUID the publisher picks, so a retry is a replay rather than a duplicate; a delivery that
 does not land goes to an outbox in this process and is retried on a schedule; and it carries the
 run's own `finishedAt` as the event's `occurredAt`, plus `imageDigest` — which qits-ci never has,
@@ -313,7 +320,7 @@ A condition over the *event* is what `when:` already is.
 
 **Publishing an image is not a feature here, it is a step.** Steps are sequential, so a push runs
 only after the build steps went green; a failed push is a failed step is a **failed run**, so the
-deploy announcement (`SUCCESS` only) keeps implying the image exists. The tag is the whole contract
+`BuildSuccessful` announcement (`SUCCESS` only) keeps implying the image exists. The tag is the whole contract
 with qits-platform-deployments, which pulls `<registry>/<repository>/<application>:<sha>` where
 `<application>` is by convention the repository's name — the script must spell exactly that, and the
 only enforcement is the convention plus the deployer's `IMAGE_MISSING` telling on a mismatch.
@@ -829,14 +836,15 @@ a repository's own listing will show.
   above still applies to what arrives.
 - Keep the run **read** surface behind the deployment's auth policy. It is not machine-guarded, and
   it returns build logs.
-- Point `QITS_PLATFORM_DEPLOYMENTS_INTAKE_URL` (`qits.platform.deployments.intake-url`) at
-  qits-platform-deployments if it is anywhere but the qits-net alias the default assumes. The whole
-  url, path included — the notifier POSTs it verbatim. Getting it wrong costs the deployment and
-  says so: five attempts over about three minutes, then one **warning** per green run naming the
-  repository, the branch and the last failure. It used to be silent, which is how a lost
-  announcement went unnoticed for an hour. The key was
-  `qits.cd.intake-url` while the receiver was qits-cd; there is no alias, so a deployment carrying
-  the old variable is setting nothing.
+- **Configure nothing for the deployer, and know that this is a change.** A deployment used to point
+  `QITS_PLATFORM_DEPLOYMENTS_INTAKE_URL` (`qits.platform.deployments.intake-url`) at
+  qits-platform-deployments and hand this service qits-idp client credentials
+  (`QUARKUS_OIDC_CLIENT_CLIENT_ENABLED`, `QUARKUS_OIDC_CLIENT_CREDENTIALS_SECRET`) so the POST could
+  carry a bearer. **All three are gone, and none of them is aliased** — a deployment still setting
+  any of them is setting nothing. A green run now announces itself on the bus and
+  qits-platform-deployments subscribes, so what makes a deployment happen is `QITS_EVENTS_URL` and
+  `QITS_EVENTSTREAM_ENABLED` below, plus a deployer that is subscribing. The deployer's HTTP intake
+  still exists for a manual replay; nothing here calls it.
 - Set `qits.artifacts.registry-host` / `qits.artifacts.image-repository` to qits-artifacts' registry
   as reachable **from the docker host** — the daemon on the far side of the mounted socket is what
   resolves that name and performs the push, not this process and not the step's CLI. While the

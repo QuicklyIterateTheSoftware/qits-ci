@@ -4,28 +4,30 @@ import java.time.Instant;
 
 /**
  * The port {@link CiRunService} announces a green run to the <b>platform at large</b> through — the
- * seam the event bus hangs off, sibling to {@link PdNotifier} and deliberately not the same one.
+ * seam the event bus hangs off, and <b>the only announcement a green run makes</b>.
  *
- * <p>The two look alike and mean different things. {@code PdNotifier} is a <em>request</em>
- * addressed to one named service: qits-platform-deployments is asked to deploy, at a URL this repo
- * configures, and if nobody is listening nothing was supposed to happen. This is a <em>statement</em>
- * addressed to nobody in particular — "a build passed" — which qits-events records and anything on
- * the platform may subscribe to, this service included. Folding them into one port would put the
- * deployer's intake URL and the event log's retention policy behind the same name.
+ * <p>It used to be one of two, and the sibling is worth knowing about because the shape it left is
+ * the shape of this one. {@code PdNotifier} was a <em>request</em> addressed to one named service:
+ * qits-platform-deployments was asked to deploy, over HTTP, at a URL this repo configured, on every
+ * green run. This is a <em>statement</em> addressed to nobody in particular — "a build passed" —
+ * which qits-events records and anything on the platform may subscribe to, this service included.
+ * The deployer is one of those subscribers now: it consumes {@code BuildSuccessful} durably and
+ * calls its own announce path, so a disconnect delays a deployment instead of losing it, which is
+ * what a fire-and-forget POST could never offer. Its HTTP intake stays as the manual and recovery
+ * door; qits-ci is simply no longer one of the callers.
  *
- * <p>Hence the one difference in the signature: {@code finishedAt}. An announcement to a service
- * that is about to act carries only what it needs to act on; an event carries <b>when it happened</b>,
- * because that is what an event log is for, and the value is the run's own terminal timestamp rather
- * than the moment the announcement was made. The two differ by however long the transition took, and
- * it is never null — the wire contract makes {@code occurredAt} mandatory.
+ * <p>The signature carries {@code finishedAt} because an event carries <b>when it happened</b> —
+ * that is what an event log is for — and the value is the run's own terminal timestamp rather than
+ * the moment the announcement was made. The two differ by however long the transition took, and it
+ * is never null: the wire contract makes {@code occurredAt} mandatory.
  *
  * <p>An interface rather than a call so this module stays free of the bus and its transport: the
  * sole production implementation is {@code service/…/bus/BuildSuccessfulAnnouncer}. It is resolved
  * via {@code Instance} and absent is a supported configuration — a deployment with no qits-events
- * runs CI exactly as before.
+ * runs CI exactly as before, and announces nothing at all.
  *
- * <p><b>The same must-not-block rule as {@link PdNotifier}</b>, with the same reason and one extra
- * teeth-gritting caveat: this runs on a run worker, between one run and the next.
+ * <p><b>An implementation must not block the caller</b>, with one teeth-gritting caveat: this runs
+ * on a run worker, between one run and the next.
  * The bus implementation's {@code publish()} is synchronous and never throws, but it is not free —
  * it is bounded by the publish timeout when qits-events is unreachable, after which the outbox owns
  * the event. A few seconds per green build, paid only while the far side is down, is the price that

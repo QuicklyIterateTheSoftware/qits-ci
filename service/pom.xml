@@ -118,14 +118,12 @@
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-oidc</artifactId>
         </dependency>
-        <dependency>
-            <!-- The other direction: qits-ci ASKS qits-idp for a token, to present to
-                 qits-platform-deployments (notify/PdBearer). Off by default — quarkus.oidc-client.client-enabled=false in
-                 application.properties — so the extension builds a disabled client, boots without a
-                 secret and never dials anything. -->
-            <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-oidc-client</artifactId>
-        </dependency>
+        <!-- No quarkus-oidc-client here, and its absence is the deliberate half of a pair. This
+             service validates the bearers it RECEIVES (quarkus-oidc, above) and presents one to
+             nobody: the single outbound call that carried a credential was the deploy announcement
+             to qits-platform-deployments, and that call is gone — the deployer subscribes to
+             BuildSuccessful on the bus instead. Adding the extension back means a new outbound
+             caller, not a config change. -->
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-rest-jackson</artifactId>
