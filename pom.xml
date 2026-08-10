@@ -46,7 +46,7 @@
     </modules>
 
     <properties>
-        <qits.eventstream.version>2026.810.103202</qits.eventstream.version>
+        <qits.eventstream.version>2026.810.184513</qits.eventstream.version>
         <qits.auth-core.version>2026.807.165756</qits.auth-core.version>
         <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
