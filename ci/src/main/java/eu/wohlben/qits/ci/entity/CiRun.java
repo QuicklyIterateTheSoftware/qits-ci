@@ -21,13 +21,16 @@ import java.util.UUID;
  * a JPA relation.
  *
  * <p><b>A {@link CausedRow}, beside its own richer record.</b> {@link #causationId} is the
- * platform's generic trace column, stamped from the ambient {@code CausationScope} when the row is
- * persisted — which happens at trigger evaluation, inside the durable listener's scope for an event
- * run and inside the REST filter's restored scope for a manual trigger that carried the causation
- * header. {@link #triggerEventId} stays what it is: domain data with a unique constraint on it,
- * written explicitly, the carrier across the thread hop to {@code ci-run-worker}. For an event run
- * the two agree; a post-receive run has neither, and a manual trigger over REST now records a cause
- * where {@code triggerEventId} records none.
+ * platform's generic trace column, and it is filled two ways because the two accept paths stand on
+ * different threads. A bus-arrived event crosses the trigger queue before the row is written, and
+ * an executor hop is exactly where the ambient {@code CausationScope} dies — so {@code
+ * CiRunService.acceptEventRun} sets the cause <em>explicitly</em> from the event id, the same way
+ * every other provenance column crosses that hop, and the {@code CausationStamp} listener yields to
+ * the set value. A manual trigger evaluates on the request thread, where the REST filter's restored
+ * scope still stands — there the stamp itself fills the column, from the {@code
+ * X-Qits-Causation-Id} the caller sent. {@link #triggerEventId} stays what it is: domain data with
+ * a unique constraint on it. For an event run the two agree; a post-receive run has neither; a
+ * manual trigger over REST records a cause where {@code triggerEventId} records none.
  */
 @Entity
 @Table(name = "ci_run")

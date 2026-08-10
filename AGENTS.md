@@ -905,7 +905,12 @@ context's database or migration history.
 
 **The ordinary rule is back: keep appending, never edit an applied one.** `V2__run_causation.sql`
 is that rule being followed — `ci_run.causation_id`, the platform's generic CausedRow column,
-nullable, no backfill (`trigger_event_id` keeps the history) and part of no constraint. The
+nullable, no backfill (`trigger_event_id` keeps the history) and part of no constraint. **For a
+bus-arrived event the value is set EXPLICITLY in `acceptEventRun`, not left to the stamp** — the
+row is written on `ci-trigger-worker`, behind the queue hop where the ambient scope has already
+died, so the entity listener would record null; measured on the first live event runs of
+2026-08-10, empty `causation_id` beside a full `trigger_event_id`. The stamp covers the manual
+trigger, which evaluates on the request thread under the REST filter's restored scope. The
 causation decisions themselves are enforced by `ArchRulesTest` in the `ci` module: every `@Entity`
 here implements `CausedRow` (CiRun) or declares `@Uncaused` with its reason in the javadoc (CiStep
 — its run carries the cause, and its row is written on the run worker where no scope stands;
