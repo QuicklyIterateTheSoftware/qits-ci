@@ -162,10 +162,19 @@ anywhere and CI simply never runs. Both ends are pinned to `/ci/api/events/post-
 The same arrangement repeats one hop down: a green run is announced to
 [qits-platform-deployments](https://github.com/QuicklyIterateTheSoftware/qits-platform-deployments)'s
 `/platform-deployments/api/events/build-succeeded` by `service/…/notify/PdBuildNotifier` behind the
-`PdNotifier` seam in `ci/control` — fire-and-forget with the same silence hazard, so both ends pin
-that literal too. Only `SUCCESS` announces (a red run, a `CONFIG_ERROR` and a discarded run deploy
-nothing), and a deployment with no deployer is a supported configuration that costs one debug line
-per green run. That receiver replaced qits-cd, and the key replaced with it:
+`PdNotifier` seam in `ci/control` — so both ends pin that literal too. Only `SUCCESS` announces (a
+red run, a `CONFIG_ERROR` and a discarded run deploy nothing).
+
+That call **never blocks the run worker, and it is retried**. It used to be one POST whose failure
+was swallowed at debug, and a bootstrap paid for it: qits-platform-idp was redeployed minutes before
+a green run finished, the single attempt hit the refusal window that left behind, and the deployment
+never happened with nothing anywhere saying so. A failed attempt — no connection, or any non-2xx —
+is now retried after 5s, 15s, 45s and 2m, with the machine token fetched again each time so a retry
+after an idp cutover presents a fresh one. Giving up is a **warning** naming the repository, the
+branch and the last failure. So a deployment with no deployer is still a supported configuration,
+but it costs one warning per green run rather than one invisible debug line, and a refusal that
+arrives after the receiver already acted deploys the same commit twice — the cheaper of the two
+errors. That receiver replaced qits-cd, and the key replaced with it:
 `qits.platform.deployments.intake-url`, overridden as `QITS_PLATFORM_DEPLOYMENTS_INTAKE_URL`. There
 is no alias for the old `qits.cd.intake-url` — a deployment still setting `QITS_CD_INTAKE_URL`
 silently gets the default.
@@ -813,9 +822,10 @@ a repository's own listing will show.
   it returns build logs.
 - Point `QITS_PLATFORM_DEPLOYMENTS_INTAKE_URL` (`qits.platform.deployments.intake-url`) at
   qits-platform-deployments if it is anywhere but the qits-net alias the default assumes. The whole
-  url, path included — the notifier POSTs it verbatim. Getting it wrong is **silent**: the call is
-  fire-and-forget, so a bad value costs one debug line per green run and no deployments, with
-  nothing red anywhere to say so. The key was
+  url, path included — the notifier POSTs it verbatim. Getting it wrong costs the deployment and
+  says so: five attempts over about three minutes, then one **warning** per green run naming the
+  repository, the branch and the last failure. It used to be silent, which is how a lost
+  announcement went unnoticed for an hour. The key was
   `qits.cd.intake-url` while the receiver was qits-cd; there is no alias, so a deployment carrying
   the old variable is setting nothing.
 - Set `qits.artifacts.registry-host` / `qits.artifacts.image-repository` to qits-artifacts' registry
