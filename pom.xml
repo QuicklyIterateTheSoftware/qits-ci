@@ -33,7 +33,7 @@
          and the mandatory -Dqits.variant=oauth|forwardauth|local auth profiles. -->
     <groupId>eu.wohlben.qits</groupId>
     <artifactId>qits-ci</artifactId>
-    <version>2026.810.185211</version>
+    <version>2026.810.191049</version>
     <packaging>pom</packaging>
     <name>qits-ci</name>
 
@@ -47,7 +47,8 @@
 
     <properties>
         <qits.eventstream.version>2026.810.184513</qits.eventstream.version>
-        <qits.auth-core.version>2026.807.165756</qits.auth-core.version>
+        <qits.auth-core.version>2026.810.184518</qits.auth-core.version>
+        <qits.arch-rules.version>2026.810.184518</qits.arch-rules.version>
         <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -168,6 +169,12 @@
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-auth-core</artifactId>
                 <version>${qits.auth-core.version}</version>
+            </dependency>
+            <dependency>
+                <!-- The platform's shared ArchUnit rules, test scope wherever entities live. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-arch-rules</artifactId>
+                <version>${qits.arch-rules.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

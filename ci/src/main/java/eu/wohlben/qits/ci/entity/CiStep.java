@@ -1,5 +1,6 @@
 package eu.wohlben.qits.ci.entity;
 
+import eu.wohlben.qits.eventstream.Uncaused;
 import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -19,9 +20,14 @@ import java.time.Instant;
  * a half-written step, and a crash mid-run cannot leave one claiming to still be executing.
  * {@link CiStepStatus#PENDING} and {@link CiStepStatus#RUNNING} survive in the enum for rows written
  * before that was true, and are never written again.
+ *
+ * <p>{@code @Uncaused} by decision, twice over: the run this step belongs to carries the cause one
+ * join away, and the row is written terminal on the run worker, where no {@code CausationScope}
+ * stands — a stamp here would record null forever and read as a decision nobody made.
  */
 @Entity
 @Table(name = "ci_step")
+@Uncaused
 public class CiStep extends PanacheEntityBase {
 
   @Id public String id;

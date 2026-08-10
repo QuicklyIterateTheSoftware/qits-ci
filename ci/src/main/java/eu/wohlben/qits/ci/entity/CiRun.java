@@ -1,13 +1,17 @@
 package eu.wohlben.qits.ci.entity;
 
+import eu.wohlben.qits.eventstream.CausationStamp;
+import eu.wohlben.qits.eventstream.CausedRow;
 import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EntityListeners;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import java.time.Instant;
+import java.util.UUID;
 
 /**
  * One CI pipeline execution for one (push, updated branch ref) whose pushed commit carried {@code
@@ -15,12 +19,36 @@ import java.time.Instant;
  * physical DB with NO FK into qits' tables (a deleted repository leaves runs behind as dangling
  * history, the artifacts stance). Steps are {@link CiStep} rows keyed by {@link CiStep#runId}, not
  * a JPA relation.
+ *
+ * <p><b>A {@link CausedRow}, beside its own richer record.</b> {@link #causationId} is the
+ * platform's generic trace column, stamped from the ambient {@code CausationScope} when the row is
+ * persisted — which happens at trigger evaluation, inside the durable listener's scope for an event
+ * run and inside the REST filter's restored scope for a manual trigger that carried the causation
+ * header. {@link #triggerEventId} stays what it is: domain data with a unique constraint on it,
+ * written explicitly, the carrier across the thread hop to {@code ci-run-worker}. For an event run
+ * the two agree; a post-receive run has neither, and a manual trigger over REST now records a cause
+ * where {@code triggerEventId} records none.
  */
 @Entity
 @Table(name = "ci_run")
-public class CiRun extends PanacheEntityBase {
+@EntityListeners(CausationStamp.class)
+public class CiRun extends PanacheEntityBase implements CausedRow {
 
   @Id public String id;
+
+  /** See the class javadoc; the platform's uniform column, never part of any constraint. */
+  @Column(name = "causation_id")
+  public UUID causationId;
+
+  @Override
+  public UUID causationId() {
+    return causationId;
+  }
+
+  @Override
+  public void causationId(UUID id) {
+    this.causationId = id;
+  }
 
   @Column(name = "repo_id", nullable = false)
   public String repoId;

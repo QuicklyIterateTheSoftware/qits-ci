@@ -635,12 +635,22 @@ over its payload; a matching event on the bus runs that file's pipeline against 
 The design is the superproject's `ci-event-triggers-plan.md`, the format is `README.md`, and what
 follows is what biting it feels like.
 
-- **`ci/` stays free of the bus, in both directions.** `service/…/bus/CiEventTriggerListener` is the
-  `QitsDurableEventListener` bean; it turns an `EventFrame` into `CiEventTriggerService.Arrival`,
-  four plain strings, and hands it over. That is the same seam shape `RunAnnouncer` is on the
-  publishing side, pointed the other way, and it is why `CiEventTriggerService` — which does the real
-  work — imports no `eu.wohlben.qits.eventstream` type. Keep it that way; the extraction rule protects
-  the library, and this one protects the domain.
+- **`ci/` stays free of the bus's SEAMS, in both directions.** `service/…/bus/CiEventTriggerListener`
+  is the `QitsDurableEventListener` bean; it turns an `EventFrame` into
+  `CiEventTriggerService.Arrival`, four plain strings, and hands it over. That is the same seam shape
+  `RunAnnouncer` is on the publishing side, pointed the other way, and it is why
+  `CiEventTriggerService` — which does the real work — imports no publish/subscribe type. Keep it
+  that way; the extraction rule protects the library, and this one protects the domain.
+
+  **The word is SEAMS now, not "the bus", and the narrowing was deliberate (2026-08-10).** The
+  eventstream jar also carries the platform's causation *persistence vocabulary* — `CausedRow`,
+  `CausationStamp`, `@Uncaused`, three jakarta-persistence-shaped types with no publish, no
+  subscribe and no wire in them — and `CiRun` implements it, so the jar sits in `ci/`'s pom now.
+  What the rule still forbids is control flow: no listener, no publisher, no `EventFrame`, no
+  `QitsEventBus` anywhere in `ci/`. What the dependency costs is honest and paid in the suite: the
+  jar's persistence unit boots in this module's tests too, so `testdb/EmbeddedPgConfigSource` feeds
+  it `eventstream_ci_domain` and the test properties keep the bus dark — the same consumer contract
+  the service module has always honoured.
 - **The manual trigger is a second inbound adapter of the same evaluation, on a different thread.**
   `POST /ci/api/events/trigger` (`CiEventController`) builds the same `Arrival` from a JSON body, so
   the engine cannot tell a hand-supplied event from a frame — no branch, no flag, no second code
@@ -893,8 +903,16 @@ Keep it that way; do not buffer a step's output whole.
 **PostgreSQL**, provisioned by this repository's own deployment spec and never shared with another
 context's database or migration history.
 
-**There is ONE migration, and the ordinary rule is back: keep appending, never edit an applied one.**
-`V1__init.sql` is the whole schema. The nine H2 migrations it replaces (V1-V8 plus a Java V9) are
+**The ordinary rule is back: keep appending, never edit an applied one.** `V2__run_causation.sql`
+is that rule being followed — `ci_run.causation_id`, the platform's generic CausedRow column,
+nullable, no backfill (`trigger_event_id` keeps the history) and part of no constraint. The
+causation decisions themselves are enforced by `ArchRulesTest` in the `ci` module: every `@Entity`
+here implements `CausedRow` (CiRun) or declares `@Uncaused` with its reason in the javadoc (CiStep
+— its run carries the cause, and its row is written on the run worker where no scope stands;
+CiDaemonPin — `event_id` is already the adopting event). A new entity that skips the decision fails
+the build naming the class.
+
+`V1__init.sql` is the rest of the schema. The nine H2 migrations it replaces (V1-V8 plus a Java V9) are
 history in this repository's log and are not a prefix of this lineage: the move off H2 is a
 re-bootstrap rather than a data migration, so no postgres database anywhere ever ran them and no
 `V10__move_to_postgres.sql` had a reader. Read that file's header before adding anything — it argues

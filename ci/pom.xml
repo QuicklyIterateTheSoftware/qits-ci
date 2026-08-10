@@ -5,7 +5,7 @@
     <parent>
         <groupId>eu.wohlben.qits</groupId>
         <artifactId>qits-ci</artifactId>
-        <version>2026.810.185211</version>
+        <version>2026.810.191049</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -69,6 +69,15 @@
             <artifactId>quarkus-hibernate-validator</artifactId>
         </dependency>
         <dependency>
+            <!-- CausedRow + CausationStamp: CiRun records the event it was written because of, in
+                 the platform's generic causation_id column. The jar rides into this module's OWN
+                 tests too — the eventstream persistence unit boots whether the bus is enabled or
+                 not — so testdb/EmbeddedPgConfigSource feeds it a database and the test properties
+                 keep it dark, exactly the consumer contract the eventstream README states. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-eventstream</artifactId>
+        </dependency>
+        <dependency>
             <!-- Parses the repo-committed ci-post-receive.yml (SafeConstructor — plain maps/lists
                  only, never instantiating classes from repository content). Version managed by the
                  Quarkus BOM. -->
@@ -86,6 +95,14 @@
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The platform's shared ArchUnit rules; ArchRulesTest points them at this module's
+                 packages, where the entities live. Forgetting a causation decision on a new
+                 @Entity fails this build naming the class. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-arch-rules</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
