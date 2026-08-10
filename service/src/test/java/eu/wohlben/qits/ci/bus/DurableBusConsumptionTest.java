@@ -25,7 +25,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The three bus listeners as <b>durable</b> consumers: what the claim ledger settles, what stays
+ * The four bus listeners as <b>durable</b> consumers: what the claim ledger settles, what stays
  * owed, and what a late arrival is allowed to do.
  *
  * <p>Driven through {@link DurableFunnel} directly rather than over the socket, which is the same
@@ -56,6 +56,8 @@ public class DurableBusConsumptionTest {
   @Inject CiEventTriggerListener triggers;
 
   @Inject DaemonReleaseListener daemon;
+
+  @Inject ScmPublishCommitListener pushes;
 
   @Inject CiDaemonPins pins;
 
@@ -138,6 +140,64 @@ public class DurableBusConsumptionTest {
     EventFrame nameless = new EventFrame(anId(), null, T0, "{}", null, null);
 
     assertEquals(DurableFunnel.Result.HANDLED, funnel.offer(triggers, nameless));
+  }
+
+  // --- ScmPublishCommitListener: ci-push-runs ---
+
+  /**
+   * The claim on the push path, which is the whole reason this migration was worth making: the HTTP
+   * intake it replaced had no ledger at all, so a redelivery was a second build and a missed
+   * delivery was no build ever. One push, offered twice, is one run.
+   *
+   * <p>The repository does not exist on this suite's git host, so the accepted run is discarded a
+   * moment later — which is beside the point here and is why this asserts the funnel's answer rather
+   * than a row. Whether a push becomes a green run is {@code ScmPublishCommitListenerTest}'s.
+   */
+  @Test
+  public void aPushIsAcceptedOnceAcrossADuplicateDelivery() {
+    EventFrame frame =
+        ScmPushFrames.push("dup-push-repo", "main", ScmPushFrames.ZERO_SHA, "a".repeat(40));
+
+    assertEquals(DurableFunnel.Result.HANDLED, funnel.offer(pushes, frame));
+    assertEquals(
+        DurableFunnel.Result.SKIPPED,
+        funnel.offer(pushes, frame),
+        "a catch-up sweep reaching a push the stream already delivered must not build it twice");
+  }
+
+  /** One signature, knowable at startup — unlike the trigger engine's, which cannot be. */
+  @Test
+  public void thePushListenerSubscribesToTheOneEventItBuilds() {
+    assertEquals(Set.of("SCMPublishCommit"), pushes.signatures());
+  }
+
+  /**
+   * Poison on the push path. A payload that will not bind and an identifier this service refuses are
+   * the same bytes on every offer, so both are settled: a throw would hand the push back forever and
+   * hold this consumer's watermark behind it, and no later attempt could succeed.
+   */
+  @Test
+  public void aPushThisServiceCannotActOnIsSettledRatherThanOwed() {
+    EventFrame unreadable =
+        new EventFrame(anId(), "SCMPublishCommit", T0, "this is not json {", null, null);
+    assertEquals(DurableFunnel.Result.HANDLED, funnel.offer(pushes, unreadable));
+
+    EventFrame refused =
+        ScmPushFrames.push("bad-push-repo", "main", ScmPushFrames.ZERO_SHA, "not-a-sha");
+    assertEquals(DurableFunnel.Result.HANDLED, funnel.offer(pushes, refused));
+  }
+
+  /**
+   * A suppressed push is <b>handled</b>, not skipped: the listener is subscribed to it, reads it and
+   * decides there is nothing to build. Settling it is what keeps the watermark moving over a
+   * repository that pushes with {@code -o qits.no-ci} all day.
+   */
+  @Test
+  public void aSuppressedPushIsSettledWithNothingBuilt() {
+    EventFrame quiet =
+        ScmPushFrames.suppressed("quiet-push-repo", "main", ScmPushFrames.ZERO_SHA, "b".repeat(40));
+
+    assertEquals(DurableFunnel.Result.HANDLED, funnel.offer(pushes, quiet));
   }
 
   // --- DaemonReleaseListener: ci-daemon-adopt ---

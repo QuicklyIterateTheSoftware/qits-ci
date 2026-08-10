@@ -33,10 +33,14 @@ import org.junit.jupiter.api.Test;
 public class CiDaemonLauncherTest {
 
   private CiDaemonLauncher launcher() {
+    return launcher("http://qits-githost:8080/");
+  }
+
+  private CiDaemonLauncher launcher(String containerGitUrl) {
     CiDaemonLauncher launcher = new CiDaemonLauncher();
     launcher.runtime = "docker";
     launcher.network = "qits-net";
-    launcher.containerGitUrl = "http://qits-artifacts:8080/artifacts/";
+    launcher.containerGitUrl = containerGitUrl;
     launcher.containerDaemonUrl = "ws://qits-ci:8080/ci/daemon";
     launcher.daemonBinaryUrlTemplate = "http://qits-artifacts:8080/artifacts/daemons/qits-ci-daemon/{version}";
     launcher.registerTimeoutSeconds = 60;
@@ -118,7 +122,7 @@ public class CiDaemonLauncherTest {
             "--env",
             "QITS_CI_DAEMON_BINARY_URL=http://qits-artifacts:8080/artifacts/daemons/qits-ci-daemon/deadbeef",
             "--env",
-            "QITS_CI_REPOSITORY_URL=http://qits-artifacts:8080/artifacts/git/repo-1",
+            "QITS_CI_REPOSITORY_URL=http://qits-githost:8080/git/repo-1",
             "--env",
             "QITS_CI_BRANCH=main",
             "--env",
@@ -298,9 +302,18 @@ public class CiDaemonLauncherTest {
         launcher().resolveBinaryUrl("abc123"));
   }
 
+  /**
+   * The configured base names the SERVICE and ci appends {@code /git/<repoId>} — which is what makes
+   * qits-githost's move a config change rather than a code change. The host used to answer under
+   * qits-artifacts' {@code /artifacts} segment and answers at the root now; both are just bases to
+   * this method, and the fixture's trailing slash is stripped either way.
+   */
   @Test
   public void theCloneUrlEndsAtTheServiceAndCiAppendsTheGitSegment() {
-    assertEquals("http://qits-artifacts:8080/artifacts/git/repo-1", launcher().cloneUrl("repo-1"));
+    assertEquals("http://qits-githost:8080/git/repo-1", launcher().cloneUrl("repo-1"));
+    assertEquals(
+        "http://a-host-of-any-depth/below/git/repo-1",
+        launcher("http://a-host-of-any-depth/below").cloneUrl("repo-1"));
   }
 
   @Test

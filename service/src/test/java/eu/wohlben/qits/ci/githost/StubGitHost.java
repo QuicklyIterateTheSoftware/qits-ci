@@ -17,14 +17,20 @@ import java.util.Map;
 import java.util.stream.Stream;
 
 /**
- * qits-artifacts' git host, as much of it as qits-ci reads: the two content routes on a real socket,
- * answered out of ordinary bare repositories a test seeds on disk.
+ * qits-githost, as much of it as qits-ci reads: the two content routes on a real socket, answered
+ * out of ordinary bare repositories a test seeds on disk.
  *
  * <pre>
- *   GET /artifacts/git/&lt;repoId&gt;/blob/&lt;rev&gt;/&lt;path&gt;   → the bytes, plus Git-Commit-Sha
- *   GET /artifacts/git/&lt;repoId&gt;/tree/&lt;rev&gt;[/&lt;path&gt;]  → {"entries":[{"name","type"}]}
- *   GET /artifacts/git                                → {"repositories":[…]}
+ *   GET /git/&lt;repoId&gt;/blob/&lt;rev&gt;/&lt;path&gt;   → the bytes, plus Git-Commit-Sha
+ *   GET /git/&lt;repoId&gt;/tree/&lt;rev&gt;[/&lt;path&gt;]  → {"entries":[{"name","type"}]}
+ *   GET /git                                → {"repositories":[…]}
  * </pre>
+ *
+ * <p><b>The base moved out of {@code /artifacts} and that is the point of it being spelled here.</b>
+ * The git host used to be part of qits-artifacts and borrow that service's gateway segment; standing
+ * alone it serves {@code /git/**} at the root. So {@code qits.ci.git-host-url} is scheme+host+port
+ * with no path, and this stub is what proves qits-ci builds its urls from such a base correctly —
+ * a stub left on the old prefix would keep the suite green about a shape nothing serves.
  *
  * <p>It shells {@code git} against {@code <root>/git/<repoId>}, which is what the real host does
  * through JGit — so the suites keep seeding bares with the git they already use and this stub owns
@@ -44,8 +50,8 @@ import java.util.stream.Stream;
  */
 public class StubGitHost implements QuarkusTestResourceLifecycleManager {
 
-  /** The gateway segment qits-artifacts serves its git host under. */
-  public static final String BASE = "/artifacts/git";
+  /** qits-githost's own segment, a literal in its {@code GitHostRoutes} exactly as it is here. */
+  public static final String BASE = "/git";
 
   /** The header both content routes answer the resolved commit in. */
   public static final String COMMIT_SHA_HEADER = "Git-Commit-Sha";
@@ -60,7 +66,7 @@ public class StubGitHost implements QuarkusTestResourceLifecycleManager {
   public record Server(HttpServer http, int port) {
 
     public String gitHostUrl() {
-      return "http://127.0.0.1:" + port + "/artifacts";
+      return "http://127.0.0.1:" + port;
     }
 
     public void stop() {

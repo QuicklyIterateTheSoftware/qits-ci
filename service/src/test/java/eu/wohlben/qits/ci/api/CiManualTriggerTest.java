@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import eu.wohlben.qits.ci.bus.ScmPublishCommitListener;
+import eu.wohlben.qits.ci.bus.ScmPushFrames;
 import eu.wohlben.qits.ci.control.FakeCiStepRunner;
 import eu.wohlben.qits.ci.githost.FakeGitHostRepoListing;
 import eu.wohlben.qits.ci.githost.StubGitHost;
@@ -62,6 +64,8 @@ public class CiManualTriggerTest {
   private static final String TRIGGER = "/ci/api/events/trigger";
 
   @Inject FakeCiStepRunner fakeRunner;
+
+  @Inject ScmPublishCommitListener pushes;
 
   @Inject FakeGitHostRepoListing gitHostListing;
 
@@ -313,13 +317,7 @@ public class CiManualTriggerTest {
    * repositories it has already heard of.
    */
   private void pushOnce(String repoId) throws Exception {
-    given()
-        .contentType(ContentType.JSON)
-        .body(Map.of("repoId", repoId, "branch", "main", "oldSha", ZERO_SHA, "newSha", tipOf(repoId)))
-        .when()
-        .post("/ci/api/events/post-receive")
-        .then()
-        .statusCode(202);
+    pushes.onFrame(ScmPushFrames.push(repoId, "main", ZERO_SHA, tipOf(repoId)));
     awaitRuns(repoId, 1);
   }
 

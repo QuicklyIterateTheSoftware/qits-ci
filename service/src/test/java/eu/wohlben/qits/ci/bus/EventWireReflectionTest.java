@@ -14,6 +14,7 @@ import eu.wohlben.qits.eventstream.QitsRawEventListener;
 import eu.wohlben.qits.eventstream.control.CanonicalJson;
 import eu.wohlben.qits.eventstream.control.EventEnvelope;
 import eu.wohlben.qits.eventstream.control.EventFrame;
+import eu.wohlben.qits.githost.events.SCMPublishCommit;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.enterprise.inject.Any;
@@ -58,9 +59,13 @@ public class EventWireReflectionTest {
     assertNotNull(registration, "the annotation IS the class; without it this file is a no-op");
     assertEquals(
         Set.of(
-            BuildSuccessful.class, SoftwareRelease.class, EventEnvelope.class, EventFrame.class),
+            BuildSuccessful.class,
+            SoftwareRelease.class,
+            SCMPublishCommit.class,
+            EventEnvelope.class,
+            EventFrame.class),
         Set.of(registration.targets()),
-        "the two events out, the PUT body, the frame in — a fifth wire type means adding it here");
+        "the two events out, the push in, the PUT body, the frame — a sixth wire type is added here");
   }
 
   /**

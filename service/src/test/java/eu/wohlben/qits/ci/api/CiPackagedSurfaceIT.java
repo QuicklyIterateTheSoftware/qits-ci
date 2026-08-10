@@ -80,9 +80,6 @@ import org.junit.jupiter.api.Test;
 @TestProfile(CiPackagedSurfaceIT.PackagedUnderTarget.class)
 public class CiPackagedSurfaceIT {
 
-  /** The all-zero sha git reports as the old id of a newly created branch. */
-  private static final String ZERO_SHA = "0".repeat(40);
-
   /**
    * The client's own spelling of the segment, from qits-spa-ci's {@code angular.json}. It is the
    * fingerprint every SPA probe here uses: "did this response come from the client" is a question
@@ -155,15 +152,20 @@ public class CiPackagedSurfaceIT {
   }
 
   @Test
-  public void theIntakeIsAtTheAddressTheGitHostPostsTo() {
-    // qits-artifacts' CiPostReceiveNotifier delivers here fire-and-forget: a wrong path raises no
-    // error on either side and CI simply never runs, so the address is asserted from the artifact.
-    // An empty body must reach @Valid — a 400 proves the resource, not the router's 404.
+  public void theManualTriggerIsOnTheArtifactsRouter() {
+    // The one write this service still serves, and a person's recovery door: a bootstrap replay
+    // knocks on exactly this path. An empty body must reach the handler — the 400 is the resource
+    // answering, where a moved prefix would be the router's 404.
+    //
+    // There used to be a probe for POST /ci/api/events/post-receive beside this one, asserted from
+    // the artifact because a wrong path there raised no error on either side and CI simply stopped
+    // running. That endpoint is gone: a push is an SCMPublishCommit off the event log now, and what
+    // would be wrong is a listener that does not subscribe — which no HTTP probe can see.
     given()
         .contentType(ContentType.JSON)
         .body("{}")
         .when()
-        .post("/ci/api/events/post-receive")
+        .post("/ci/api/events/trigger")
         .then()
         .statusCode(400);
   }
@@ -262,18 +264,41 @@ public class CiPackagedSurfaceIT {
     }
   }
 
+  /**
+   * A run recorded end to end on the packaged artifact: SnakeYAML parses the trigger file, Flyway's
+   * migrations survived as resources, Panache writes the row, and the shipped datasource expression
+   * resolved to the database this JVM injected.
+   *
+   * <p><b>It is driven by the manual trigger rather than by a push, and the swap is forced.</b> A
+   * push is an {@code SCMPublishCommit} off the event log now — there is no HTTP door to it, and
+   * standing a real qits-events up beside a launched artifact to deliver one would be a second
+   * integration entirely. {@code POST /ci/api/events/trigger} builds the same {@code Arrival} the bus
+   * builds and records a run the same way, so what this test can still see through the artifact's own
+   * surface is unchanged: YAML, Flyway, Panache and the store it wrote to. The push path's own
+   * semantics are a {@code @QuarkusTest}'s ({@code ScmPublishCommitListenerTest},
+   * {@code CiPipelineBoundaryTest}).
+   */
   @Test
-  public void aPushRecordsARunThroughYamlFlywayAndPanache() throws Exception {
+  public void aTriggeredRunGoesThroughYamlFlywayAndPanache() throws Exception {
     String repoId = seedOrigin();
-    String sha = pushBranchWithConfig(repoId, "ci-packaged", "steps: []\n");
+    String eventName = "PackagedProbe";
+    String sha =
+        pushTriggerOnMain(
+            repoId,
+            "event: " + eventName + "\nwhen:\n  - repoId: { exact: " + repoId + " }\nsteps: []\n");
 
     given()
         .contentType(ContentType.JSON)
-        .body(Map.of("repoId", repoId, "branch", "ci-packaged", "oldSha", ZERO_SHA, "newSha", sha))
+        .body(
+            Map.of(
+                "name",
+                eventName,
+                "payload",
+                Map.of("repoId", repoId)))
         .when()
-        .post("/ci/api/events/post-receive")
+        .post("/ci/api/events/trigger")
         .then()
-        .statusCode(202);
+        .statusCode(200);
 
     Map<String, Object> run = awaitTerminalRun(repoId);
     assertEquals("SUCCESS", run.get("status"));
@@ -329,17 +354,20 @@ public class CiPackagedSurfaceIT {
     return repoId;
   }
 
-  private String pushBranchWithConfig(String repoId, String branch, String config) throws Exception {
+  /**
+   * Commits a trigger file on {@code main} and returns the head it left there — which is the commit
+   * an event-triggered run builds, since an event names no ref and the tracked branch supplies one.
+   */
+  private String pushTriggerOnMain(String repoId, String trigger) throws Exception {
     Path clone = Files.createTempDirectory("ci-packaged-it-clone");
     Files.delete(clone); // git clone wants to create the target itself
     git(null, "clone", "-q", gitHostRoot().resolve(repoId).toString(), clone.toString());
-    git(clone, "checkout", "-q", "-b", branch);
-    Path configFile = clone.resolve(".config/qits/ci-post-receive.yml");
-    Files.createDirectories(configFile.getParent());
-    Files.writeString(configFile, config);
-    commitAll(clone, "add ci config");
+    Path triggerFile = clone.resolve(".config/qits/ci-event-packaged.yml");
+    Files.createDirectories(triggerFile.getParent());
+    Files.writeString(triggerFile, trigger);
+    commitAll(clone, "add ci event trigger");
     String sha = git(clone, "rev-parse", "HEAD").trim();
-    git(clone, "push", "-q", "origin", branch);
+    git(clone, "push", "-q", "origin", "main");
     return sha;
   }
 

@@ -23,11 +23,19 @@ import org.junit.jupiter.api.Test;
  * it has to survive is a redelivery, a race and a restart. This class holds it from both sides: the
  * engine's behaviour on a second arrival, and the constraint itself against the database.
  *
- * <p>The second half is not ceremony. {@code NULL trigger_event_id} is what <em>every post-receive
- * run</em> carries, so a database that treated two nulls as equal in the multi-column form would make
- * the second push to any repository fail to insert — the whole of CI, broken by a line in a
- * migration. SQL says rows are duplicates only when all corresponding values are non-null and equal;
- * this pins that H2 agrees, rather than trusting it.
+ * <p><b>It covers pushes too now, and that changed which half is the interesting one.</b> A push run
+ * carries the id of the {@code SCMPublishCommit} that announced it — that is what gives the run a
+ * causation parent — so the constraint means "one run per announced push" as well as "one run per
+ * (event, trigger file)". A push's config path is the constant {@code ci-post-receive.yml}, so the
+ * event id is the whole of what tells one push row from the next, which is exactly right: two runs
+ * for one announcement are two builds of one commit.
+ *
+ * <p>{@code NULL trigger_event_id} therefore no longer describes every push. It describes a run
+ * nothing announced — {@code CiRunService.execute}, the synchronous test entry — and the null
+ * behaviour is still pinned below, because it is what makes such rows all distinct instead of
+ * colliding on the second one. SQL says rows are duplicates only when all corresponding values are
+ * non-null and equal; this pins that the database agrees, rather than trusting it. Plain {@code
+ * unique}, never postgres' {@code nulls not distinct}.
  */
 @QuarkusTest
 public class CiEventTriggerDedupeTest extends CiTestSupport {
@@ -116,9 +124,10 @@ public class CiEventTriggerDedupeTest extends CiTestSupport {
 
   @Test
   public void nullTriggerEventIdRowsAreAllDistinctToTheConstraint() {
-    // THE line this class exists for. Every post-receive run has a null here and the same repo_id
-    // and the same config_path as the last one; if H2 read those as duplicates, the second push to
-    // any repository would fail to insert.
+    // A run nothing announced carries a null here and the same repo_id and config_path as the last
+    // one; read as duplicates, the second such row would fail to insert. Pushes are named by their
+    // announcing event now and no longer rest on this, but the behaviour is the constraint's own
+    // and a migration could still take it away.
     for (int i = 0; i < 5; i++) {
       insertPostReceiveRun();
     }

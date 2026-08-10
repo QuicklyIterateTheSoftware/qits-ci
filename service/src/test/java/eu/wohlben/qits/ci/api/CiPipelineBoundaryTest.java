@@ -10,6 +10,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.ci.control.CiStepRunner.StepOutcome;
 import eu.wohlben.qits.ci.control.CiStepRunner.StepResult;
+import eu.wohlben.qits.ci.bus.ScmPublishCommitListener;
+import eu.wohlben.qits.ci.bus.ScmPushFrames;
 import eu.wohlben.qits.ci.control.FakeCiStepRunner;
 import eu.wohlben.qits.ci.githost.StubGitHost;
 import io.quarkus.test.common.TestResourceScope;
@@ -30,8 +32,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The whole MVP loop at the seams this repo owns (docs/epics/qits-ci/): a post-receive event
- * reaches the intake, ci fetches the pushed commit back from the git host, reads {@code
+ * The whole MVP loop at the seams this repo owns (docs/epics/qits-ci/): an SCMPublishCommit
+ * reaches the push listener, ci fetches the pushed commit back from the git host, reads {@code
  * .config/qits/ci-post-receive.yml} out of it, parses the steps and drives them through the step
  * seam — asserted through the public read surface. Docker-free: only the step seam is faked (by
  * {@code eu.wohlben.qits.ci.control.FakeCiStepRunner} in this module's test sources).
@@ -43,14 +45,19 @@ import org.junit.jupiter.api.Test;
  * a push produced, how many steps it declared, what each step was asked to run, and how outcomes
  * become rows. What a real container does with a real script is {@code CiDaemonGateIT}'s job.
  *
- * <p><b>Where the loop starts.</b> The git host is not in this repo — it belongs to qits-artifacts,
- * and it reaches ci over HTTP (its {@code CiPostReceiveNotifier} POSTs to {@code
- * qits.ci.intake-url}). So the test pushes into a real bare origin laid out as {@code
- * <git-host>/git/<repoId>} and served by {@code StubGitHost}, then POSTs the event itself — byte
- * for byte the payload the notifier sends. That is exactly the surface an extracted ci service
- * sees. The monorepo's version of this test drove a real {@code git push} through the in-process
- * git host and let the hook fire; the assertions about the *hook's own* filtering (a branch
- * deletion must not produce an event) went with the hook and belong to qits-artifacts.
+ * <p><b>Where the loop starts.</b> The git host is not in this repo — it is qits-githost, and it
+ * reaches ci through the event log: a push publishes {@code SCMPublishCommit}, and {@code
+ * bus/ScmPublishCommitListener} is what qits-ci does with one. So the test pushes into a real bare
+ * origin laid out as {@code <git-host>/git/<repoId>} and served by {@code StubGitHost}, then hands
+ * the listener a frame built from a real {@code SCMPublishCommit} — byte for byte the payload
+ * qits-githost publishes ({@code bus/ScmPushFrames}).
+ *
+ * <p>This used to POST {@code /ci/api/events/post-receive} instead, and nothing below moved with the
+ * transport: the endpoint is gone, the listener accepts the same push the same way, and every case
+ * here — green, red, dedupe, supersede, the config that could not be read — is now coverage of that
+ * listener's path. The monorepo's version drove a real {@code git push} and let the hook fire; the
+ * assertions about the host's own filtering (a branch deletion must not produce a build) belong to
+ * qits-githost, which publishes {@code SCMDeleteBranch} that nothing here subscribes to.
  */
 @QuarkusTest
 @WithTestResource(value = StubGitHost.class, scope = TestResourceScope.GLOBAL)
@@ -74,6 +81,8 @@ public class CiPipelineBoundaryTest {
 
   @Inject FakeCiStepRunner fakeRunner;
 
+  @Inject ScmPublishCommitListener pushes;
+
   @BeforeEach
   void resetRunner() {
     fakeRunner.reset();
@@ -83,7 +92,7 @@ public class CiPipelineBoundaryTest {
   public void pushWithConfigRecordsAGreenRunWithStepOutputs() throws Exception {
     String repoId = seedOrigin();
     String sha = pushBranchWithConfig(repoId, "ci-green", CONFIG_GREEN);
-    postReceive(repoId, "ci-green", ZERO_SHA, sha);
+    announcePush(repoId, "ci-green", ZERO_SHA, sha);
 
     Map<String, Object> run = awaitTerminalRun(repoId);
     assertEquals("SUCCESS", run.get("status"));
@@ -141,7 +150,7 @@ public class CiPipelineBoundaryTest {
             """);
     fakeRunner.script(
         0, new StepResult(7, false, StepOutcome.OK, "before-the-crash"), "before-the-crash");
-    postReceive(repoId, "ci-red", ZERO_SHA, sha);
+    announcePush(repoId, "ci-red", ZERO_SHA, sha);
 
     Map<String, Object> run = awaitTerminalRun(repoId);
     assertEquals("FAILED", run.get("status"));
@@ -160,7 +169,7 @@ public class CiPipelineBoundaryTest {
   public void cancellingAFinishedRunIsRefusedAndAnUnknownRunIsNotFound() throws Exception {
     String repoId = seedOrigin();
     String sha = pushBranchWithConfig(repoId, "ci-done", CONFIG_GREEN);
-    postReceive(repoId, "ci-done", ZERO_SHA, sha);
+    announcePush(repoId, "ci-done", ZERO_SHA, sha);
     Map<String, Object> run = awaitTerminalRun(repoId);
 
     // 409, not a cheerful 202: a finished run has nothing to stop.
@@ -184,7 +193,7 @@ public class CiPipelineBoundaryTest {
             Thread.currentThread().interrupt();
           }
         });
-    postReceive(repoId, "ci-cancel-reason", ZERO_SHA, sha);
+    announcePush(repoId, "ci-cancel-reason", ZERO_SHA, sha);
     String runId = started.get(10, TimeUnit.SECONDS);
 
     given()
@@ -203,7 +212,7 @@ public class CiPipelineBoundaryTest {
   public void malformedConfigRecordsAConfigErrorRun() throws Exception {
     String repoId = seedOrigin();
     String sha = pushBranchWithConfig(repoId, "ci-broken", "steps: [unclosed\n");
-    postReceive(repoId, "ci-broken", ZERO_SHA, sha);
+    announcePush(repoId, "ci-broken", ZERO_SHA, sha);
 
     Map<String, Object> run = awaitTerminalRun(repoId);
     assertEquals("CONFIG_ERROR", run.get("status"));
@@ -221,7 +230,7 @@ public class CiPipelineBoundaryTest {
     commitAll(clone, "plain change");
     String sha = git(clone, "rev-parse", "HEAD").trim();
     git(clone, "push", "-q", "origin", "ci-silent");
-    postReceive(repoId, "ci-silent", ZERO_SHA, sha);
+    announcePush(repoId, "ci-silent", ZERO_SHA, sha);
 
     Thread.sleep(1500); // grace for the (absent) async run to have appeared
     assertEquals(0, listRuns(repoId).size(), "a config-less push must record nothing");
@@ -245,7 +254,7 @@ public class CiPipelineBoundaryTest {
     commitAll(clone, "amended");
     String sha = git(clone, "rev-parse", "HEAD").trim();
     git(clone, "push", "-q", "--force", "origin", "ci-rewritten");
-    postReceive(repoId, "ci-rewritten", replaced, sha);
+    announcePush(repoId, "ci-rewritten", replaced, sha);
 
     Map<String, Object> run = awaitTerminalRun(repoId);
     assertEquals("SUCCESS", run.get("status"));
@@ -265,13 +274,13 @@ public class CiPipelineBoundaryTest {
     String repoId = seedOrigin();
     // Three runs on one repository, pushed in order, so "newest" is a fact rather than a tie.
     String first = pushBranchWithConfig(repoId, "ci-limit-1", CONFIG_GREEN);
-    postReceive(repoId, "ci-limit-1", ZERO_SHA, first);
+    announcePush(repoId, "ci-limit-1", ZERO_SHA, first);
     awaitRunCount(repoId, 1);
     String second = pushBranchWithConfig(repoId, "ci-limit-2", CONFIG_GREEN);
-    postReceive(repoId, "ci-limit-2", ZERO_SHA, second);
+    announcePush(repoId, "ci-limit-2", ZERO_SHA, second);
     awaitRunCount(repoId, 2);
     String third = pushBranchWithConfig(repoId, "ci-limit-3", CONFIG_GREEN);
-    postReceive(repoId, "ci-limit-3", ZERO_SHA, third);
+    announcePush(repoId, "ci-limit-3", ZERO_SHA, third);
     List<Map<String, Object>> all = awaitRunCount(repoId, 3);
 
     // A limit smaller than the row count takes the head of the same ordering, not a sample.
@@ -323,11 +332,11 @@ public class CiPipelineBoundaryTest {
     String quiet = seedOrigin();
     String neverPushed = seedOrigin();
 
-    postReceive(busy, "ci-repos-a", ZERO_SHA, pushBranchWithConfig(busy, "ci-repos-a", CONFIG_GREEN));
+    announcePush(busy, "ci-repos-a", ZERO_SHA, pushBranchWithConfig(busy, "ci-repos-a", CONFIG_GREEN));
     awaitRunCount(busy, 1);
-    postReceive(busy, "ci-repos-b", ZERO_SHA, pushBranchWithConfig(busy, "ci-repos-b", CONFIG_GREEN));
+    announcePush(busy, "ci-repos-b", ZERO_SHA, pushBranchWithConfig(busy, "ci-repos-b", CONFIG_GREEN));
     awaitRunCount(busy, 2);
-    postReceive(
+    announcePush(
         quiet, "ci-repos-c", ZERO_SHA, pushBranchWithConfig(quiet, "ci-repos-c", CONFIG_GREEN));
     awaitRunCount(quiet, 1);
 
@@ -395,11 +404,11 @@ public class CiPipelineBoundaryTest {
           }
         });
 
-    postReceive(busy, "ci-active-1", ZERO_SHA, busySha);
+    announcePush(busy, "ci-active-1", ZERO_SHA, busySha);
     String runningId = inStepZero.get(30, TimeUnit.SECONDS);
     // The intake writes the row before it answers, so this run is on the record the moment the 202
     // lands — no polling needed for it to be findable.
-    postReceive(waiting, "ci-active-2", ZERO_SHA, waitingSha);
+    announcePush(waiting, "ci-active-2", ZERO_SHA, waitingSha);
 
     try {
       List<Map<String, Object>> active = listActiveRuns();
@@ -464,7 +473,7 @@ public class CiPipelineBoundaryTest {
     List<String> pushedInOrder = new java.util.ArrayList<>();
     for (int n = 1; n <= 6; n += 1) {
       String branch = "ci-fin-" + n;
-      postReceive(repoId, branch, ZERO_SHA, pushBranchWithConfig(repoId, branch, CONFIG_GREEN));
+      announcePush(repoId, branch, ZERO_SHA, pushBranchWithConfig(repoId, branch, CONFIG_GREEN));
       // Newest first, so the head of this repository's listing is the run just pushed. The row
       // exists the moment the intake answers, which is why the wait for it to *finish* is separate.
       pushedInOrder.add((String) awaitRunCount(repoId, n).get(0).get("id"));
@@ -517,9 +526,9 @@ public class CiPipelineBoundaryTest {
           }
         });
 
-    postReceive(busy, "ci-part-1", ZERO_SHA, busySha);
+    announcePush(busy, "ci-part-1", ZERO_SHA, busySha);
     String runningId = inStepZero.get(30, TimeUnit.SECONDS);
-    postReceive(waiting, "ci-part-2", ZERO_SHA, waitingSha);
+    announcePush(waiting, "ci-part-2", ZERO_SHA, waitingSha);
 
     String queuedId;
     try {
@@ -607,17 +616,17 @@ public class CiPipelineBoundaryTest {
 
     // main first, then a newer run on another branch — so lastRun and lastMainRun differ and the
     // endpoint has to answer two different questions about one repository.
-    postReceive(
+    announcePush(
         bothBranches, "main", ZERO_SHA, pushBranchWithConfig(bothBranches, "main", CONFIG_GREEN));
     awaitRunCount(bothBranches, 1);
-    postReceive(
+    announcePush(
         bothBranches,
         "ci-summary-feature",
         ZERO_SHA,
         pushBranchWithConfig(bothBranches, "ci-summary-feature", CONFIG_GREEN));
     List<Map<String, Object>> bothRuns = awaitRunCount(bothBranches, 2);
 
-    postReceive(
+    announcePush(
         featureOnly,
         "ci-summary-only",
         ZERO_SHA,
@@ -693,16 +702,14 @@ public class CiPipelineBoundaryTest {
         .getList("runs");
   }
 
-  // --- the wire contract the git host speaks (CiPostReceiveNotifier's payload) ---
+  // --- the push, as qits-githost announces it ---
 
-  private void postReceive(String repoId, String branch, String oldSha, String newSha) {
-    given()
-        .contentType(ContentType.JSON)
-        .body(Map.of("repoId", repoId, "branch", branch, "oldSha", oldSha, "newSha", newSha))
-        .when()
-        .post("/ci/api/events/post-receive")
-        .then()
-        .statusCode(202);
+  /**
+   * Hands the listener one {@code SCMPublishCommit}. Synchronous through to the accepted row, which
+   * is what the POST it replaced was too — so every case below keeps its timing.
+   */
+  private void announcePush(String repoId, String branch, String oldSha, String newSha) {
+    pushes.onFrame(ScmPushFrames.push(repoId, branch, oldSha, newSha));
   }
 
   // --- git plumbing (StubGitHost serves these bares as <base>/git/<repoId>) ---

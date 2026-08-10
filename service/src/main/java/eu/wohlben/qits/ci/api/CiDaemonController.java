@@ -46,11 +46,12 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * the version is already in every step container's environment and on every run row — and this
  * service authenticates nothing anyway (the gateway does).
  *
- * <p>In the OpenAPI document rather than hidden, on this repo's standing criterion. The one
- * operation kept out, {@code POST /ci/api/events/post-receive}, is machine-only, token-guarded and
- * has its wire contract in qits-artifacts; this one is none of those. Its contract lives here, its
- * consumer is another first-party service reading it fail-closed, and a client draws from it — so a
- * change to the shape belongs in a reviewable diff.
+ * <p>In the OpenAPI document rather than hidden, on this repo's standing criterion: does a
+ * first-party client consume it, is its contract written down anywhere else. Its contract lives
+ * here, its consumer is another first-party service reading it fail-closed, and a client draws from
+ * it — so a change to the shape belongs in a reviewable diff. Nothing is hidden any more: the one
+ * operation that was, {@code POST /ci/api/events/post-receive}, is gone with the HTTP fan-out it
+ * served.
  *
  * <p>An ordinary JAX-RS resource under {@code quarkus.rest.path}, so it adds <b>no literal route</b>
  * and {@code quarkus.quinoa.ignored-path-prefixes} is unchanged — {@code /api} already covers it.

@@ -19,7 +19,7 @@ recorded, with the event that caused it, on the run and in the event log.
 | Module | What |
 |---|---|
 | `ci/` | `eu.wohlben.qits.ci.*` — entity, persistence, dto, mapper, control, error. The pipeline itself. No web, no JAX-RS. |
-| `service/` | `eu.wohlben.qits.ci.api` — the JAX-RS event intake, the run read surface and the exception mapper — plus `…ci.daemonhost`, the step-container control plane (below). There is no filter in front of the intake: it calls `MachineAuth` (qits-auth-core) itself. |
+| `service/` | `eu.wohlben.qits.ci.api` — the run read surface, the manual event trigger and the exception mapper — plus `…ci.bus`, where a push arrives as `SCMPublishCommit`, and `…ci.daemonhost`, the step-container control plane (below). There is no filter in front of the one write: it calls `MachineAuth` (qits-auth-core) itself. |
 | `ci-daemon-protocol/` | `eu.wohlben.qits.cidaemon.protocol` — the ci-daemon wire contract, **vendored** from [qits-ci-daemon](https://github.com/QuicklyIterateTheSoftware/qits-ci-daemon) and never edited here. Framework-free; `diff -r` is the drift detector. |
 | `ci-events/` | `eu.wohlben.qits.ci.events` — the events this service announces: `BuildSuccessful` for every green run, `SoftwareRelease` once per artifact a release pipeline declared. Depends on the published `qits-eventstream` jar and nothing else. |
 
@@ -27,7 +27,7 @@ recorded, with the event that caused it, on the run and in the event log.
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary:
 
     ./mvnw verify
-    java -jar service/target/quarkus-app/quarkus-run.jar   # :8080, intake on /ci/api/events/post-receive
+    java -jar service/target/quarkus-app/quarkus-run.jar   # :8080, reads under /ci/api, client at /ci
 
     ./mvnw package -Dnative
     ./service/target/qits-ci                              # same routes, ~0.2s to listening
@@ -92,7 +92,7 @@ rest of qits it reaches over a URL it is configured with:
 
 | Direction | Surface | Config |
 |---|---|---|
-| in | `POST /ci/api/events/post-receive` — `{repoId, branch, oldSha, newSha}`, one per updated branch ref | `machineAuth.requireProject(repoId)` — a qits-idp bearer carrying `aud=qits-ci` and a `project` claim covering the pushed repository (`*` covers any). Behind the platform-wide gate `qits.auth.machine.required`, shipped **off** |
+| in | `SCMPublishCommit` off the event bus — one per updated branch ref of a push, carrying the head commit's metadata and `suppressCi` | not an HTTP surface and not machine-guarded: what authenticates an event is the bus that carried it. Consumed durably as `ci-push-runs` (`bus/ScmPublishCommitListener`) |
 | in | `POST /ci/api/events/trigger` — `{name, payload, occurredAt?, eventId?}` → 200 `{eventId, runIds, repositoriesRead, repositoriesSkipped}`, one domain event supplied by hand instead of by the bus; it **evaluates before it answers**, and a 503 means it could not ("Triggering one by hand") | guarded on the same resource, and it needs the wider grant: a machine token covering **every** project, because the event names no repository |
 | in | `GET /ci/api/runs?repositoryId={repoId}[&limit={n}]`, `GET /ci/api/runs/{runId}` | not machine-guarded; they carry build logs, so a deployment must keep them behind its auth policy |
 | in | `GET /ci/api/runs/active` → `{"runs": [...]}` — every `QUEUED` or `RUNNING` run on the instance, all repositories, newest first, no parameters | same; unscoped, because "what is CI doing right now" has no repository to scope to |
@@ -151,12 +151,23 @@ instant in each answer. It needs no `?limit=`: what is active is bounded by acce
 configured worker pool, not by uptime. It became answerable only when a queued run became a row
 (below).
 
-The event sender is the git host's post-receive hook, which lives in
-[qits-artifacts](https://github.com/QuicklyIterateTheSoftware/qits-artifacts) (`CiPostReceiveNotifier`).
-It was already an HTTP call while ci ran in-process, so the split moved files, not the contract —
-only `qits.ci.intake-url` on the sending side changes. That call is **fire-and-forget**: it swallows
-delivery failures at debug, so if the two ends disagree about the intake path nothing errors
-anywhere and CI simply never runs. Both ends are pinned to `/ci/api/events/post-receive`.
+The push sender is [qits-githost](https://github.com/QuicklyIterateTheSoftware/qits-githost), which
+publishes one `SCMPublishCommit` per successfully updated branch ref through the qits-eventstream
+outbox. qits-ci consumes it durably (`bus/ScmPublishCommitListener`, consumer id `ci-push-runs`).
+
+**This replaced `POST /ci/api/events/post-receive`**, and the endpoint is gone rather than deprecated.
+That call was fire-and-forget — the sender swallowed delivery failures at debug — so a qits-ci that
+was down, restarting or mid-cutover when a push landed simply never built it, with nothing anywhere
+to say so and "replay the post-receive by hand" as the only cure. A durable consumer reads the same
+push back off the log instead. Two consequences worth stating:
+
+- **`-o qits.no-ci` is not a suppressed event any more.** The git host used to decide for its
+  consumers by not POSTing; the option now travels as `suppressCi` on the event, and this service
+  is what decides that it means "record no run". A consumer that wants to act on a suppressed push
+  (a backup trigger, say) can.
+- **There is no address to keep in step.** Nothing in another repository spells a qits-ci path for
+  pushes, so a prefix change here cannot silently stop CI. What can is a listener that does not
+  subscribe, which is why `EventstreamDarknessTest` asserts the bean exists.
 
 **The arrangement does NOT repeat one hop down, and it used to.** A green run was announced to
 [qits-platform-deployments](https://github.com/QuicklyIterateTheSoftware/qits-platform-deployments)'s
@@ -216,9 +227,9 @@ from the event log at startup and on a schedule, so a disconnect is a delay inst
 subscribe frame is the union of all three, `"*"` collapsing it to `["*"]`.
 
 **Every qits-ci listener is durable**, because each of them acts on something a lost event would
-silently not do: a release train that stops triggering, a daemon release that is never adopted. Their
-consumer ids — the stable names their bookkeeping is keyed on — are `ci-event-triggers`,
-`ci-release-train` and `ci-daemon-adopt`.
+silently not do: a push that is never built, a release train that stops triggering, a daemon release
+that is never adopted. Their consumer ids — the stable names their bookkeeping is keyed on — are
+`ci-push-runs`, `ci-event-triggers`, `ci-release-train` and `ci-daemon-adopt`.
 
 **The trigger engine says `"*"` permanently**, so this service's
 subscribe frame *is* `["*"]`: the event names it cares about live in other repositories' files and
@@ -230,9 +241,11 @@ unaffected, because dispatch filters and the wire never did.
 chain in the log rather than a set of rows distinguishable from coincidence only by their
 timestamps. It is envelope data, stamped by `QitsEventBus.publish` and never declared by an event
 class, and it is filled in from an explicit argument or from `CausationScope`, the ambient
-thread-local the dispatcher establishes around each listener call. A `BuildSuccessful` from a push
-is a root and carries null; when the trigger engine lands, an event-triggered run's will carry the
-event that triggered it. The rules that bite are in AGENTS.md under "The event bus" and, for the library itself, in
+thread-local the dispatcher establishes around each listener call. **Every run qits-ci records has a
+cause and says so**: an event-triggered run's `BuildSuccessful` carries the event that triggered it,
+and a push-triggered run's carries the `SCMPublishCommit` that announced the push — which is what
+makes release → push → build → deploy one chain rather than two halves with a root in the middle.
+A root is what is left for a run nothing announced. The rules that bite are in AGENTS.md under "The event bus" and, for the library itself, in
 qits-eventstream's own AGENTS.md.
 
 Both halves are **dark in `%dev` and `%test`** (`qits.eventstream.enabled`), the same posture the
@@ -605,10 +618,11 @@ was added: one class, nothing in the engine moved.
 However many groups of a `when:` match, matching is boolean rather than multiplicative. The
 guarantee that survives a redelivery and a race is a **database unique constraint** on
 `(trigger_event_id, repo_id, config_path)`: a second arrival of the same event — bus replays are
-legal, and the future catch-up feature will redeliver on purpose — is dropped as already-triggered
-and records no second run. Every run records why it exists (`triggerType`, `triggerEventId`,
-`triggerEventName`, `configPath` on `GET /ci/api/runs`), and a triggered run's own
-`BuildSuccessful` carries the triggering event as its `parentId`, so a release train is a chain in
+legal and catch-up redelivers on purpose — is dropped as already-triggered and records no second run.
+It covers pushes too, since a push run is named by the `SCMPublishCommit` that announced it: one
+announced push is one run. Every run records why it exists (`triggerType`, `triggerEventId`,
+`triggerEventName`, `configPath` on `GET /ci/api/runs`), and its own
+`BuildSuccessful` carries that event as its `parentId`, so a release train is a chain in
 the event log rather than a set of rows distinguishable from coincidence only by their timestamps.
 
 ### Triggering one by hand
@@ -789,20 +803,24 @@ JSON body is `{ "reason": "…" }`; absent or blank records `USER_CANCELLED`. Th
 was on is recorded `FAILED` with "cancelled" in its output and the rest `SKIPPED`. A run still
 `QUEUED` can be cancelled too, and it is the cheap case: there is no container to ask, so the run is
 recorded `FAILED` with no steps and the worker never picks it up. Cancelling a run that has already
-finished is a 409. It is the one operation here a person invokes on purpose, so — unlike the intake —
-it is **not** hidden from `docs/openapi.yml`. A queued push is also cancelled automatically when a
+finished is a 409. Like every other operation this service serves, it is in `docs/openapi.yml`;
+nothing is hidden there any more, since the one hidden operation was the machine-only push intake.
+A queued push is also cancelled automatically when a
 newer push for the same repository and branch is accepted: it records `DEDUPED` and the newer run's
 id, which the run detail links to. Event-triggered runs are excluded because distinct trigger files
 on one branch are independent pipelines, not duplicates.
 
 ## What a restart costs
 
-**A run is a row from the moment it is accepted.** The intake and the trigger engine both `INSERT`
-before they answer, with status `QUEUED`, and the worker flips it to `RUNNING` when it dequeues it.
-Before that, a queued run was a closure on a single-threaded executor and nothing else — invisible to
-every read surface, and gone with the process. That was the lossy intake: a redeploy landing between
-the push and the build lost the build with no row anywhere to say so, and the fix was to POST the
-post-receive again by hand.
+**A run is a row from the moment it is accepted.** The push listener and the trigger engine both
+`INSERT` before they return, with status `QUEUED`, and the worker flips it to `RUNNING` when it
+dequeues it. Before that, a queued run was a closure on a single-threaded executor and nothing else —
+invisible to every read surface, and gone with the process. That was the lossy intake: a redeploy
+landing between the push and the build lost the build with no row anywhere to say so, and the fix was
+to POST the post-receive again by hand. **Both halves of that loss are closed now**, and by different
+mechanisms: the row covers a restart between accept and execution, and the durable claim covers a
+restart before the push was ever accepted — a push announced while this process was away is read back
+off the event log rather than needing a replay.
 
 On boot:
 
@@ -847,25 +865,27 @@ a repository's own listing will show.
 - Set `qits.ci.git-host-url` / `qits.ci.container-git-url` to the git host as reachable from the ci
   host and from a step container respectively. **Both end at the service, not at `/git`** — ci
   appends `/git/<repoId>` itself, because `/git` is the codebase's segment for the git host while
-  *which* service hosts it is a deployment fact. The git host is qits-artifacts, which serves it
-  under its own gateway segment, so the value is `http://qits-artifacts:8080/artifacts` and a read
-  lands on `/artifacts/git/<repoId>`. The container-side alias only resolves on the
-  network ci itself is on, so `qits.ci.network` must be set together with it.
+  *which* service hosts it is a deployment fact. The git host is **qits-githost**, which serves
+  `/git/**` at its root, so the value is scheme+host+port and nothing else —
+  `http://qits-githost:8080`, and a read lands on `/git/<repoId>`. It used to be
+  `http://qits-artifacts:8080/artifacts` while the host lived inside qits-artifacts; a value that
+  keeps that segment 404s every read, and a 404 on the blob reads as "this commit declares no
+  pipeline", so every push would report no pipeline instead of an error. The container-side alias
+  only resolves on the network ci itself is on, so `qits.ci.network` must be set together with it.
 - Leave `qits.auth.machine.audience=qits-ci` alone. It is this service's id at qits-idp — the `aud`
   its tokens carry — not a deployment fact.
-- Turn the intake's guard on with `QITS_AUTH_MACHINE_REQUIRED=true`, once qits-idp is reachable.
+- Turn the machine guard on with `QITS_AUTH_MACHINE_REQUIRED=true`, once qits-idp is reachable.
   That one platform-wide gate switches on both the bearer validation and every `MachineAuth` call in
   the code, and it ships **off**: with it off the endpoints behave exactly as they did under network
   trust, no bearer needed. There is no third state. Turning it on with no audience set fails at
   startup rather than accepting tokens addressed elsewhere.
-- Grant the git host's qits-idp client `project=*`. qits-artifacts hosts every project's
-  repositories, so it holds the wildcard rather than a list edited per repository; the intake matches
-  the `project` claim against the pushed **repository id**, because qits-ci has no project entity to
-  name. A client that posts `/ci/api/events/trigger` needs the same wildcard — an event names no
-  repository, so a grant naming one is a 403 there.
-- Allow-list `/ci/api/events/` for unauthenticated access — the caller carries no user session. That
-  allowlist is qits-gateway's `PublicPaths`, and it is about the *user* track only: the machine gate
-  above still applies to what arrives.
+- Grant `project=*` to whatever posts `/ci/api/events/trigger`. That is the only guarded write left,
+  and an event names no repository, so a grant naming one is a 403 there. **The git host needs no
+  qits-idp client at all any more** — it announces pushes on the bus instead of posting to a guarded
+  intake.
+- The `/ci/api/events/` exemption on qits-gateway's `PublicPaths` covered the push intake and can go
+  with it. The manual trigger is a machine call and is expected to carry a bearer; nothing on that
+  prefix needs unauthenticated access.
 - Keep the run **read** surface behind the deployment's auth policy. It is not machine-guarded, and
   it returns build logs.
 - **Configure nothing for the deployer, and know that this is a change.** A deployment used to point
@@ -921,7 +941,7 @@ a repository's own listing will show.
 
 ## What is deliberately *not* here
 
-The git host and its post-receive hook (qits-artifacts), the repository and workspace contexts, and
+The git host and everything it publishes (qits-githost), the repository and workspace contexts, and
 anything to do with running a pipeline inside a workspace container. Pipelines run in their own
 throwaway containers; a workspace is never involved.
 

@@ -92,8 +92,19 @@ public class CiQueuedRunTest extends CiTestSupport {
             Thread.currentThread().interrupt();
           }
         });
-    service.onPostReceive(repoId, "main", "0".repeat(40), shaOf(repoId));
+    announcePush(repoId, shaOf(repoId));
     return inStepZero.get(20, TimeUnit.SECONDS);
+  }
+
+  /**
+   * One push announced, as {@code bus/ScmPublishCommitListener} announces it: a fresh event id per
+   * call, because every push is its own {@code SCMPublishCommit}. Reusing one would be a second run
+   * for one announcement, which the unique constraint on
+   * {@code (trigger_event_id, repo_id, config_path)} refuses — correctly.
+   */
+  private void announcePush(String repoId, String sha) {
+    service.onPostReceive(
+        repoId, "main", "0".repeat(40), sha, UUID.randomUUID().toString());
   }
 
   private CiRun soleRun(String repoId) {
@@ -110,7 +121,7 @@ public class CiQueuedRunTest extends CiTestSupport {
     String blockingRunId = occupyTheWorker();
     String repoId = seedRepo();
 
-    service.onPostReceive(repoId, "main", "0".repeat(40), shaOf(repoId));
+    announcePush(repoId, shaOf(repoId));
 
     // Accepted, on the record, and not started: the whole point. Before this status existed the
     // only trace of this run was a closure on an executor.
@@ -141,7 +152,7 @@ public class CiQueuedRunTest extends CiTestSupport {
   public void theActiveListingIsEveryQueuedAndRunningRunAcrossRepositories() throws Exception {
     String blockingRunId = occupyTheWorker();
     String waiting = seedRepo();
-    service.onPostReceive(waiting, "main", "0".repeat(40), shaOf(waiting));
+    announcePush(waiting, shaOf(waiting));
     forgetLoadedEntities();
 
     List<CiRun> active = service.activeRuns();
@@ -215,7 +226,7 @@ public class CiQueuedRunTest extends CiTestSupport {
   public void aRunCancelledWhileQueuedIsFailedAndNeverPickedUp() throws Exception {
     occupyTheWorker();
     String repoId = seedRepo();
-    service.onPostReceive(repoId, "main", "0".repeat(40), shaOf(repoId));
+    announcePush(repoId, shaOf(repoId));
     String queuedId = soleRun(repoId).id;
     int launchedBefore = fakeRunner.executed().size();
 
@@ -299,7 +310,7 @@ public class CiQueuedRunTest extends CiTestSupport {
     // anyone can know the repository declares no pipeline, so it has to be taken back.
     occupyTheWorker();
     String repoId = "silent-" + UUID.randomUUID();
-    service.onPostReceive(repoId, "main", "0".repeat(40), shaOf(repoId));
+    announcePush(repoId, shaOf(repoId));
 
     assertEquals(CiRunStatus.QUEUED, soleRun(repoId).status);
 
@@ -318,7 +329,7 @@ public class CiQueuedRunTest extends CiTestSupport {
     for (ConfigLookup lookup : List.of(ConfigLookup.gone(), ConfigLookup.unreachable())) {
       String repoId = "vanished-" + UUID.randomUUID();
       fakeConfig.put(repoId, shaOf(repoId), lookup);
-      service.onPostReceive(repoId, "main", "0".repeat(40), shaOf(repoId));
+      announcePush(repoId, shaOf(repoId));
       service.awaitIdle();
       forgetLoadedEntities();
       assertEquals(0, service.runsFor(repoId).size(), lookup.status().name());

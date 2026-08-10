@@ -3,11 +3,12 @@ package eu.wohlben.qits.ci.control;
 import eu.wohlben.qits.ci.error.BadRequestException;
 
 /**
- * Validates the untrusted strings that reach a filesystem path or an argv. Three arrive from the
- * event intake — which sits on the token-free {@code PublicPaths} list with a token that is blank in
- * dev — one, the step's {@code image}, arrives from a file in the repository being tested, and one,
- * the daemon version, arrives in a bus payload. All five are attacker-reachable by design, so all
- * five are checked here rather than trusted.
+ * Validates the untrusted strings that reach a filesystem path or an argv. Three — the repo id, the
+ * branch and the sha — arrive on an {@code SCMPublishCommit} payload, which says what somebody
+ * pushed and is therefore exactly as attacker-shaped as the intake POST it replaced; one, the step's
+ * {@code image}, arrives from a file in the repository being tested; and one, the daemon version,
+ * arrives in another bus payload. All five are attacker-reachable by design, so all five are checked
+ * here rather than trusted.
  *
  * <p>These patterns are <b>defence in depth, not the only guard</b>. Nothing here is ever
  * interpolated into a shell string: the container's whole contract rides as environment and the
