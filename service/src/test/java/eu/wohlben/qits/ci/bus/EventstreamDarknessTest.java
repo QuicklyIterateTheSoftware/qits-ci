@@ -4,13 +4,15 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.ci.events.BuildSuccessful;
-import eu.wohlben.qits.eventstream.QitsEventListener;
+import eu.wohlben.qits.eventstream.QitsDurableEventListener;
 import eu.wohlben.qits.eventstream.control.EventStreamSubscriber;
+import io.quarkus.arc.ClientProxy;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.enterprise.inject.Any;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
+import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
@@ -26,11 +28,17 @@ import org.junit.jupiter.api.Test;
  * rather than as misconfiguration. {@code BuildSuccessfulPublishTest} is the one class that opts
  * back in, and it does so against a stub.
  *
- * <p><b>The listener bean survives ArC.</b> {@link BuildSuccessfulListener} is injected nowhere by
- * name — it is reached only through {@code Instance<QitsEventListener<?>>} — and unused-bean removal
- * would leave a deployment that subscribes to nothing, receives nothing and logs nothing to say so.
- * An {@code Instance} injection point counts as a use, which is why no {@code @Unremovable} is
- * needed; this is the assertion that keeps that true rather than believed.
+ * <p><b>The listener beans survive ArC.</b> None of the three is injected anywhere by name — they
+ * are reached only through {@code Instance<QitsDurableEventListener>} — and unused-bean removal
+ * would leave a deployment that subscribes to nothing, receives nothing, sweeps nothing and says
+ * nothing about it. An {@code Instance} injection point counts as a use, which is why no {@code
+ * @Unremovable} is needed; this is the assertion that keeps that true rather than believed.
+ *
+ * <p><b>And their consumer ids are asserted here because they are storage.</b> Each one keys a
+ * {@code consumed_event} ledger and a {@code consumer_watermark}; changing one silently mints a
+ * brand-new consumer that initializes at the head of the log and skips everything in between, and
+ * reusing one hands a listener another's claims. A literal in this test is what makes either show up
+ * as a red build rather than as a quiet gap in what was consumed.
  */
 @QuarkusTest
 public class EventstreamDarknessTest {
@@ -40,7 +48,7 @@ public class EventstreamDarknessTest {
 
   @Inject EventStreamSubscriber subscriber;
 
-  @Inject @Any Instance<QitsEventListener<?>> listeners;
+  @Inject @Any Instance<QitsDurableEventListener> listeners;
 
   @Test
   public void theBusIsDarkOutsideADeployment() {
@@ -49,11 +57,31 @@ public class EventstreamDarknessTest {
   }
 
   @Test
-  public void theBuildSuccessfulListenerIsARegisteredBean() {
-    assertTrue(
+  public void allThreeDurableListenersAreRegisteredBeans() {
+    Set<Class<?>> registered =
         StreamSupport.stream(listeners.spliterator(), false)
-            .anyMatch(BuildSuccessfulListener.class::isInstance),
-        "the listener must survive unused-bean removal, or the subscriber subscribes to nothing");
-    assertEquals(BuildSuccessful.class, new BuildSuccessfulListener().eventType());
+            .map(listener -> (Class<?>) ClientProxy.unwrap(listener).getClass())
+            .collect(Collectors.toSet());
+    assertTrue(
+        registered.containsAll(
+            Set.of(
+                BuildSuccessfulListener.class,
+                CiEventTriggerListener.class,
+                DaemonReleaseListener.class)),
+        "a listener removed as unused subscribes to nothing and is never swept: " + registered);
+  }
+
+  @Test
+  public void theConsumerIdsAreTheOnesTheStoredWatermarksAreKeyedOn() {
+    assertEquals("ci-release-train", BuildSuccessfulListener.CONSUMER_ID);
+    assertEquals("ci-event-triggers", CiEventTriggerListener.CONSUMER_ID);
+    assertEquals("ci-daemon-adopt", DaemonReleaseListener.CONSUMER_ID);
+    assertEquals(
+        3,
+        StreamSupport.stream(listeners.spliterator(), false)
+            .map(QitsDurableEventListener::consumerId)
+            .distinct()
+            .count(),
+        "two listeners sharing an id share a watermark and each other's claims");
   }
 }

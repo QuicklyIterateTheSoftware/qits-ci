@@ -199,14 +199,21 @@ qits-ci is also the **first consumer** of the same bus: `service/…/bus/BuildSu
 receives its own announcement back off `/events/stream` and logs it. Nothing hangs off that yet; it
 is there because a producer nobody has ever seen consume is a bus with an untested second half.
 
-Consuming has **two seams**. `QitsEventListener<E>` names an event class and gets it deserialized —
-the one to reach for. `QitsRawEventListener` names a set of event *names* at runtime, may say `"*"`
-for all of them, and gets the frame itself; it exists for consumers whose interest is unknowable at
-startup, which is what a trigger reading selections out of other repositories' files is. The
-subscribe frame is the union of both, `"*"` collapsing it to `["*"]`, and a frame both want reaches
-both — typed first.
+Consuming has **three seams**, and qits-ci uses the third for all of its listeners.
+`QitsEventListener<E>` names an event class and gets it deserialized; `QitsRawEventListener` names a
+set of event *names* at runtime, may say `"*"` for all of them, and gets the frame itself. Both are
+live-only and at-most-once: what is broadcast while a consumer is disconnected, restarting or
+mid-cutover is gone. `QitsDurableEventListener` is the answer to that — the library claims each event
+for each listener in one transaction with the handler, and pages a per-listener watermark forward
+from the event log at startup and on a schedule, so a disconnect is a delay instead of a hole. The
+subscribe frame is the union of all three, `"*"` collapsing it to `["*"]`.
 
-**The trigger engine is that raw consumer, and it says `"*"` permanently**, so this service's
+**Every qits-ci listener is durable**, because each of them acts on something a lost event would
+silently not do: a release train that stops triggering, a daemon release that is never adopted. Their
+consumer ids — the stable names their bookkeeping is keyed on — are `ci-event-triggers`,
+`ci-release-train` and `ci-daemon-adopt`.
+
+**The trigger engine says `"*"` permanently**, so this service's
 subscribe frame *is* `["*"]`: the event names it cares about live in other repositories' files and
 change with every push, and a listener that waited to read config before naming anything would never
 open the stream it reads config over. `BuildSuccessfulListener` no longer appears on the wire and is
@@ -456,7 +463,8 @@ repository's others.**
 > **A `when:` that matches an event your own build publishes is an unbounded build loop.** A green
 > run publishes `BuildSuccessful`; a trigger in the same repository selecting that event runs a
 > build, which publishes another `BuildSuccessful`, and so on forever. Each hop is a *new* event id,
-> so the at-most-once dedupe never engages — it stops replays, not descendants. A `SoftwareRelease`
+> so neither the durable claim nor the run-row dedupe engages — they stop replays, not descendants.
+> A `SoftwareRelease`
 > trigger has the same shape and one extra trap: an `exact:` on the upstream's repo id is the whole
 > defense, and widening it to `prefix: qits-spa-` would close the circle by matching the repository's
 > own releases.
@@ -762,8 +770,9 @@ On boot:
 - push-triggered runs left `RUNNING` are marked `FAILED` — their in-flight step died with the
   process and CI cannot assume arbitrary repository-authored work is safe to repeat;
 - event-triggered runs left `RUNNING` have partial step rows cleared and restart from their stored
-  event/trigger snapshot. The event stream is live and at-most-once, so event pipelines are an
-  at-least-once boundary and their scripts must be idempotent;
+  event/trigger snapshot. That restart is what recovers them: the event was claimed when it arrived,
+  so catch-up will not offer it a second time. Event pipelines are an at-least-once boundary and
+  their scripts must be idempotent;
 - runs left `QUEUED` are **re-enqueued**, oldest first, because they never started and the row says
   everything needed to start them. Nothing is lost and nothing has to be replayed;
 - containers carrying the `qits.ci.run` label are removed, and a daemon from a previous life that
@@ -771,8 +780,8 @@ On boot:
 
 For an event-triggered run the row includes the original event timestamp, its canonical payload and
 the exact trigger-file content that matched. Recovery reparses that snapshot, preserving both the
-pipeline and `$QITS_EVENT_*` environment even if `main` moved while CI was down. It does not depend
-on the live-only event stream redelivering the event.
+pipeline and `$QITS_EVENT_*` environment even if `main` moved while CI was down. It asks the event
+log for nothing.
 
 No durability is added beyond the row by design — the launch table is still memory, and that is what
 keeps the rest of the restart story free.

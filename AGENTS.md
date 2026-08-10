@@ -268,13 +268,20 @@ and this process simply could not ask.
 **`QUEUED` survives a restart.** `sweepInterrupted` re-enqueues those rows, oldest first, so a
 redeploy landing between acceptance and execution no longer eats either a push-triggered or an
 event-triggered build. A `RUNNING` push row is still marked `FAILED`; arbitrary push work may not be
-safe to repeat. A `RUNNING` event row is reset and restarted from its snapshot because the live,
-at-most-once bus cannot redeliver it. Event-trigger scripts are therefore an at-least-once boundary
-and must be idempotent. Nothing here adds durability beyond the row.
+safe to repeat. A `RUNNING` event row is reset and restarted from its snapshot. Event-trigger scripts
+are therefore an at-least-once boundary and must be idempotent. Nothing here adds durability beyond
+the row.
+
+**The row is still the recovery, and durable consumption did not change that.** The reason used to be
+that the bus is at-most-once and could not redeliver; it can now (see "The event bus"), and the row
+is still what recovers a `RUNNING` event run — because the event has already been *claimed* by the
+time a run is running, so the sweep will not offer it again. The two mechanisms cover different
+windows and are stacked, not alternatives: the claim covers the arrival, the row covers the
+execution.
 
 An event run stores the original timestamp, canonical payload and exact trigger-file content on its
-row. Recovery reparses that immutable snapshot: it neither reads a moved branch nor depends on the
-live-only event stream redelivering an occurrence.
+row. Recovery reparses that immutable snapshot: it neither reads a moved branch nor asks the event
+log for anything.
 
 **`onStart` skips test mode, so `sweepInterrupted` is package-private and the suite drives it.** A
 claim about a restart is made by seeding the rows a dead process would have left and calling it —
@@ -395,16 +402,18 @@ the client). Every claim in this section is a measurement that test now repeats.
 
 `eventstream/` is the [qits-eventstream](https://github.com/QuicklyIterateTheSoftware/qits-eventstream)
 repository, a **submodule** — the platform's event bus client (`QitsEvent`, `QitsEventBus.publish`,
-`QitsEventListener`, `QitsRawEventListener`, `CausationScope`). It used to be a directory here, a
+`QitsEventListener`, `QitsRawEventListener`, `QitsDurableEventListener`, `CausationScope`). It used
+to be a directory here, a
 library waiting to move out; it has moved, and qits-ci is now an ordinary consumer that happens to
-build it in the same reactor. The design is the superproject's `eventsourcing-plan.md` and
-`event-causation-plan.md`.
+build it in the same reactor. The design is the superproject's `eventsourcing-plan.md`,
+`event-causation-plan.md` and `event-delivery-guarantees-plan.md`.
 
 **Its rules are in its own repository and are not restated here.** Read `eventstream/AGENTS.md`
-before changing anything about how this service publishes or listens; the six that bite are the
+before changing anything about how this service publishes or listens; the seven that bite are the
 canonical form as a wire contract, `eventId` fixed at construction, the HTTP/1.1 pin, an outbox that
-is empty in a healthy process, causation stamped in the envelope by the bus alone, and the typed vs
-raw consuming seams with their subscribe-frame union. A second copy of any of that in this file is a
+is empty in a healthy process, causation stamped in the envelope by the bus alone, the three
+consuming seams with their subscribe-frame union, and the durable one's exactly-once *effect* with
+its "a throw leaves the event owed" failure policy. A second copy of any of that in this file is a
 copy that will drift.
 
 **The extraction rule is now a repository boundary rather than a test.** It read "no
@@ -427,17 +436,52 @@ native-image registration, which lives with the deployable rather than with the 
 
 ### How the deployable uses it
 
-`service/…/bus/` is the whole of qits-ci's wiring, and it is two beans and no configuration:
-`BuildSuccessfulAnnouncer` publishes, `BuildSuccessfulListener` consumes, and the subscriber dials
-itself on `StartupEvent` because a listener bean exists. Registering a listener really is "add a
-bean" — no channel name, no annotation — and no `@Unremovable` is needed, because
-`EventDispatcher`'s `Instance<QitsEventListener<?>>` is what ArC counts as a use.
-`EventstreamDarknessTest` asserts that rather than trusting it, since a removed listener
-subscribes to nothing and says nothing about it. **A `QitsRawEventListener` is registered the same
-way and survives removal for the same reason** — `Instance<QitsRawEventListener>` is a second
-injection point of the same kind — and the eventstream suite proves it the same way too, with a
-raw listener that is injected nowhere and whose signature (a name no `eventType()` produces) has to
-turn up in the subscribe frame.
+`service/…/bus/` is the whole of qits-ci's wiring: two announcers publishing, and three listeners
+consuming. The subscriber dials itself on `StartupEvent` because listener beans exist. Registering a
+listener really is "add a bean" — no channel name, no annotation — and no `@Unremovable` is needed,
+because `EventDispatcher`'s `Instance<QitsDurableEventListener>` is what ArC counts as a use.
+`EventstreamDarknessTest` asserts that rather than trusting it, since a removed listener subscribes
+to nothing, is swept for nothing, and says nothing about it.
+
+**All three consume DURABLY, and none of them is a typed or raw listener any more.** The library's
+other two seams are live-only and at-most-once — a frame broadcast while this process is
+disconnected, restarting or mid-cutover is gone — and the 2026-08-10 rebootstrap campaign measured
+what that costs a platform whose release train rides the bus. `QitsDurableEventListener` is the
+answer: one funnel claims the event in `consumed_event` and calls the handler in one transaction, and
+a watermark is paged forward from qits-events' log at startup and on a schedule, so a disconnect is a
+delay rather than a hole. `event-delivery-guarantees-plan.md` in the superproject is the design and
+`eventstream/AGENTS.md` is the contract; what follows is only what is qits-ci's to get right.
+
+**Each listener's `consumerId()` is STORAGE, not a label**, and the three shipped are literals in
+`EventstreamDarknessTest` for that reason:
+
+| bean | `consumerId()` | `signatures()` | `selects` |
+|---|---|---|---|
+| `CiEventTriggerListener` | `ci-event-triggers` | `["*"]` | default (see below) |
+| `BuildSuccessfulListener` | `ci-release-train` | `BuildSuccessful` | default |
+| `DaemonReleaseListener` | `ci-daemon-adopt` | `SoftwareRelease` | the daemon's own releases |
+
+Change one and you mint a brand-new consumer: the old claims are orphaned and the new id initializes
+at the head of the log, silently skipping everything in between. Reuse one and a listener inherits
+another's watermark, believing it has handled events it has never been offered. `ci-release-train` in
+particular says what the *consumption* is, not what the class is called — and note it is not where
+release-train membership is decided. That is the trigger engine's, below.
+
+**Every handler failure is a decision between two, and it has to be made deliberately.** A throw
+rolls the claim back and the event stays owed — offered again forever, with this listener's watermark
+stuck behind it, because the seam has no dead letter and says so. So: **retryable** (the store is
+down, the queue is full — a later attempt could succeed) is left to throw; **poisonous** (a payload
+that will not parse, an event with no name, a release with no `occurredAt` — the same bytes will fail
+identically every time) is a WARN and a return. Each of the three javadocs names its own cases;
+`DurableBusConsumptionTest` asserts them, `HANDLED` versus `FAILED`, through the funnel itself.
+
+**The suite must not be swept behind.** `service/src/test/resources/application.properties` sets
+`qits.eventstream.catchup-at-startup=false` and stretches `qits.eventstream.catchup-interval`,
+because a tick landing mid-test would adopt a daemon release or enqueue a trigger evaluation nothing
+asked for — and `StubEventsServer` scripts a canned list and ignores the cursor, so it would do it
+repeatedly. The scheduler stays *on*: the outbox sweeper is scheduled too and has no business being
+disabled. A test that wants a sweep calls `CatchupSweeper.catchUp()` itself, which is what the
+eventstream suite does.
 
 **The publish hook hangs off a seam, and it is a *second* seam beside `PdNotifier` rather than a
 widening of it.** `RunAnnouncer` (in `ci/control`, implemented in `service/`) is what keeps the `ci`
@@ -563,24 +607,26 @@ to get right rather than the library's:
   is precisely why it still works when binding does not). An unknown *signature* stays DEBUG: that
   one is ordinary traffic, since a subscription set is a filter rather than a promise.
 
-`quarkus-scheduler` (the outbox sweeper's) arrives transitively with the jar and is new to this
+`quarkus-scheduler` (the outbox sweeper's, and now the catch-up sweeper's) arrives transitively with
+the jar and is new to this
 deployable; `quarkus-websockets-next` was already here for the ci-daemon control plane, so the
 client half costs the image nothing. `quarkus-undertow` stays absent — check it with the
 `dependency:tree` line under "The Angular client" after touching this pom.
 
 ## The trigger engine
 
-There are **two** trigger types now, and the second one is the reason the raw-listener seam exists.
+There are **two** trigger types now, and the second one is the reason a frame-shaped consuming seam
+is needed at all.
 A repository commits `.config/qits/ci-event-<anything>.yml` naming a domain event and a selection
 over its payload; a matching event on the bus runs that file's pipeline against the head of `main`.
 The design is the superproject's `ci-event-triggers-plan.md`, the format is `README.md`, and what
 follows is what biting it feels like.
 
 - **`ci/` stays free of the bus, in both directions.** `service/…/bus/CiEventTriggerListener` is the
-  `QitsRawEventListener` bean; it turns an `EventFrame` into `CiEventTriggerService.Arrival`, four
-  plain strings, and hands it over. That is the same seam shape `RunAnnouncer` is on the publishing
-  side, pointed the other way, and it is why `CiEventTriggerService` — which does the real work —
-  imports no `eu.wohlben.qits.eventstream` type. Keep it that way; the extraction rule protects
+  `QitsDurableEventListener` bean; it turns an `EventFrame` into `CiEventTriggerService.Arrival`,
+  four plain strings, and hands it over. That is the same seam shape `RunAnnouncer` is on the
+  publishing side, pointed the other way, and it is why `CiEventTriggerService` — which does the real
+  work — imports no `eu.wohlben.qits.eventstream` type. Keep it that way; the extraction rule protects
   the library, and this one protects the domain.
 - **`onEvent` has a second inbound adapter, and that is all it is.** `POST /ci/api/events/trigger`
   (`CiEventController`) builds the same `Arrival` from a JSON body, so the engine cannot tell a
@@ -597,15 +643,39 @@ follows is what biting it feels like.
   stream it would read config over. `"*"` is the seam's documented idiom for exactly this, and the
   cost is that this deployable's subscribe frame is literally `["*"]` —
   `CiEventTriggerCausationTest` reads it off the stub to keep that from being a belief.
-- **Three threads, and each boundary is deliberate.** `onFrame` runs on the bus's websocket worker,
-  one frame at a time for *every* consumer, so it only enqueues. Evaluation runs on its own
+- **`selects` is left at its default, and that is a decision with a price.** The durable seam asks a
+  listener to narrow with a *pure, cheap* predicate and stores only what it selects. This engine's
+  selection is neither: deciding whether an event matches anything means listing `.config/qits/` in
+  every candidate repository and parsing each trigger file, over HTTP, against answers that change
+  with every push. Putting that in front of the claim would fan out on the dispatch thread — and a
+  `selects` that throws leaves the event *owed*, so one unreachable git host would wedge the
+  watermark. So this consumer selects everything, and **every event on the bus leaves it a claim
+  row**. Bounded rather than unbounded: the sweeper prunes claims the watermark has passed by more
+  than `qits.eventstream.prune-horizon`, so the table is the stream/catch-up overlap window and not a
+  second copy of the log.
+- **Three threads, and each boundary is deliberate.** `onFrame` runs on the bus's websocket worker
+  (or the catch-up sweeper's thread), one frame at a time for *every* consumer, so it only enqueues.
+  Evaluation runs on its own
   single-threaded `ci-trigger-worker`: not the dispatch thread because it reads the git host once per
   candidate repository, and **not `ci-run-worker`** either, though that is the obvious reuse — that
   thread is inside a running pipeline for minutes, and an event evaluated when the build ends is
   evaluated against a `main` that has moved. Single-threaded was once a correctness rule (two
   evaluations of one repository raced for one bare cache on disk); with the caches gone it is a
-  budget — one fan-out at the git host at a time. The queue is bounded; a full one is a WARN naming
-  the event that was not evaluated, which beats turning a burst into heap.
+  budget — one fan-out at the git host at a time. The queue is bounded.
+
+  **A full queue is a failure now, not a WARN and a shrug**, and that is what `onEvent` returning a
+  boolean bought. The engine answers whether it *accepted* the event; a `false` means it was not
+  evaluated, which is a statement about this process being busy rather than a verdict about the
+  event, so the listener throws and the next catch-up sweep offers it again. The WARN stays for the
+  caller that cannot retry, which is the manual-trigger endpoint.
+
+  **State the residual window plainly: the claim commits when the event is ACCEPTED, not when the run
+  row exists.** A crash in the gap between the enqueue and the evaluation loses that event. It is a
+  narrower guarantee than the seam's "exactly-once effect", and it is the deliberate price of keeping
+  the git-host fan-out off the dispatch thread and out of the claiming transaction. Both ends of the
+  gap are covered — a full queue fails rather than drops, and an accepted run is a `QUEUED` row that
+  survives a restart on its own — so what is exposed is milliseconds, not the disconnect windows this
+  migration existed to close.
 - **The causation edge crosses those threads as data, not as context.** `CausationScope` is a plain
   `ThreadLocal` and does not follow work — that is its design, not its limitation. So the frame's
   `id` is written to `ci_run.trigger_event_id`, read back off the row at `announceRun`, and passed to
@@ -630,6 +700,12 @@ follows is what biting it feels like.
   `ci-run-worker`, and before a queue slot is spent rather than after. The `NULL` behaviour is
   untouched — post-receive rows still carry a null `trigger_event_id`, they are just inserted a few
   milliseconds earlier in the life of a push.
+
+  **The durable claim sits above it and neither replaces the other.** A `consumed_event` row makes
+  one event reach the engine at most once, so the constraint fires far less often than it used to —
+  but it stays, because it is on ci's *own* datasource and the claim is not, and what it survives is
+  a race between two evaluations and a restart mid-evaluation. Two nets, one of which is transactional
+  with the run row. Deleting either for tidiness trades a guarantee for a diagram.
 - **The trigger file parser is strict where `ci-post-receive.yml` is lenient**, and the asymmetry is
   the point rather than an inconsistency. In a pipeline an unread key costs a feature; in a
   *selection* it costs correctness, because an absent `when:` means **unconditional** — so a mistyped

@@ -91,22 +91,34 @@ public class CiEventTriggerService {
   }
 
   /**
-   * The entry the raw listener calls. <b>Returns immediately and never throws</b>: the caller is a
-   * socket callback that is delivering to other consumers too, and a throw out of it costs this
-   * listener the frame at best.
+   * The entry the bus listener and the manual-trigger endpoint call. <b>Returns immediately and
+   * never throws</b>: one caller is a socket callback that is delivering to other consumers too, the
+   * other is a request thread that has already promised a 202.
+   *
+   * <p><b>The answer is whether the event was accepted for evaluation</b>, and it is a return value
+   * rather than a swallowed WARN because the durable seam can now act on it. A full queue means this
+   * event was <em>not</em> evaluated, and that is a retryable condition rather than a verdict about
+   * the event: {@code CiEventTriggerListener} turns a {@code false} into a failure, which leaves the
+   * event owed for the next catch-up sweep instead of dropping it. The WARN stays for the caller
+   * that cannot retry.
+   *
+   * <p>A malformed arrival — no id, no name — also answers {@code false}, and it is the caller's job
+   * to tell the two apart. The listener does, by checking the frame before it gets here.
    */
-  public void onEvent(Arrival arrival) {
+  public boolean onEvent(Arrival arrival) {
     if (arrival == null || arrival.eventId() == null || arrival.eventName() == null) {
-      return;
+      return false;
     }
     try {
       evaluator.execute(() -> evaluateQuietly(arrival));
+      return true;
     } catch (RejectedExecutionException full) {
       // Either the queue is genuinely backed up or the process is shutting down. Both are worth a
       // line naming the event, because the event is simply not evaluated and nothing else will say so.
       LOG.warnf(
           "Trigger evaluation queue is full — event %s (%s) was not evaluated",
           arrival.eventId(), arrival.eventName());
+      return false;
     }
   }
 
