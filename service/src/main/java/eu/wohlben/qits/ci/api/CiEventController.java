@@ -5,11 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.auth.MachineAuth;
 import eu.wohlben.qits.auth.QitsClaims;
 import eu.wohlben.qits.ci.control.CiEventTriggerService;
-import eu.wohlben.qits.ci.control.CiRunService;
 import eu.wohlben.qits.ci.error.BadRequestException;
 import jakarta.inject.Inject;
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotBlank;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
@@ -28,52 +25,34 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.jboss.logging.Logger;
 
 /**
- * The CI event intake (docs/epics/qits-ci/) — the wire contract between the git host's post-receive
- * hook and ci, kept HTTP even in-process so an extracted ci service receives the identical payload.
- * The write surface of {@code /ci/api} that guards a machine caller.
+ * The one place a domain event reaches ci by hand: {@code POST /ci/api/events/trigger}. The write
+ * surface of {@code /ci/api} that guards a machine caller.
  *
- * <p>{@code POST /ci/api/events/post-receive} is a cross-repo contract: qits-artifacts' {@code
- * CiPostReceiveNotifier} POSTs to exactly this path via its {@code qits.ci.intake-url}, and it is
- * fire-and-forget — a delivery failure is logged at debug and nothing else. A mismatch here
- * therefore raises no error anywhere; CI just stops running. The path carries no {@code ci}
- * segment of its own because {@code quarkus.rest.path=/ci/api} already says it twice over.
- * It is hidden from the OpenAPI document: machine-only, guarded, and its wire contract is written
- * down in qits-artifacts rather than here.
+ * <p><b>The push intake used to live here and is gone.</b> {@code POST
+ * /ci/api/events/post-receive} was the wire contract between the git host's post-receive hook and
+ * ci — {@code {repoId, branch, oldSha, newSha}}, fire and forget, with a delivery failure logged at
+ * debug on the sender's side and CI simply not running. qits-githost publishes {@code
+ * SCMPublishCommit} through the event log instead, and {@code bus/ScmPublishCommitListener} consumes
+ * it durably, so a qits-ci that was down while a push landed reads it back. What was an endpoint,
+ * a DTO, a machine guard and a replay-by-hand trick is now one listener bean.
  *
- * <p>{@code POST /ci/api/events/trigger} is the sibling and is <b>not</b> hidden, on the same
- * criterion pointed the other way: a person invokes it on purpose and its contract is written down
- * nowhere else. It replays a domain event by hand, so both operations live on this one resource —
- * the guard and the path are the same in each.
+ * <p>This resource is therefore no longer a pair, and the operation that is left is the one that was
+ * <b>not</b> hidden from the OpenAPI document: a person invokes it on purpose and its contract is
+ * written down nowhere else. It <b>evaluates before it answers</b>, because the event it carries is
+ * on no log and nothing anywhere can offer it a second time — see {@link #trigger}.
  *
- * <p>What they no longer share is the answer. The intake accepts and returns: its sender is the git
- * host's hook, whose push is already on the record, and its work becomes a {@code QUEUED} row before
- * the 202. The manual trigger <b>evaluates before it answers</b>, because the event it carries is on
- * no log and nothing anywhere can offer it a second time — see {@link #trigger}.
- *
- * <h2>What the guard names, and why it is the repoId</h2>
- *
- * <p>The guard is {@code requireProject(event.repoId())} — the {@code project} claim of the caller's
- * token is matched against the <b>repository id</b> of the push. That is a deliberate choice and it
- * needs saying, because the claim is named after something else.
- *
- * <p><b>qits-ci cannot name a project.</b> It has no project entity, no lookup and no
- * qits-projects client; {@code ci_run.repo_id} is a plain string with no relation to anything (see
- * V1's own comment, {@code CiCandidateRepos}, and {@code SoftwareRelease}: "no projectId — qits-ci
- * never learns one"). Deriving one would mean a synchronous call to qits-projects on the push path,
- * a new config key and a new way for a push to fail — to gain precision over a mapping this service
- * would then have to trust anyway. The repoId is the finest thing it can honestly assert, so that is
- * what is asserted.
- *
- * <p><b>Both callers still work.</b> qits-artifacts hosts every project's repositories, so its
- * client is granted {@code project=*}, which covers any value (see qits-auth-core's wildcard). A
- * deployment that wants a narrower grant spells repository ids in the {@code project} claim, and
- * that is the cost of the decision. Revisit it when qits-ci gains a real project seam — and change
- * the grants in the same commit.
+ * <h2>What the guard names</h2>
  *
  * <p><b>The manual trigger names no repository, so it demands them all</b> — {@code
  * requireProject(QitsClaims.ANY)}, a token granted {@code project=*}. An event is evaluated against
  * every candidate repository, so the narrowest honest grant for it is every project rather than one,
- * and a token scoped to a single repository is a 403 there while it is accepted at the intake.
+ * and a token scoped to a single repository is a 403 here.
+ *
+ * <p><b>qits-ci cannot name a project</b>, which is why the claim it reads is the coarse one. It has
+ * no project entity, no lookup and no qits-projects client; {@code ci_run.repo_id} is a plain string
+ * with no relation to anything (see V1's own comment, {@code CiCandidateRepos}, and {@code
+ * SoftwareRelease}: "no projectId — qits-ci never learns one"). Revisit that when qits-ci gains a
+ * real project seam — and change the grants in the same commit.
  */
 @Path("/events")
 @Produces(MediaType.APPLICATION_JSON)
@@ -85,33 +64,11 @@ public class CiEventController {
   /** What a caller told to retry should wait. Short: the usual cause is a git host coming back. */
   private static final String RETRY_AFTER_SECONDS = "5";
 
-  @Inject CiRunService runService;
-
   @Inject CiEventTriggerService triggers;
 
   @Inject ObjectMapper objectMapper;
 
   @Inject MachineAuth machineAuth;
-
-  /** One updated branch ref of a received push. {@code oldSha} is all-zeros on branch creation. */
-  public record PostReceiveEvent(
-      @NotBlank String repoId, @NotBlank String branch, String oldSha, @NotBlank String newSha) {}
-
-  /**
-   * Accepts the event and returns immediately — the run executes on ci's worker.
-   *
-   * <p>The guard runs before the payload is acted on, and only after validation: an unparseable
-   * event is a 400 whether or not the caller could have been let in. With the gate off it returns at
-   * once and this endpoint behaves exactly as it did under network trust.
-   */
-  @POST
-  @Path("/post-receive")
-  @Operation(hidden = true)
-  public Response postReceive(@Valid PostReceiveEvent event) {
-    machineAuth.requireProject(event.repoId());
-    runService.onPostReceive(event.repoId(), event.branch(), event.oldSha(), event.newSha());
-    return Response.accepted().build();
-  }
 
   /** One domain event, supplied by the caller instead of by the bus. */
   public record TriggerEventRequest(
@@ -199,9 +156,9 @@ public class CiEventController {
    * type: the engine {@code readTree}s it and walks it, and inventing a canonicalization here would
    * be a second wire format.
    *
-   * <p>The guard demands a token granted every project ({@code project=*}), unlike the intake beside
-   * it, which demands the pushed repository. This call names no repository — it is evaluated against
-   * every candidate — so the repository-scoped grant it would need is "all of them".
+   * <p>The guard demands a token granted every project ({@code project=*}). This call names no
+   * repository — it is evaluated against every candidate — so the repository-scoped grant it would
+   * need is "all of them".
    */
   @POST
   @Path("/trigger")

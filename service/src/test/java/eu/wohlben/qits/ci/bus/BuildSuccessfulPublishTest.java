@@ -73,6 +73,8 @@ public class BuildSuccessfulPublishTest {
 
   @Inject FakeCiStepRunner fakeRunner;
 
+  @Inject ScmPublishCommitListener pushes;
+
   @BeforeEach
   void resetState() {
     fakeRunner.reset();
@@ -83,7 +85,7 @@ public class BuildSuccessfulPublishTest {
   public void aGreenRunPublishesOneBuildSuccessfulCarryingTheRunsCoordinates() throws Exception {
     String repoId = seedOriginWithConfig(CONFIG_ONE_STEP);
     String sha = tipOf(repoId);
-    postReceive(repoId, "main", ZERO_SHA, sha);
+    announcePush(repoId, "main", ZERO_SHA, sha);
 
     Map<String, Object> run = awaitTerminalRun(repoId);
     assertEquals("SUCCESS", run.get("status"));
@@ -122,11 +124,11 @@ public class BuildSuccessfulPublishTest {
   @Test
   public void eachRunGetsItsOwnEventId() throws Exception {
     String first = seedOriginWithConfig(CONFIG_ONE_STEP);
-    postReceive(first, "main", ZERO_SHA, tipOf(first));
+    announcePush(first, "main", ZERO_SHA, tipOf(first));
     awaitTerminalRun(first);
 
     String second = seedOriginWithConfig(CONFIG_ONE_STEP);
-    postReceive(second, "main", ZERO_SHA, tipOf(second));
+    announcePush(second, "main", ZERO_SHA, tipOf(second));
     awaitTerminalRun(second);
 
     List<StubEventsServer.Put> puts = awaitPuts(2);
@@ -137,16 +139,10 @@ public class BuildSuccessfulPublishTest {
         "a reused id is a 400 from qits-events, not a second event");
   }
 
-  // --- the wire contract the git host speaks (CiPostReceiveNotifier's payload) ---
+  // --- the push, as qits-githost announces it ---
 
-  private void postReceive(String repoId, String branch, String oldSha, String newSha) {
-    given()
-        .contentType(ContentType.JSON)
-        .body(Map.of("repoId", repoId, "branch", branch, "oldSha", oldSha, "newSha", newSha))
-        .when()
-        .post("/ci/api/events/post-receive")
-        .then()
-        .statusCode(202);
+  private void announcePush(String repoId, String branch, String oldSha, String newSha) {
+    pushes.onFrame(ScmPushFrames.push(repoId, branch, oldSha, newSha));
   }
 
   // --- git plumbing (StubGitHost serves these bares as <base>/git/<repoId>) ---

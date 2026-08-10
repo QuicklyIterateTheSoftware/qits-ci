@@ -4,6 +4,7 @@ import eu.wohlben.qits.ci.events.BuildSuccessful;
 import eu.wohlben.qits.ci.events.SoftwareRelease;
 import eu.wohlben.qits.eventstream.control.EventEnvelope;
 import eu.wohlben.qits.eventstream.control.EventFrame;
+import eu.wohlben.qits.githost.events.SCMPublishCommit;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
@@ -34,10 +35,19 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * <p><b>Why these types.</b> They are the whole of what crosses the wire: {@link BuildSuccessful} is
  * serialized on the way out and deserialized on the way back in (the round trip is one service),
  * {@link SoftwareRelease} is serialized on the way out and never read back here — qits-ci publishes
- * that name and subscribes to nothing under it — {@link EventEnvelope} is the PUT body, and {@link
+ * that name and subscribes to nothing under it — {@link SCMPublishCommit} is another repository's
+ * record and is only ever read <em>in</em>, {@link EventEnvelope} is the PUT body, and {@link
  * EventFrame} is what arrives on {@code /events/stream}. A listener for a second event type needs
  * its class added here, and {@code EventWireReflectionTest} asserts that against the registered
  * listener beans rather than leaving it to be remembered.
+ *
+ * <p><b>An event this service only CONSUMES is on this list for the mirror of the reason a
+ * published-only one is.</b> {@link SCMPublishCommit} arrives from qits-githost and {@code
+ * ScmPublishCommitListener} binds it with {@code CanonicalJson.payloadTo} — Jackson finding a
+ * record's components by reflection again, on the reading side this time. Unregistered, the binary
+ * would throw on every push and settle it unbuilt as poison: CI would stop, quietly, with one WARN
+ * per push. That the class comes from a jar another repository publishes changes nothing — the
+ * registration is a statement about this image.
  *
  * <p><b>An event this service only publishes is exactly as dependent on this list</b>, which is
  * worth stating because "nothing binds it back" reads like a reason to skip it. The failure is on
@@ -82,6 +92,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
     targets = {
       BuildSuccessful.class,
       SoftwareRelease.class,
+      SCMPublishCommit.class,
       EventEnvelope.class,
       EventFrame.class
     },

@@ -52,16 +52,19 @@ CLI client. What `docker: true` changes is that the step gets to talk to it too.
 sequenceDiagram
     autonumber
     actor Dev as developer
+    participant Git as qits-githost
+    participant Bus as qits-events
     participant Art as qits-artifacts
     participant Ci as qits-ci
     participant Dockerd as host dockerd
     participant Step as step container
     participant Pd as qits-platform-deployments
 
-    Dev->>Art: git push
-    Art->>Ci: POST /ci/api/events/post-receive<br/>{repoId, branch, oldSha, newSha}
-    Ci-->>Art: 202 — fire-and-forget, the hook ignores this
-    Ci->>Art: GET /artifacts/git/{repoId}/blob/{newSha}/.config/qits/ci-post-receive.yml<br/>one file at the pushed commit — no clone, no mirror
+    Dev->>Git: git push
+    Git->>Bus: SCMPublishCommit{repoId, branch, oldSha, sha, …, suppressCi}<br/>through the outbox — durable, so a qits-ci that was down reads it back
+    Bus-->>Ci: the frame, or a catch-up sweep of it later
+    Note over Ci: suppressCi (git push -o qits.no-ci) ⇒ no run at all
+    Ci->>Git: GET /git/{repoId}/blob/{sha}/.config/qits/ci-post-receive.yml<br/>one file at the pushed commit — no clone, no mirror
     Ci->>Ci: parse the steps, pin the daemon version, write the run row RUNNING
 
     loop one fresh container per step, in sequence
@@ -71,7 +74,7 @@ sequenceDiagram
         Step->>Art: GET $QITS_CI_DAEMON_BINARY_URL → chmod +x → exec
         Step-->>Ci: ⇠ dials the CONTROL WebSocket, Hello{daemonId, secret}
         Note over Step,Ci: the container dials OUT. qits-ci never dials in and<br/>never learns an address from a container.
-        Step->>Art: shallow clone --depth 50, checkout $QITS_CI_SHA
+        Step->>Git: shallow clone --depth 50, checkout $QITS_CI_SHA
         Step-->>Ci: Initialized — or InitFailed{SHA_GONE}, the force-push backstop
         Ci-->>Step: RunStep{script, timeoutSeconds} — the reply IS the step<br/>← host-stamped started_at
         Step-->>Ci: Output{chunk} … many, streamed as the script prints

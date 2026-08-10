@@ -15,11 +15,19 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
- * The event intake with the machine gate ON — the deployment posture once qits-idp exists.
+ * The write surface with the machine gate ON — the deployment posture once qits-idp exists.
  *
- * <p>Its twin is {@code CiPipelineBoundaryTest}, which POSTs the same address with no credential at
- * all and expects 202. That is the SHIPPED default, and the two together are the whole claim about
- * this endpoint: gate off, nothing changed; gate on, a token decides.
+ * <p><b>There is one write left, and that is the whole of what this file now says.</b> It used to
+ * cover two: the push intake, guarded with the pushed repository, and the manual trigger, guarded
+ * with every project. The intake is gone — a push arrives as {@code SCMPublishCommit} off the event
+ * log, where a bearer would mean nothing, since what authenticates an event is the bus that carried
+ * it rather than a header on a request nobody makes. The cases that asked "may this token push to
+ * this repository" have no endpoint left to ask it of.
+ *
+ * <p>The rule they enforced is unchanged, and is why this file stays: a NEW write method that simply
+ * omits {@code machineAuth.require*} ships unguarded and nothing says so. Add a write endpoint, add
+ * its case here, and keep every address absolute — a moved prefix then shows up as a 404 rather than
+ * as a pass.
  *
  * <p>The identity is installed by {@code @TestSecurity} rather than signed by a running idp on
  * purpose. What is under test is this service's decision about a token's claims; whether a signature
@@ -53,8 +61,6 @@ class MachineGuardTest {
     }
   }
 
-  private static final String INTAKE = "/ci/api/events/post-receive";
-
   /** Absolute, like every address here: it is what catches a prefix or a rename regression. */
   private static final String TRIGGER = "/ci/api/events/trigger";
 
@@ -62,127 +68,11 @@ class MachineGuardTest {
       """
       {"name":"SoftwareRelease","payload":{"repository":"guarded-repo","version":"1.0.0"}}""";
 
-  private static String push(String repoId) {
-    return """
-        {"repoId":"%s","branch":"main","oldSha":"%s","newSha":"%s"}"""
-        .formatted(repoId, "0".repeat(40), "1".repeat(40));
-  }
-
-  @Test
-  @TestSecurity(user = QitsClaims.ARTIFACTS)
-  @OidcSecurity(
-      claims = {
-        @Claim(key = "aud", value = OWN_AUDIENCE),
-        @Claim(key = QitsClaims.PROJECT, value = "guarded-repo")
-      })
-  void aTokenNamingThisRepositoryIsAccepted() {
-    given()
-        .contentType(MediaType.APPLICATION_JSON)
-        .body(push("guarded-repo"))
-        .when()
-        .post(INTAKE)
-        .then()
-        .statusCode(202);
-  }
-
-  @Test
-  @TestSecurity(user = QitsClaims.ARTIFACTS)
-  @OidcSecurity(
-      claims = {
-        @Claim(key = "aud", value = OWN_AUDIENCE),
-        @Claim(key = QitsClaims.PROJECT, value = "*")
-      })
-  void aWildcardTokenIsAcceptedForAnyRepository() {
-    // How the git host actually holds its grant: it serves every repository, so it is granted every
-    // one rather than a list that would have to be edited per repository.
-    given()
-        .contentType(MediaType.APPLICATION_JSON)
-        .body(push("some-repo-nobody-named"))
-        .when()
-        .post(INTAKE)
-        .then()
-        .statusCode(202);
-  }
-
-  @Test
-  @TestSecurity(user = QitsClaims.ARTIFACTS)
-  @OidcSecurity(
-      claims = {
-        @Claim(key = "aud", value = OWN_AUDIENCE),
-        @Claim(key = QitsClaims.PROJECT, value = "some-other-repo")
-      })
-  void aTokenNamingAnotherRepositoryIs403() {
-    // Authenticated and addressed to this service — it simply may not act on this repository.
-    given()
-        .contentType(MediaType.APPLICATION_JSON)
-        .body(push("guarded-repo"))
-        .when()
-        .post(INTAKE)
-        .then()
-        .statusCode(403);
-  }
-
-  @Test
-  @TestSecurity(user = QitsClaims.ARTIFACTS)
-  @OidcSecurity(claims = {@Claim(key = "aud", value = OWN_AUDIENCE)})
-  void aTokenGrantedNoProjectClaimIs403() {
-    // An absent claim is a mismatch, never a wildcard.
-    given()
-        .contentType(MediaType.APPLICATION_JSON)
-        .body(push("guarded-repo"))
-        .when()
-        .post(INTAKE)
-        .then()
-        .statusCode(403);
-  }
-
-  @Test
-  @TestSecurity(user = QitsClaims.ARTIFACTS)
-  @OidcSecurity(
-      claims = {
-        @Claim(key = "aud", value = FOREIGN_AUDIENCE),
-        @Claim(key = QitsClaims.PROJECT, value = "guarded-repo")
-      })
-  void aTokenMintedForAnotherServiceIs403() {
-    given()
-        .contentType(MediaType.APPLICATION_JSON)
-        .body(push("guarded-repo"))
-        .when()
-        .post(INTAKE)
-        .then()
-        .statusCode(403);
-  }
-
-  @Test
-  void noMachineTokenAtAllIs401() {
-    // 401, not 403: nothing was presented, so the answer is "present something". The forward-auth
-    // dev user is in scope here and makes no difference — a user is not a machine.
-    given()
-        .contentType(MediaType.APPLICATION_JSON)
-        .body(push("guarded-repo"))
-        .when()
-        .post(INTAKE)
-        .then()
-        .statusCode(401);
-  }
-
-  @Test
-  void aMalformedEventIsStill400WithNoToken() {
-    // Validation runs before the guard, so a broken payload is not a way to probe the guard.
-    given()
-        .contentType(MediaType.APPLICATION_JSON)
-        .body("{\"repoId\":\"\",\"branch\":\"main\",\"newSha\":\"\"}")
-        .when()
-        .post(INTAKE)
-        .then()
-        .statusCode(400);
-  }
-
   @Test
   void theManualTriggerWithNoMachineTokenIs401() {
-    // The manual trigger runs other repositories' pipelines, so it is guarded exactly as the intake
-    // is. This test is what keeps that true: the endpoint sits on the same resource, and a guard
-    // dropped from it would otherwise show up as an ordinary answer.
+    // 401, not 403: nothing was presented, so the answer is "present something". The forward-auth
+    // dev user is blanked in this profile and would make no difference anyway — a user is not a
+    // machine.
     given()
         .contentType(MediaType.APPLICATION_JSON)
         .body(TRIGGER_BODY)
@@ -212,6 +102,40 @@ class MachineGuardTest {
         .post(TRIGGER)
         .then()
         .statusCode(503);
+  }
+
+  @Test
+  @TestSecurity(user = QitsClaims.ARTIFACTS)
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = FOREIGN_AUDIENCE),
+        @Claim(key = QitsClaims.PROJECT, value = "*")
+      })
+  void aTokenMintedForAnotherServiceIs403() {
+    // Granted everything, and addressed elsewhere. The audience is the half of the guard that says
+    // "this token is for me"; a platform where it were optional would let any service's token act
+    // here.
+    given()
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(TRIGGER_BODY)
+        .when()
+        .post(TRIGGER)
+        .then()
+        .statusCode(403);
+  }
+
+  @Test
+  @TestSecurity(user = QitsClaims.ARTIFACTS)
+  @OidcSecurity(claims = {@Claim(key = "aud", value = OWN_AUDIENCE)})
+  void aTokenGrantedNoProjectClaimIs403() {
+    // An absent claim is a mismatch, never a wildcard.
+    given()
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(TRIGGER_BODY)
+        .when()
+        .post(TRIGGER)
+        .then()
+        .statusCode(403);
   }
 
   @Test

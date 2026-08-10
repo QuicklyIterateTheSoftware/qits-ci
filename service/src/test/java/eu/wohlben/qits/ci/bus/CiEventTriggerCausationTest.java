@@ -84,6 +84,8 @@ public class CiEventTriggerCausationTest {
 
   @Inject FakeCiStepRunner fakeRunner;
 
+  @Inject ScmPublishCommitListener pushes;
+
   @Inject EventDispatcher dispatcher;
 
   @BeforeEach
@@ -114,7 +116,7 @@ public class CiEventTriggerCausationTest {
 
     // A push first: it makes the repository one qits-ci has heard of, which is what the shipped
     // candidate source means by a candidate — and it is also the root-event half of the assertion.
-    postReceive(repoId, tipOf(repoId));
+    announcePush(repoId, tipOf(repoId));
     Map<String, Object> pushed = awaitRuns(repoId, 1).get(0);
     assertEquals("POST_RECEIVE", pushed.get("triggerType"));
     assertEquals(".config/qits/ci-post-receive.yml", pushed.get("configPath"));
@@ -168,7 +170,7 @@ public class CiEventTriggerCausationTest {
   public void aRedeliveredFrameRecordsNoSecondRunAndPublishesNothingFurther() throws Exception {
     String upstream = upstream();
     String repoId = seedOrigin(upstream);
-    postReceive(repoId, tipOf(repoId));
+    announcePush(repoId, tipOf(repoId));
     awaitRuns(repoId, 1);
     awaitPuts(1);
 
@@ -188,7 +190,7 @@ public class CiEventTriggerCausationTest {
   @Test
   public void anEventNoTriggerSelectsRecordsNothing() throws Exception {
     String repoId = seedOrigin(upstream());
-    postReceive(repoId, tipOf(repoId));
+    announcePush(repoId, tipOf(repoId));
     awaitRuns(repoId, 1);
 
     // A real BuildSuccessful, from a repository nothing declares a selection for.
@@ -201,7 +203,7 @@ public class CiEventTriggerCausationTest {
   public void aReleasePipelineFansOutOneSoftwareReleasePerDeclaredArtifact() throws Exception {
     String released = upstream();
     String repoId = seedOriginWith(releaseTrigger(released));
-    postReceive(repoId, tipOf(repoId));
+    announcePush(repoId, tipOf(repoId));
     awaitRuns(repoId, 1);
     awaitPuts(1);
 
@@ -293,14 +295,8 @@ public class CiEventTriggerCausationTest {
 
   // --- plumbing, the same shape BuildSuccessfulPublishTest uses ---
 
-  private void postReceive(String repoId, String newSha) {
-    given()
-        .contentType(ContentType.JSON)
-        .body(Map.of("repoId", repoId, "branch", "main", "oldSha", ZERO_SHA, "newSha", newSha))
-        .when()
-        .post("/ci/api/events/post-receive")
-        .then()
-        .statusCode(202);
+  private void announcePush(String repoId, String newSha) {
+    pushes.onFrame(ScmPushFrames.push(repoId, "main", ZERO_SHA, newSha));
   }
 
   /** A bare origin carrying both trigger types, so one repository exercises both paths. */

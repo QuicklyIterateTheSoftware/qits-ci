@@ -300,9 +300,14 @@ public class CiRunService {
   }
 
   /**
-   * The async entry the event intake calls. <b>The row is written before this returns</b> — the
-   * caller is holding an HTTP request open for it, so a 202 now means "this run is on the record and
-   * will be attempted", not "a closure exists somewhere".
+   * The async entry a push takes. <b>The row is written before this returns</b> — the caller is the
+   * bus adapter holding an event's claiming transaction open for it, so a settled event means "this
+   * run is on the record and will be attempted", not "a closure exists somewhere".
+   *
+   * <p>The name outlived its transport on purpose: this is still what a post-receive <em>is</em> —
+   * a branch moved to a commit — and the row it writes is still {@code POST_RECEIVE}. What used to
+   * be an HTTP intake is {@code bus/ScmPublishCommitListener}, and the suppression the git host used
+   * to apply for its consumers ({@code -o qits.no-ci}) is decided there, before this is called.
    */
   public void onPostReceive(String repoId, String branch, String oldSha, String newSha) {
     CiIdentifiers.requireRepoId(repoId);

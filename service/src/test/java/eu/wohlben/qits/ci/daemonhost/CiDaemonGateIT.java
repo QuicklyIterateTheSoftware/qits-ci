@@ -9,6 +9,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import eu.wohlben.qits.ci.bus.ScmPublishCommitListener;
+import eu.wohlben.qits.ci.bus.ScmPushFrames;
 import eu.wohlben.qits.ci.githost.StubGitHost;
 import io.quarkus.arc.ClientProxy;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -116,6 +118,8 @@ public class CiDaemonGateIT {
 
   @Inject CiDaemonLauncher launcher;
 
+  @Inject ScmPublishCommitListener pushes;
+
   @Inject CiStepRelay relay;
 
   @TestHTTPResource("/ci/daemon")
@@ -222,7 +226,7 @@ public class CiDaemonGateIT {
                   echo step-two-done
             """
                 .formatted(IMAGE, IMAGE));
-    postReceive(repoId, "gate-green", sha);
+    announcePush(repoId, "gate-green", sha);
 
     String runId = awaitRunId(repoId);
 
@@ -289,7 +293,7 @@ public class CiDaemonGateIT {
                 script: echo never-runs
             """
                 .formatted(IMAGE, IMAGE));
-    postReceive(repoId, "gate-cancel", sha);
+    announcePush(repoId, "gate-cancel", sha);
 
     String runId = awaitRunId(repoId);
     awaitLiveStep(runId, 0, "step-one-is-slow");
@@ -331,7 +335,7 @@ public class CiDaemonGateIT {
                 script: echo never-runs
             """
                 .formatted(IMAGE, IMAGE));
-    postReceive(repoId, "gate-timeout", sha);
+    announcePush(repoId, "gate-timeout", sha);
 
     String runId = awaitRunId(repoId);
     JsonPath detail = awaitTerminalRun(runId);
@@ -388,7 +392,7 @@ public class CiDaemonGateIT {
                   echo the-socket-answered
             """
                 .formatted(IMAGE, IMAGE));
-    postReceive(repoId, "gate-docker", sha);
+    announcePush(repoId, "gate-docker", sha);
 
     String runId = awaitRunId(repoId);
     JsonPath detail = awaitTerminalRun(runId);
@@ -424,7 +428,7 @@ public class CiDaemonGateIT {
                 script: echo should-never-run
             """
                 .formatted(IMAGE_WITHOUT_THE_CONTRACT));
-    postReceive(repoId, "gate-never-registers", sha);
+    announcePush(repoId, "gate-never-registers", sha);
 
     String runId = awaitRunId(repoId);
     JsonPath detail = awaitTerminalRun(runId);
@@ -446,16 +450,10 @@ public class CiDaemonGateIT {
     assertEquals(0, containersLabelled(runId));
   }
 
-  // --- the wire contract the git host speaks (CiPostReceiveNotifier's payload) -------------------
+  // --- the push, as qits-githost announces it ---------------------------------------------------
 
-  private void postReceive(String repoId, String branch, String newSha) {
-    given()
-        .contentType(ContentType.JSON)
-        .body(Map.of("repoId", repoId, "branch", branch, "oldSha", ZERO_SHA, "newSha", newSha))
-        .when()
-        .post("/ci/api/events/post-receive")
-        .then()
-        .statusCode(202);
+  private void announcePush(String repoId, String branch, String newSha) {
+    pushes.onFrame(ScmPushFrames.push(repoId, branch, ZERO_SHA, newSha));
   }
 
   // --- polling the read surface, which is the only way this test looks at anything ---------------

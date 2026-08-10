@@ -28,11 +28,13 @@ import org.junit.jupiter.api.Test;
  * rather than as misconfiguration. {@code BuildSuccessfulPublishTest} is the one class that opts
  * back in, and it does so against a stub.
  *
- * <p><b>The listener beans survive ArC.</b> None of the three is injected anywhere by name — they
- * are reached only through {@code Instance<QitsDurableEventListener>} — and unused-bean removal
- * would leave a deployment that subscribes to nothing, receives nothing, sweeps nothing and says
- * nothing about it. An {@code Instance} injection point counts as a use, which is why no {@code
- * @Unremovable} is needed; this is the assertion that keeps that true rather than believed.
+ * <p><b>The listener beans survive ArC.</b> They are reached only through {@code
+ * Instance<QitsDurableEventListener>} — no name, no channel — and unused-bean removal would leave a
+ * deployment that subscribes to nothing, receives nothing, sweeps nothing and says nothing about it.
+ * An {@code Instance} injection point counts as a use, which is why no {@code @Unremovable} is
+ * needed; this is the assertion that keeps that true rather than believed. It matters most for
+ * {@code ScmPublishCommitListener}: removed, this service still serves every read and simply never
+ * builds a push again.
  *
  * <p><b>And their consumer ids are asserted here because they are storage.</b> Each one keys a
  * {@code consumed_event} ledger and a {@code consumer_watermark}; changing one silently mints a
@@ -57,7 +59,7 @@ public class EventstreamDarknessTest {
   }
 
   @Test
-  public void allThreeDurableListenersAreRegisteredBeans() {
+  public void allFourDurableListenersAreRegisteredBeans() {
     Set<Class<?>> registered =
         StreamSupport.stream(listeners.spliterator(), false)
             .map(listener -> (Class<?>) ClientProxy.unwrap(listener).getClass())
@@ -67,7 +69,8 @@ public class EventstreamDarknessTest {
             Set.of(
                 BuildSuccessfulListener.class,
                 CiEventTriggerListener.class,
-                DaemonReleaseListener.class)),
+                DaemonReleaseListener.class,
+                ScmPublishCommitListener.class)),
         "a listener removed as unused subscribes to nothing and is never swept: " + registered);
   }
 
@@ -76,8 +79,9 @@ public class EventstreamDarknessTest {
     assertEquals("ci-release-train", BuildSuccessfulListener.CONSUMER_ID);
     assertEquals("ci-event-triggers", CiEventTriggerListener.CONSUMER_ID);
     assertEquals("ci-daemon-adopt", DaemonReleaseListener.CONSUMER_ID);
+    assertEquals("ci-push-runs", ScmPublishCommitListener.CONSUMER_ID);
     assertEquals(
-        3,
+        4,
         StreamSupport.stream(listeners.spliterator(), false)
             .map(QitsDurableEventListener::consumerId)
             .distinct()

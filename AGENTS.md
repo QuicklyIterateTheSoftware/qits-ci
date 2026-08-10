@@ -326,16 +326,19 @@ bounded question — and an ask above **100** is clamped rather than refused, si
 listing that is both unscoped and otherwise unbounded.
 
 **The machine guard is a call in the handler, not a filter over a path.** `CiEventController` opens
-each write with `machineAuth.requireProject(…)` — the intake with the pushed `repoId`, the manual
-trigger with `QitsClaims.ANY`. Nothing matches a path, so renaming a `@Path` moves the guard with the
-route and can no longer detach it. The fail-open shape that replaced the old one is narrower and
-still real: a **new** write method that simply omits the call ships unguarded, and nothing says so.
+its one write with `machineAuth.requireProject(QitsClaims.ANY)`. Nothing matches a path, so renaming
+a `@Path` moves the guard with the route and can no longer detach it. The fail-open shape that
+replaced the old one is narrower and still real: a **new** write method that simply omits the call
+ships unguarded, and nothing says so.
 `MachineGuardTest` is what stands between that and shipping. It runs with
 `qits.auth.machine.required=true` and POSTs each write's absolute address, demanding 401 with no
 token, 403 for a token whose `aud` or `project` claim does not cover the target, and **the
-endpoint's own answer** for one that does — 202 at the intake, 503 at the manual trigger, which
+endpoint's own answer** for one that does — 503 at the manual trigger, which
 evaluates before it answers and has no git host to ask in that profile. Either way the case rules
-out 401 and 403, which is the whole of what a guard test can say. It also asserts the reads answer
+out 401 and 403, which is the whole of what a guard test can say.
+**The push intake used to be the second guarded write and is not a write at all any more**: a push
+arrives as `SCMPublishCommit` off the bus, where a bearer would mean nothing, so the cases that
+asked "may this token push to this repository" have no endpoint left. It also asserts the reads answer
 200 unguarded, so "guarded" stays a statement about which endpoints rather than about the service.
 Add a write endpoint, add its case there, and keep every address in that test absolute: a moved
 prefix then shows up as a 404 rather than as a pass.
@@ -447,14 +450,14 @@ native-image registration, which lives with the deployable rather than with the 
 
 ### How the deployable uses it
 
-`service/…/bus/` is the whole of qits-ci's wiring: two announcers publishing, and three listeners
+`service/…/bus/` is the whole of qits-ci's wiring: two announcers publishing, and four listeners
 consuming. The subscriber dials itself on `StartupEvent` because listener beans exist. Registering a
 listener really is "add a bean" — no channel name, no annotation — and no `@Unremovable` is needed,
 because `EventDispatcher`'s `Instance<QitsDurableEventListener>` is what ArC counts as a use.
 `EventstreamDarknessTest` asserts that rather than trusting it, since a removed listener subscribes
 to nothing, is swept for nothing, and says nothing about it.
 
-**All three consume DURABLY, and none of them is a typed or raw listener any more.** The library's
+**All four consume DURABLY, and none of them is a typed or raw listener any more.** The library's
 other two seams are live-only and at-most-once — a frame broadcast while this process is
 disconnected, restarting or mid-cutover is gone — and the 2026-08-10 rebootstrap campaign measured
 what that costs a platform whose release train rides the bus. `QitsDurableEventListener` is the
@@ -463,14 +466,40 @@ a watermark is paged forward from qits-events' log at startup and on a schedule,
 delay rather than a hole. `event-delivery-guarantees-plan.md` in the superproject is the design and
 `eventstream/AGENTS.md` is the contract; what follows is only what is qits-ci's to get right.
 
-**Each listener's `consumerId()` is STORAGE, not a label**, and the three shipped are literals in
+**Each listener's `consumerId()` is STORAGE, not a label**, and the four shipped are literals in
 `EventstreamDarknessTest` for that reason:
 
 | bean | `consumerId()` | `signatures()` | `selects` |
 |---|---|---|---|
+| `ScmPublishCommitListener` | `ci-push-runs` | `SCMPublishCommit` | default |
 | `CiEventTriggerListener` | `ci-event-triggers` | `["*"]` | default (see below) |
 | `BuildSuccessfulListener` | `ci-release-train` | `BuildSuccessful` | default |
 | `DaemonReleaseListener` | `ci-daemon-adopt` | `SoftwareRelease` | the daemon's own releases |
+
+**`ScmPublishCommitListener` is the push intake**, and it replaced an HTTP endpoint rather than
+joining one. `POST /ci/api/events/post-receive` is gone: qits-githost publishes `SCMPublishCommit`
+(one per successfully updated branch ref) and this bean calls the same `CiRunService.onPostReceive`
+the endpoint called, so validation, the `QUEUED` row and the supersede of an older queued push for
+the same `(repoId, branch)` are unchanged. Three things about it are worth knowing before touching
+it:
+
+- **`suppressCi` is honoured here and nowhere else.** `-o qits.no-ci` used to be the git host's
+  decision — it skipped the POST — and is a fact on the event now, so a run engine skips the build
+  while another consumer may ignore the flag entirely. Skipping records **no row**: nothing to
+  supersede, nothing to cancel.
+- **A push run still carries a NULL `trigger_event_id`.** That column means "the domain event a
+  trigger file selected", which is the other path's; every push sharing a null there is what the
+  dedupe constraint is written around. Putting the frame's id on a push row would give push runs a
+  causation parent and put them in that constraint's key space — worth doing deliberately, not as a
+  side effect of changing transports. It is the one thing this migration left on the table.
+- **Its failure policy is the usual pair**: a payload that will not bind and an identifier
+  `CiIdentifiers` refuses are poison (WARN, settled — what was a 400 when there was a caller to
+  answer), and anything `onPostReceive` throws is left to throw.
+
+The dependency this adds is `eu.wohlben.qits:qits-githost-events`, the vocabulary jar — four records
+and the bus, no client and no address. It is the only compile-time dependency this repo has on
+another context, and "Adding a dependency on another context" below is about *clients*, not about a
+published event's shape.
 
 Change one and you mint a brand-new consumer: the old claims are orphaned and the new id initializes
 at the head of the log, silently skipping everything in between. Reuse one and a listener inherits
@@ -608,8 +637,10 @@ to get right rather than the library's:
   **That proof is cheap enough to repeat before a rollout, and it is how both facts above were
   established.** `sdk env` then `./mvnw package -Dnative -DskipTests`, run `service/target/qits-ci`
   with `QITS_EVENTSTREAM_ENABLED=true`, `QITS_EVENTS_URL` pointed at any process that answers a PUT
-  with a 201, and push `steps: []` through the intake — a zero-step pipeline reaches SUCCESS with no
-  docker and no daemon, which is the shortest path there is from a fresh binary to a published event.
+  with a 201, and trigger a `steps: []` pipeline through `POST /ci/api/events/trigger` — a zero-step
+  pipeline reaches SUCCESS with no docker and no daemon, which is the shortest path there is from a
+  fresh binary to a published event. (It used to be a POST to the push intake, which no longer
+  exists; a push now needs a real `SCMPublishCommit` on the bus.)
   Read the PUT body. Anything about this module that only the binary can be wrong about is one minute
   of native-image away from being known rather than believed.
 
@@ -644,9 +675,9 @@ follows is what biting it feels like.
 - **The manual trigger is a second inbound adapter of the same evaluation, on a different thread.**
   `POST /ci/api/events/trigger` (`CiEventController`) builds the same `Arrival` from a JSON body, so
   the engine cannot tell a hand-supplied event from a frame — no branch, no flag, no second code
-  path, and nothing web-shaped reaching `ci/`. It lives on the intake's resource rather than in one
-  of its own so the guard and the path stay shared; it demands `project=*` where the intake demands
-  the pushed repository, because an event names no repository. The **id default is load-bearing**: a
+  path, and nothing web-shaped reaching `ci/`. It is the only operation left on that resource — it
+  shared it with the push intake until that became a listener — and it demands `project=*`, because
+  an event names no repository. The **id default is load-bearing**: a
   fresh random UUID per call, or the dedupe below silently drops every rerun. A caller that passes
   one is opting into the dedupe, which is what makes a bootstrap script idempotent. Both are in
   `README.md` under "Triggering one by hand", and both are pinned by `CiManualTriggerTest`.
@@ -819,10 +850,16 @@ follows is what biting it feels like.
 
 ## Adding a dependency on another context
 
-Don't. This context has no compile-time dependency on any other qits module and should not grow
-one. Things arrive as an HTTP payload on the intake, or as a URL in config, or not at all. There is
+Don't. Things arrive as an event off the bus, or as a URL in config, or not at all. There is
 no `RepositoryLookup`-style port here and there should be no need for one: a run knows a repo id, a
 branch name and a sha, and everything else it wants it fetches from the git host itself.
+
+**The one dependency that exists is `qits-githost-events`, and it is the shape of the exception
+rather than a hole in the rule.** It is a *vocabulary*: four records and the bus, no client, no
+address, nothing to call. A published event's shape is exactly the kind of contract a jar may carry,
+and the alternative — reading another service's payload by string key — is worse in every direction.
+What the rule forbids is a **client**: an SDK, a REST interface, anything that turns another
+context's availability into this one's.
 
 Never add a JPA relation to another context's entity. `ci_run.repo_id` is a plain `String` column
 in ci's **own** physical database; a foreign key cannot span it.
@@ -831,12 +868,13 @@ in ci's **own** physical database; a foreign key cannot span it.
 
 Four things reaching this code are attacker-controlled and must stay that way in your head:
 
-- **The intake payload.** `/ci/api/events/` sits on qits-gateway's unauthenticated allowlist, and the
-  machine gate `qits.auth.machine.required` ships **off**, so assume the payload arrives from anyone
-  who can reach the port. Even with the gate on it is a *caller* that is established, never the
-  content. `CiIdentifiers.require{RepoId,Branch,Sha}` validates all three *before* they reach a
+- **The `SCMPublishCommit` payload.** It says what somebody pushed, so the repo id, the branch and
+  the sha on it are as attacker-shaped as the intake POST they replaced — a durable event with a
+  claim row behind it establishes *delivery*, never content.
+  `CiIdentifiers.require{RepoId,Branch,Sha}` validates all three *before* they reach a
   filesystem path or an argv. Never widen those, never bypass them, never interpolate an identifier
-  into a shell string.
+  into a shell string. What changed with the transport is only the answer to a refusal: a 400 to a
+  caller became a WARN and a settled event, because there is no caller.
 - **The step's `image`.** It comes from a file in the repository being tested and lands in the
   `docker run` argv as a positional argument, so it is checked in the same place and to the same
   standard: `CiIdentifiers.requireImage` rejects blank and anything starting with `-`. Deliberately
@@ -1022,7 +1060,7 @@ contract, tested where it lives.
 - **The git host in the suite is `githost/StubGitHost`, and it is a server rather than a
   directory.** Reading pipeline config is HTTP now (below), so the old stand-in — a `file://`
   directory laid out as `<base>/git/<repoId>` — answers nothing, and the shipped test config points
-  `qits.ci.git-host-url` at `http://127.0.0.1:1/artifacts`: an address nothing listens on, so a suite
+  `qits.ci.git-host-url` at `http://127.0.0.1:1`: an address nothing listens on, so a suite
   that never seeds a repository fails its reads fast and honestly. A suite that *does* declares
   `@WithTestResource(value = StubGitHost.class, scope = TestResourceScope.GLOBAL)`, which is how the
   port reaches the application's config **before it boots** — the same arrangement as
@@ -1047,12 +1085,12 @@ contract, tested where it lives.
   API a first-party client consumes and none of them carries `@Operation(hidden = true)`.
   Keeping them hidden would have meant this file omitted the entire contract that client depends on,
   and a breaking change to `CiRunDto` would have landed with an **empty diff** — which is the exact
-  opposite of why the file is committed. `POST /ci/api/events/post-receive` stays hidden and the
-  criterion is why: it is machine-guarded, machine-only, and its wire contract lives in qits-artifacts.
-  **`POST /ci/api/events/trigger` is the same criterion answering the other way on the same
-  resource**, which is the clearest illustration of it there is: a person invokes it on purpose and
-  its contract is written down nowhere but here, so it is not hidden — the guard the two share had
-  nothing to do with the decision.
+  opposite of why the file is committed. **Nothing is hidden any more.** The one operation that was,
+  `POST /ci/api/events/post-receive`, is gone with the HTTP fan-out it served — it was machine-only
+  and its wire contract lived in the git host's repository, which is exactly what the criterion keeps
+  out. `POST /ci/api/events/trigger` is the same criterion answering the other way and was always in:
+  a person invokes it on purpose and its contract is written down nowhere but here. The guard the two
+  shared had nothing to do with either decision.
   **`GET /ci/api/daemon` is in for the mirror-image reason** and is worth having as the worked case
   of a *machine* consumer that still belongs in the document: it is unguarded, its contract lives
   here rather than in the service that reads it, and qits-artifacts' daemon GC reads it fail-closed —
@@ -1198,7 +1236,7 @@ contract, tested where it lives.
   The stub they share is a trimmed second copy of the eventstream module's, duplicated for the
   reason both `FakeCiStepRunner`s are (the modules do not share a test classpath, and a test-jar to
   bridge forty lines is worse). `BuildSuccessfulPublishTest` drives a real run to `SUCCESS` through
-  the real intake and asserts the *wire* contract the other side was built against: one PUT per green
+  the real push path and asserts the *wire* contract the other side was built against: one PUT per green
   run, a v4 UUID in the path, `name` as the signature, and the run's coordinates in the canonical
   payload. Retries, the outbox and the three-way PUT semantics belong to the eventstream suite; the
   round trip through a real qits-events belongs to the platform.
@@ -1208,10 +1246,13 @@ contract, tested where it lives.
   Quarkus instance. So a trigger file in a test fixture must select something **unique to the
   repository that committed it**, or one test method's event fires an earlier method's repository and
   "exactly two runs, exactly two publishes" stops being a statement about the test making it.
-- `CiPipelineBoundaryTest` starts at the intake POST, not at a `git push`, because the git host is
-  in qits-artifacts. Assertions about what the git host's hook does or does not send belong there.
-- `CiDaemonGateIT` is **the** gate: the outline's whole lifecycle through the real intake path, on
-  real containers. A two-step pipeline pushed into a real bare, the event POSTed, live chunks read
+- `CiPipelineBoundaryTest` starts at an `SCMPublishCommit` handed to `ScmPublishCommitListener`, not
+  at a `git push`, because the git host is qits-githost. Assertions about which refs it announces —
+  and about the tag and delete events nothing here subscribes to — belong there. `bus/ScmPushFrames`
+  builds the frame from the real record, so a payload change is a compile error rather than a suite
+  that keeps passing against bytes nobody sends.
+- `CiDaemonGateIT` is **the** gate: the outline's whole lifecycle through the real push path, on
+  real containers. A two-step pipeline pushed into a real bare, the push announced, live chunks read
   off the `live` object mid-run, terminal per-step rows with host-stamped timestamps after, a
   cancellation honored mid-step, and a per-step timeout recorded as timed-out rather than failed. It
   deliberately includes a **noisy** step (`yes` for a second) — bounded memory under a chunk flood is
