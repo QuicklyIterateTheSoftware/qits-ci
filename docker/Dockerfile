@@ -100,10 +100,11 @@
 # The builder JDK MUST be 25: native-image cannot read bytecode newer than its own JDK, and this
 # project targets release 25.
 #
-# `localhost:8081/quay/…` is qits-artifacts' pull-through mirror of quay.io: the first build fetches
-# the image from upstream and caches it, every later build is served from local disk. The tag is
-# upstream's, unchanged — the mirror revalidates it, so `jdk-25` still moves when quay moves it.
-FROM localhost:8081/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
+# `localhost:8082/quay/…` is qits-platform-mirror's pull-through mirror of quay.io: the first build
+# fetches the image from upstream and caches it, every later build is served from local disk. The
+# tag is upstream's, unchanged — the mirror revalidates it, so `jdk-25` still moves when quay moves
+# it.
+FROM localhost:8082/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
 USER root
 WORKDIR /src
 
@@ -196,8 +197,8 @@ RUN d=service/src/main/webui/dist/qits-spa-ci/browser; \
       -Dquarkus.quinoa.package-manager-command.build=--version
 
 # --- runtime --------------------------------------------------------------------------------------
-# `localhost:8081/redhat/…` is the same mirror, pointed at registry.access.redhat.com.
-FROM localhost:8081/redhat/ubi9/ubi-minimal:9.6
+# `localhost:8082/redhat/…` is the same mirror, pointed at registry.access.redhat.com.
+FROM localhost:8082/redhat/ubi9/ubi-minimal:9.6
 WORKDIR /work
 
 # The docker CLI comes from Docker's own repository because no UBI repository carries a
