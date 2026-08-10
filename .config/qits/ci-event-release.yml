@@ -89,8 +89,17 @@ steps:
       git -c submodule.qits-spa-ci.url="$frontend_url" submodule update --init service/src/main/webui
 
       cd service/src/main/webui
-      npm_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
-      sed -i -E "s#(\"resolved\": \")https?://[^/\"]+#\1$npm_origin#" package-lock.json
+      # TWO SERVICES since the byte-plane split, so the swap reads the PATH: an entry under the
+      # hosted registry's own pathname ($QITS_NPM_REGISTRY_URL's, /artifacts/npm/npm/) gets the
+      # hosted origin and everything else gets the proxy's, and the broad expression has to run
+      # before the narrow one. ci-post-receive.yml carries the full reasoning.
+      npm_hosted_origin=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).origin')
+      npm_proxy_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
+      npm_hosted_path=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).pathname')
+      sed -i -E \
+        -e "s#(\"resolved\": \")https?://[^/\"]+#\1$npm_proxy_origin#" \
+        -e "s#(\"resolved\": \")https?://[^/\"]+($npm_hosted_path)#\1$npm_hosted_origin\2#" \
+        package-lock.json
 
       env npm_config_registry="$QITS_NPM_PROXY_URL" \
           "npm_config_@qits:registry=$QITS_NPM_REGISTRY_URL" \

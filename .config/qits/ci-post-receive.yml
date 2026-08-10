@@ -38,36 +38,56 @@ steps:
       git -c submodule.qits-spa-ci.url="$frontend_url" submodule update --init service/src/main/webui
 
       # THE LOCKFILE is the one file this step edits, and npm leaves no alternative. Same problem
-      # and same fix as qits-gateway's pipeline; the recipe is maintained in qits-spa-home's own
-      # pipeline and every copy of it should keep matching.
+      # and same fix as qits-spa-ci's own pipeline — that repo's recipe is where this pattern is
+      # maintained, and the two should keep matching.
       #
       # npm pins a full resolved URL per package, and qits-spa-ci's lockfile is generated on the
-      # deployment host, so every entry names localhost:8081 — an address that does not exist in this
-      # container. `npm ci` fetches tarballs by that URL and never asks the configured registry for
-      # them, so the environment below does not reach them: without this swap the install dies on a
-      # connection that will never be answered. The paths are identical on both addresses, so
-      # replacing the ORIGIN and keeping the path is all it takes, and the integrity hashes are what
-      # make that safe — bytes from the other address must still hash the same. The checkout is this
-      # step's own; nothing is edited that anyone will ever read again.
+      # deployment host, so every entry names a localhost port — an address that does not exist in
+      # this container. `npm ci` fetches tarballs by that URL and never asks the configured registry
+      # for them, so the environment below does not reach them: without this swap the install dies
+      # on connection refused. The paths are identical on every address, so replacing the ORIGIN and
+      # keeping the path is all it takes, and the integrity hashes are what make that safe — bytes
+      # from the other address must still hash the same. The checkout is this step's own; nothing is
+      # edited that anyone will ever read again.
+      #
+      # THE BYTE PLANE IS TWO SERVICES SINCE THE SPLIT, WHICH IS WHY THE SWAP READS THE PATH.
+      # qits-platform-mirror holds the npmjs pull-through cache; qits-artifacts hosts the @qits
+      # scope. No single origin serves both, so the path is what tells them apart: an entry under
+      # the hosted registry's own pathname — $QITS_NPM_REGISTRY_URL's, /artifacts/npm/npm/ — is a
+      # @qits tarball and gets the hosted origin, and every other entry gets the proxy's. One sed
+      # covered both roots while they shared an origin; since the split it sends every @qits tarball
+      # to the mirror, which has never held one: 404, on every run.
+      #
+      # THE ORDER OF THE TWO EXPRESSIONS IS THE WHOLE TRICK. sed applies -e in sequence per line, so
+      # the broad proxy swap runs FIRST and the narrow path-anchored one corrects the @qits entries
+      # after it. The other order lets the broad expression undo the narrow one.
       #
       # npm's own knob for exactly this, `--replace-registry-host=always`, cannot do it against a
-      # registry mounted under a path. @npmcli/arborist glues rather than resolves (reify.js:
+      # registry mounted under a path, and could not have told two registries apart either.
+      # @npmcli/arborist glues rather than resolves (reify.js:
       # `registry.slice(0, -1) + resolvedURL.pathname`), so
-      # http://qits-platform-artifacts:8080/artifacts/npm/npmjs/ + /artifacts/npm/npmjs/zone.js/-/…tgz comes
-      # out as …/artifacts/npm/npmjs/artifacts/npm/npmjs/zone.js/-/…tgz and every tarball 404s.
-      # Measured on npm 10.9.4.
+      # http://qits-platform-mirror:8080/artifacts/npm/npmjs/ + /artifacts/npm/npmjs/zone.js/-/…tgz
+      # comes out as …/artifacts/npm/npmjs/artifacts/npm/npmjs/zone.js/-/…tgz and every tarball
+      # 404s. Measured on npm 10.9.4.
       #
-      # The origin is derived from the injected env rather than spelled here: no repository states a
-      # deployment's addresses, and the one address qits-spa-ci does state (localhost:8081, in its
-      # .npmrc, for a developer on the host) is the one being replaced.
+      # Every address is derived from the injected env rather than spelled here: no repository
+      # states a deployment's addresses, and the two qits-spa-ci does state (localhost:8081 for the
+      # @qits scope and localhost:8082 for npmjs, in its .npmrc, for a developer on the host) are
+      # the ones being replaced.
       cd service/src/main/webui
-      npm_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
-      sed -i -E "s#(\"resolved\": \")https?://[^/\"]+#\1$npm_origin#" package-lock.json
+      npm_hosted_origin=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).origin')
+      npm_proxy_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
+      npm_hosted_path=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).pathname')
+      sed -i -E \
+        -e "s#(\"resolved\": \")https?://[^/\"]+#\1$npm_proxy_origin#" \
+        -e "s#(\"resolved\": \")https?://[^/\"]+($npm_hosted_path)#\1$npm_hosted_origin\2#" \
+        package-lock.json
 
-      # ENVIRONMENT, not a file. qits-spa-ci COMMITS an .npmrc (localhost:8081, right for a developer
-      # on the host), and npm ranks a project .npmrc ABOVE ~/.npmrc — so a `cat > ~/.npmrc` preamble
-      # would be written and silently ignored. `npm_config_*` environment outranks both files, so it
-      # wins without touching the submodule's tree.
+      # ENVIRONMENT, not a file. qits-spa-ci COMMITS an .npmrc (localhost:8081 for @qits and
+      # localhost:8082 for npmjs, right for a developer on the host), and npm ranks a project .npmrc
+      # ABOVE ~/.npmrc — so a `cat > ~/.npmrc` preamble would be written and silently ignored.
+      # `npm_config_*` environment outranks both files, so it wins without touching the submodule's
+      # tree.
       env npm_config_registry="$QITS_NPM_PROXY_URL" \
           "npm_config_@qits:registry=$QITS_NPM_REGISTRY_URL" \
           npm ci --no-audit --no-fund
