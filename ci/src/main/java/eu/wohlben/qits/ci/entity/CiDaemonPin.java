@@ -1,5 +1,6 @@
 package eu.wohlben.qits.ci.entity;
 
+import eu.wohlben.qits.eventstream.Uncaused;
 import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -19,9 +20,14 @@ import java.time.Instant;
  * two rows naming the same version would be two conflicting answers to what it resolves to.
  * {@link #eventId} is the idempotency key adoption upserts on -- a redelivered event is a no-op,
  * never a second row.
+ *
+ * <p>{@code @Uncaused} by decision: {@link #eventId} IS the adopting event, already on the row as
+ * its idempotency key, so a generic causation column would be that column again under a second
+ * name.
  */
 @Entity
 @Table(name = "ci_daemon_pin")
+@Uncaused
 public class CiDaemonPin extends PanacheEntityBase {
 
   @Id public String id;
