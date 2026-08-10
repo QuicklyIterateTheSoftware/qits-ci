@@ -9,7 +9,8 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.JsonNode;
 import eu.wohlben.qits.ci.events.BuildSuccessful;
 import eu.wohlben.qits.ci.events.SoftwareRelease;
-import eu.wohlben.qits.eventstream.QitsEventListener;
+import eu.wohlben.qits.eventstream.QitsDurableEventListener;
+import eu.wohlben.qits.eventstream.QitsRawEventListener;
 import eu.wohlben.qits.eventstream.control.CanonicalJson;
 import eu.wohlben.qits.eventstream.control.EventEnvelope;
 import eu.wohlben.qits.eventstream.control.EventFrame;
@@ -22,6 +23,7 @@ import java.lang.reflect.Method;
 import java.time.Instant;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -47,7 +49,7 @@ public class EventWireReflectionTest {
   /** The private nested mix-in {@link EventWireReflection} can only name as a string. */
   private static final String MIXIN = "eu.wohlben.qits.eventstream.control.CanonicalJson$QitsEventMixin";
 
-  @Inject @Any Instance<QitsEventListener<?>> listeners;
+  @Inject @Any Instance<QitsDurableEventListener> listeners;
 
   @Test
   public void theRegisteredTargetsAreExactlyTheTypesThatCrossTheWire() {
@@ -62,22 +64,38 @@ public class EventWireReflectionTest {
   }
 
   /**
-   * The rule that generalises: a listener bean is how this service declares it wants an event type,
-   * and an unregistered one is a binary that subscribes to a signature it cannot deserialize. That
+   * The rule that generalises: a listener bean is how this service declares it wants an event, and
+   * an unregistered one is a binary that subscribes to a signature it cannot deserialize. That
    * failure is now at least audible ({@code EventDispatcher} warns on an unreadable frame) but it is
    * still a defect, and this is the line that catches it at build time instead.
+   *
+   * <p><b>Written against signatures rather than classes, because the durable seam has no {@code
+   * eventType()}.</b> All three listeners here take an {@code EventFrame} and deserialize what they
+   * want themselves, so the class each one binds to is not something a test can ask the bean for.
+   * What it can ask is the name each one subscribes to, and the registration's own targets carry
+   * those names: a signature is an event class's simple name, by the same derivation the typed seam
+   * used. {@code "*"} is skipped — a listener that wants everything is promising to bind nothing in
+   * particular, and the trigger engine really does read its payloads with {@code readTree}.
    */
   @Test
-  public void everyListenersEventTypeIsRegistered() {
-    Set<Class<?>> registered =
-        Set.of(EventWireReflection.class.getAnnotation(RegisterForReflection.class).targets());
-    for (QitsEventListener<?> listener : listeners) {
-      assertTrue(
-          registered.contains(listener.eventType()),
-          listener.getClass().getName()
-              + " listens for "
-              + listener.eventType().getName()
-              + ", which is not registered for reflection");
+  public void everyDurableListenersSignatureNamesARegisteredType() {
+    Set<String> registered =
+        Set.of(EventWireReflection.class.getAnnotation(RegisterForReflection.class).targets())
+            .stream()
+            .map(Class::getSimpleName)
+            .collect(Collectors.toSet());
+    for (QitsDurableEventListener listener : listeners) {
+      for (String signature : listener.signatures()) {
+        if (QitsRawEventListener.ALL.equals(signature)) {
+          continue;
+        }
+        assertTrue(
+            registered.contains(signature),
+            listener.getClass().getName()
+                + " listens for "
+                + signature
+                + ", which no registered type is named after");
+      }
     }
   }
 

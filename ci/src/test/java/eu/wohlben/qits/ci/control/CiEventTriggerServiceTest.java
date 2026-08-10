@@ -259,11 +259,28 @@ public class CiEventTriggerServiceTest extends CiTestSupport {
   public void onEventNeverThrowsWhateverArrives() {
     // The caller is a socket callback delivering to every other consumer too, and a throw out of it
     // is swallowed at ERROR by the dispatcher — so it must not happen rather than be relied upon.
-    engine.onEvent(null);
-    engine.onEvent(arrival(null, "BuildSuccessful", PAYLOAD));
-    engine.onEvent(arrival(UUID.randomUUID().toString(), null, PAYLOAD));
-    engine.onEvent(arrival(UUID.randomUUID().toString(), "BuildSuccessful", null));
-    engine.onEvent(arrival(UUID.randomUUID().toString(), "BuildSuccessful", "not json {"));
+    // A malformed arrival answers false, which the durable listener never sees: it checks the frame
+    // before it gets here, so the only false it can read is a full queue.
+    assertFalse(engine.onEvent(null));
+    assertFalse(engine.onEvent(arrival(null, "BuildSuccessful", PAYLOAD)));
+    assertFalse(engine.onEvent(arrival(UUID.randomUUID().toString(), null, PAYLOAD)));
+    assertTrue(engine.onEvent(arrival(UUID.randomUUID().toString(), "BuildSuccessful", null)));
+    assertTrue(
+        engine.onEvent(arrival(UUID.randomUUID().toString(), "BuildSuccessful", "not json {")));
+  }
+
+  /**
+   * The answer is about acceptance, not about the outcome — which is what makes it usable as the
+   * durable listener's retry signal. An event whose payload no selection can match was still
+   * <em>evaluated</em>, so it is accepted and settled; only a queue that had no room for it is a
+   * {@code false}, and that is the one case worth being handed back later.
+   */
+  @Test
+  public void anAcceptedEventAnswersTrueEvenWhenNothingMatchesIt() throws Exception {
+    fakeCandidates.set();
+
+    assertTrue(engine.onEvent(arrival(UUID.randomUUID().toString(), "NobodyListens", PAYLOAD)));
+    engine.awaitIdle();
   }
 
   @Test
