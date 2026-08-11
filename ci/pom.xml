@@ -53,14 +53,18 @@
             <artifactId>quarkus-jdbc-postgresql</artifactId>
         </dependency>
         <dependency>
-            <!-- PatientPgDriver, which the datasource above names as its driver: it delegates to
-                 org.postgresql.Driver and, while postgres is not there, keeps asking for up to 14s
-                 instead of failing at once. RUNTIME scope because no code here touches it — config
-                 carries the name, and the class must simply be on the classpath of whoever boots
-                 this jar's pool. It sits in this jar for the reason flyway-database-postgresql
-                 does: this module declares the datasource, so a consumer that did not carry the
-                 driver would fail at boot on a pool it does not own. The real pgjdbc still comes
-                 from quarkus-jdbc-postgresql above; this jar brings it provided-scope only. -->
+            <!-- Two things, and they answer two different halves of one outage. PatientPgDriver is
+                 what the datasource above names as its driver: it delegates to org.postgresql.Driver
+                 and, while postgres is not there, keeps asking for up to 14s instead of failing at
+                 once — config carries the name and no code here touches it. DbRetry is code, called
+                 by this module's read seams (CiRunService's listings, CiDaemonPins.currentAnswer,
+                 KnownCiRepos.candidates) for the loss the driver cannot help with: a connection
+                 severed AFTER the statements ran, which no amount of patience at creation time can
+                 undo. That second one is why the dependency is COMPILE scope rather than runtime.
+                 It sits in this jar for the reason flyway-database-postgresql does: this module
+                 declares the datasource, so a consumer that did not carry the driver would fail at
+                 boot on a pool it does not own. The real pgjdbc still comes from
+                 quarkus-jdbc-postgresql above; this jar brings it provided-scope only. -->
             <groupId>${project.groupId}</groupId>
             <artifactId>qits-db-core</artifactId>
         </dependency>

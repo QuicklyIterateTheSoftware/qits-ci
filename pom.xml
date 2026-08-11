@@ -201,12 +201,12 @@
                 <version>${qits.arch-rules.version}</version>
             </dependency>
             <dependency>
-                <!-- PatientPgDriver, named by config and reached by no code here — runtime scope
-                     wherever the datasource it serves is declared. -->
+                <!-- PatientPgDriver, named by config and reached by no code, plus DbRetry, which
+                     the read seams call. COMPILE scope since the second one arrived: a runtime-only
+                     jar cannot be imported. -->
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-db-core</artifactId>
                 <version>${qits.db-core.version}</version>
-                <scope>runtime</scope>
             </dependency>
         </dependencies>
     </dependencyManagement>

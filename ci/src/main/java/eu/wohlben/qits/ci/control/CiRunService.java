@@ -16,6 +16,7 @@ import eu.wohlben.qits.ci.error.ConflictException;
 import eu.wohlben.qits.ci.error.NotFoundException;
 import eu.wohlben.qits.ci.persistence.CiRunRepository;
 import eu.wohlben.qits.ci.persistence.CiStepRepository;
+import eu.wohlben.qits.db.DbRetry;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.runtime.LaunchMode;
 import io.quarkus.runtime.StartupEvent;
@@ -27,6 +28,7 @@ import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import java.sql.SQLIntegrityConstraintViolationException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -66,6 +68,30 @@ import org.jboss.logging.Logger;
  * relay, exposed on the run read surface as {@code live}. The never-run remainder is written {@code
  * SKIPPED} when the run closes. So the database never holds a half-written step and there is no
  * insert-then-update anywhere in a run.
+ *
+ * <h2>Patience: the READ surface holds through a short outage, and nothing else does</h2>
+ *
+ * <p>The pool opens its connections through {@code PatientPgDriver}, so a request that has executed
+ * nothing waits for postgres to come back rather than failing. What that cannot help is a connection
+ * severed <b>mid-flight</b>, after the statements ran — and retrying <em>that</em> is only safe when
+ * the operation is a read. So the seven caller-facing reads at the bottom of this class ({@link
+ * #activeRuns}, {@link #finishedRuns}, {@link #repositorySummaries}, {@link #runsFor}, {@link
+ * #requireRun}, {@link #stepsFor}, {@link #repositoryIds}) are wrapped in {@link DbRetry} and
+ * nothing else here is.
+ *
+ * <p><b>Three rules hold that line, and each of them is a way to get it wrong.</b> The retry sits
+ * <b>outside</b> {@code requiringNew}, never inside, so every attempt runs in a fresh transaction on
+ * a freshly borrowed connection — inside one it would re-run statements in a transaction the severed
+ * connection already doomed. No <b>write</b> is wrapped: a write whose commit acknowledgement was
+ * lost still committed, and a second attempt would write it twice. And no <b>multi-op bracket</b> is
+ * split — {@link #acceptEventRun} deliberately holds its check and its insert in one transaction,
+ * which is what makes the dedupe survive a race, so patience there would have to wrap the whole
+ * bracket and would be wrapping a write.
+ *
+ * <p>The validation each listing does — a non-positive {@code limit} — happens <em>before</em> the
+ * wrap, so a caller bug is still one immediate 400 rather than something retried for fifteen
+ * seconds. {@link NotFoundException} is thrown inside the wrap and is not retried either, because
+ * {@code DbRetry} waits on connection failures only; every other throwable propagates at once.
  *
  * <h2>The run row is born at accept, not at start</h2>
  *
@@ -188,6 +214,14 @@ public class CiRunService {
   /** The instance-wide upper bound on runs executing at the same time. */
   @ConfigProperty(name = "qits.ci.concurrent-builds")
   int concurrentBuilds;
+
+  /**
+   * How long a <b>read</b> holds while the datasource is gone — see "Patience" in this class's
+   * javadoc. The shipped 15s covers a postgres cutover; the suite shortens it, because a test
+   * proving the give-up must not pay for it.
+   */
+  @ConfigProperty(name = "qits.ci.db-retry-deadline", defaultValue = "15S")
+  Duration dbRetryDeadline;
 
   /**
    * Runs a user asked to stop. In memory and deliberately so: a cancellation is only meaningful
@@ -1349,7 +1383,19 @@ public class CiRunService {
    * became a row: before, half of it lived in an executor's queue.
    */
   public List<CiRun> activeRuns() {
-    return runs.listActiveNewestFirst();
+    return DbRetry.call(
+        "active run listing",
+        () -> QuarkusTransaction.requiringNew().call(runs::listActiveNewestFirst),
+        retryDeadline());
+  }
+
+  /**
+   * The configured deadline, or the library's default for an instance nobody injected — which is how
+   * a hand-built test subclass arrives, constructed with {@code new} and calling {@code super} for
+   * the part it does not fake.
+   */
+  private Duration retryDeadline() {
+    return dbRetryDeadline == null ? DbRetry.DEFAULT_DEADLINE : dbRetryDeadline;
   }
 
   /**
@@ -1391,7 +1437,11 @@ public class CiRunService {
     if (asked <= 0) {
       throw new BadRequestException("Invalid limit");
     }
-    return runs.listFinishedNewestFirst(Math.min(asked, MAX_FINISHED_LIMIT));
+    int bounded = Math.min(asked, MAX_FINISHED_LIMIT);
+    return DbRetry.call(
+        "finished run listing",
+        () -> QuarkusTransaction.requiringNew().call(() -> runs.listFinishedNewestFirst(bounded)),
+        retryDeadline());
   }
 
   /**
@@ -1417,9 +1467,21 @@ public class CiRunService {
    * alternative — a window function or a fetch of every run — is either an ordering the entity
    * mapping would have to be taught or exactly the unbounded read this endpoint exists to spare the
    * client.
+   *
+   * <p><b>The whole fan-out is one transaction and one retry.</b> The listing and the 2N reads used
+   * to be 2N+1 unbracketed queries; holding them together is what lets a connection lost halfway
+   * through be answered by re-reading the lot rather than by half a summary, and it costs nothing —
+   * every one of them is an index-hit read.
    */
   public List<RepositorySummary> repositorySummaries() {
-    return repositoryIds().stream()
+    return DbRetry.call(
+        "repository summary listing",
+        () -> QuarkusTransaction.requiringNew().call(this::readSummaries),
+        retryDeadline());
+  }
+
+  private List<RepositorySummary> readSummaries() {
+    return sortedRepoIds().stream()
         .map(
             repoId ->
                 new RepositorySummary(
@@ -1434,7 +1496,10 @@ public class CiRunService {
 
   /** All runs recorded for a repository, newest-first. */
   public List<CiRun> runsFor(String repoId) {
-    return runs.listByRepoIdNewestFirst(repoId);
+    return DbRetry.call(
+        "run listing for repository " + repoId,
+        () -> QuarkusTransaction.requiringNew().call(() -> runs.listByRepoIdNewestFirst(repoId)),
+        retryDeadline());
   }
 
   /**
@@ -1451,7 +1516,12 @@ public class CiRunService {
     if (limit <= 0) {
       throw new BadRequestException("Invalid limit");
     }
-    return runs.listByRepoIdNewestFirst(repoId, limit);
+    return DbRetry.call(
+        "run listing for repository " + repoId,
+        () ->
+            QuarkusTransaction.requiringNew()
+                .call(() -> runs.listByRepoIdNewestFirst(repoId, limit)),
+        retryDeadline());
   }
 
   /**
@@ -1468,18 +1538,44 @@ public class CiRunService {
    * history to explore, and listing it here would promise one.
    */
   public List<String> repositoryIds() {
+    return DbRetry.call(
+        "repository id listing",
+        () -> QuarkusTransaction.requiringNew().call(this::sortedRepoIds),
+        retryDeadline());
+  }
+
+  /**
+   * {@link #repositoryIds} without the patience, so {@link #repositorySummaries} can read the ids
+   * inside its own transaction and its own retry rather than nesting one retry in another.
+   */
+  private List<String> sortedRepoIds() {
     return runs.distinctRepoIds().stream().sorted().toList();
   }
 
-  /** The run, or 404. */
+  /**
+   * The run, or 404.
+   *
+   * <p>The {@link NotFoundException} is raised inside the retry and is not retried: {@code DbRetry}
+   * waits on connection failures only, so an absent run is still one immediate 404.
+   */
   public CiRun requireRun(String runId) {
-    return runs.findByIdOptional(runId)
-        .orElseThrow(() -> new NotFoundException("No such CI run: " + runId));
+    return DbRetry.call(
+        "run lookup " + runId,
+        () ->
+            QuarkusTransaction.requiringNew()
+                .call(
+                    () ->
+                        runs.findByIdOptional(runId)
+                            .orElseThrow(() -> new NotFoundException("No such CI run: " + runId))),
+        retryDeadline());
   }
 
   /** A run's steps in declaration order. */
   public List<CiStep> stepsFor(String runId) {
-    return steps.listByRunIdOrdered(runId);
+    return DbRetry.call(
+        "step listing for run " + runId,
+        () -> QuarkusTransaction.requiringNew().call(() -> steps.listByRunIdOrdered(runId)),
+        retryDeadline());
   }
 
   /** Keeps the LAST {@code maxChars} chars (a step's tail is where the failure is), marked. */

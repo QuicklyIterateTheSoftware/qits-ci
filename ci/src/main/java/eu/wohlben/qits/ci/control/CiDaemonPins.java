@@ -4,10 +4,12 @@ import eu.wohlben.qits.ci.entity.CiDaemonPin;
 import eu.wohlben.qits.ci.entity.CiDaemonPinVerdict;
 import eu.wohlben.qits.ci.error.BadRequestException;
 import eu.wohlben.qits.ci.persistence.CiDaemonPinRepository;
+import eu.wohlben.qits.db.DbRetry;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -94,6 +96,13 @@ public class CiDaemonPins {
   @ConfigProperty(name = "qits.ci.daemon-version")
   public Optional<String> configuredVersion;
 
+  /**
+   * How long a read holds while the datasource is gone. The shipped 15s covers a postgres cutover;
+   * the suite shortens it, because a test proving the give-up must not pay for it.
+   */
+  @ConfigProperty(name = "qits.ci.db-retry-deadline", defaultValue = "15S")
+  Duration dbRetryDeadline;
+
   /** What a run started right now would download, and what would fall back if it did not work --
    *  the shape {@code GET /ci/api/daemon} answers verbatim (plan §2.7). */
   public record Pin(String version, String previousVersion, String source) {}
@@ -123,9 +132,25 @@ public class CiDaemonPins {
    * calling {@code answer()} means a probe container can be launched on that cadence -- the amplifier
    * that turned one docker container-naming race into a near-certain collision. Neither surface needs
    * a fresh verdict, only today's best-known one, with no side effect.
+   *
+   * <p><b>It is also the twin that holds through a short outage.</b> The ladder read is wrapped in
+   * {@link DbRetry}, from OUTSIDE the {@code requiringNew} in {@link #walk}, so a connection lost
+   * mid-flight costs the health check and the endpoint a pause rather than an error. {@link #answer}
+   * is deliberately left bare: a retry there would re-walk the ladder and can launch a probe
+   * container, which is a side effect and not a read. The wrap is safe here for exactly the reason
+   * it is unsafe there — with {@code allowProbing} unset this walk writes nothing.
    */
   public Pin currentAnswer() {
-    return walk(false);
+    return DbRetry.call("daemon pin ladder read", () -> walk(false), retryDeadline());
+  }
+
+  /**
+   * The configured deadline, or the library's default for an instance nobody injected — which is
+   * how a {@code QuarkusMock} subclass arrives, built with {@code new} and calling {@code super} for
+   * the part it does not fake.
+   */
+  private Duration retryDeadline() {
+    return dbRetryDeadline == null ? DbRetry.DEFAULT_DEADLINE : dbRetryDeadline;
   }
 
   private Pin walk(boolean allowProbing) {
@@ -149,10 +174,18 @@ public class CiDaemonPins {
    * (workstream BX) reports as data when the ladder has fallen all the way through to blank (§2.5,
    * ⚖6(a)). Empty on a healthy ladder; a version can appear here only once, since a verdict is
    * durable and a rejected candidate is never re-probed.
+   *
+   * <p>Patient like {@link #currentAnswer}, and for the same caller: the readiness check reads both
+   * on every healthcheck tick, so one of the two failing on a severed connection while the other
+   * held would report a ladder that never existed.
    */
   public List<String> rejectedVersions() {
-    return QuarkusTransaction.requiringNew()
-        .call(() -> repo.listRejected().stream().map(pin -> pin.version).toList());
+    return DbRetry.call(
+        "daemon pin rejection listing",
+        () ->
+            QuarkusTransaction.requiringNew()
+                .call(() -> repo.listRejected().stream().map(pin -> pin.version).toList()),
+        retryDeadline());
   }
 
   /**
