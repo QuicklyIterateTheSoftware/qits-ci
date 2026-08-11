@@ -53,6 +53,18 @@
             <artifactId>quarkus-jdbc-postgresql</artifactId>
         </dependency>
         <dependency>
+            <!-- PatientPgDriver, which the datasource above names as its driver: it delegates to
+                 org.postgresql.Driver and, while postgres is not there, keeps asking for up to 14s
+                 instead of failing at once. RUNTIME scope because no code here touches it — config
+                 carries the name, and the class must simply be on the classpath of whoever boots
+                 this jar's pool. It sits in this jar for the reason flyway-database-postgresql
+                 does: this module declares the datasource, so a consumer that did not carry the
+                 driver would fail at boot on a pool it does not own. The real pgjdbc still comes
+                 from quarkus-jdbc-postgresql above; this jar brings it provided-scope only. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-db-core</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-flyway</artifactId>
         </dependency>
