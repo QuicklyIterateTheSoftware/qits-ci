@@ -69,24 +69,38 @@ import org.jboss.logging.Logger;
  * SKIPPED} when the run closes. So the database never holds a half-written step and there is no
  * insert-then-update anywhere in a run.
  *
- * <h2>Patience: the READ surface holds through a short outage, and nothing else does</h2>
+ * <h2>Patience: the READ surface holds through a short outage, and so do two request-path writes</h2>
  *
  * <p>The pool opens its connections through {@code PatientPgDriver}, so a request that has executed
  * nothing waits for postgres to come back rather than failing. What that cannot help is a connection
- * severed <b>mid-flight</b>, after the statements ran — and retrying <em>that</em> is only safe when
- * the operation is a read. So the seven caller-facing reads at the bottom of this class ({@link
- * #activeRuns}, {@link #finishedRuns}, {@link #repositorySummaries}, {@link #runsFor}, {@link
- * #requireRun}, {@link #stepsFor}, {@link #repositoryIds}) are wrapped in {@link DbRetry} and
- * nothing else here is.
+ * severed <b>mid-flight</b>, after the statements ran. The seven caller-facing reads at the bottom of
+ * this class ({@link #activeRuns}, {@link #finishedRuns}, {@link #repositorySummaries}, {@link
+ * #runsFor}, {@link #requireRun}, {@link #stepsFor}, {@link #repositoryIds}) are wrapped in {@link
+ * DbRetry#call}, which sits <b>outside</b> {@code requiringNew}, never inside: inside one it would
+ * re-run statements in a transaction the severed connection already doomed.
  *
- * <p><b>Three rules hold that line, and each of them is a way to get it wrong.</b> The retry sits
- * <b>outside</b> {@code requiringNew}, never inside, so every attempt runs in a fresh transaction on
- * a freshly borrowed connection — inside one it would re-run statements in a transaction the severed
- * connection already doomed. No <b>write</b> is wrapped: a write whose commit acknowledgement was
- * lost still committed, and a second attempt would write it twice. And no <b>multi-op bracket</b> is
- * split — {@link #acceptEventRun} deliberately holds its check and its insert in one transaction,
- * which is what makes the dedupe survive a race, so patience there would have to wrap the whole
- * bracket and would be wrapping a write.
+ * <p><b>A write needs the other method, and it is not the same trade.</b> {@link DbRetry#inNewTx}
+ * owns the transaction boundary, so it can retry the attempts that certainly did not commit — a
+ * connection-class failure thrown out of the <em>body</em> — and rethrows everything the transaction
+ * manager reports, because a lost commit acknowledgement is undecidable. Each wrapped body ends with
+ * {@code runs.flush()} on purpose: an ORM flushes at commit by default, which would put the write on
+ * the undecidable side of that line.
+ *
+ * <p><b>Two writes are wrapped, and they are the two on a request-shaped thread</b> — {@link
+ * #acceptEventRun} and both transactions of {@link #cancel}. Their bodies are database-only: no
+ * container is launched, no event published, no HTTP call made inside one, because the retry re-runs
+ * the whole body. {@code acceptEventRun}'s check-then-insert-then-supersede is wrapped <b>whole</b>,
+ * which is the only legal shape for it — splitting the bracket would cost the dedupe its race — and
+ * that is sound because every statement in it is derived from the current database state and from the
+ * arriving request, so a rolled-back attempt leaves the next one deciding the same way.
+ *
+ * <p><b>What is deliberately NOT wrapped.</b> {@link #acceptPostReceive} runs inside the durable
+ * listener's claiming transaction, so a retry that outlives that claim's own connection would leave a
+ * committed {@code QUEUED} row behind an event the funnel then re-offers — an orphan nothing
+ * enqueues, where today the whole hop simply rolls back and the redelivery builds it cleanly. And no
+ * worker-thread transition ({@link #startQueued}, {@link #finishRun}, {@code failIncompleteSteps},
+ * {@link #discardRun}, the step inserts) is wrapped: those have their own recovery in {@code
+ * sweepInterrupted} at boot, which is a stronger answer than a fifteen-second wait on the run worker.
  *
  * <p>The validation each listing does — a non-positive {@code limit} — happens <em>before</em> the
  * wrap, so a caller bug is still one immediate 400 rather than something retried for fifteen
@@ -1058,6 +1072,48 @@ public class CiRunService {
 
   private CiRun acceptEventRun(EventRun request) {
     String configPath = request.trigger().configPath();
+    CiRun run;
+    try {
+      run =
+          DbRetry.inNewTx(
+              "event run accept", () -> insertEventRun(request, configPath), retryDeadline());
+    } catch (RuntimeException e) {
+      if (!isUniqueViolation(e)) {
+        throw e;
+      }
+      LOG.infof(
+          "Event %s reached %s in %s twice — the first run stands",
+          request.eventId(), configPath, request.repoId());
+      return null;
+    }
+    if (run == null) {
+      LOG.debugf(
+          "Event %s already triggered %s in %s — no second run",
+          request.eventId(), configPath, request.repoId());
+      return null;
+    }
+    return run;
+  }
+
+  /**
+   * The whole bracket as one database-only unit: the check, the insert and the supersede, returning
+   * the accepted run or null for one this event already triggered.
+   *
+   * <p><b>The row is built HERE rather than by the caller</b>, and that is what makes a second
+   * attempt correct. A rolled-back attempt leaves its entity carrying whatever {@link
+   * #supersedeByVersion} wrote on it — a run that lost to a queued tag is marked {@code FAILED} in
+   * memory — so re-persisting that same instance against a database that has since changed would
+   * commit a decision the second attempt never made. A fresh instance per attempt has no memory of
+   * one.
+   *
+   * <p>Nothing in here is anything but a database statement, because {@link DbRetry#inNewTx} re-runs
+   * the whole body. The trailing {@code flush} is the second half of that contract: it moves the
+   * supersede's updates into the statement phase, where a lost connection is a certain no-commit.
+   */
+  private CiRun insertEventRun(EventRun request, String configPath) {
+    if (runs.alreadyTriggered(request.eventId(), request.repoId(), configPath)) {
+      return null;
+    }
     CiRun run = newRun(request.repoId(), request.branch(), request.sha());
     run.triggerType = CiTriggerType.EVENT;
     run.configPath = configPath;
@@ -1072,35 +1128,10 @@ public class CiRunService {
     run.triggerEventOccurredAt = request.occurredAt();
     run.triggerEventPayload = request.payload();
     run.triggerConfig = request.triggerConfig();
-    boolean inserted;
-    try {
-      inserted =
-          QuarkusTransaction.requiringNew()
-              .call(
-                  () -> {
-                    if (runs.alreadyTriggered(request.eventId(), request.repoId(), configPath)) {
-                      return false;
-                    }
-                    runs.persist(run);
-                    runs.flush();
-                    supersedeByVersion(run, request);
-                    return true;
-                  });
-    } catch (RuntimeException e) {
-      if (!isUniqueViolation(e)) {
-        throw e;
-      }
-      LOG.infof(
-          "Event %s reached %s in %s twice — the first run stands",
-          request.eventId(), configPath, request.repoId());
-      return null;
-    }
-    if (!inserted) {
-      LOG.debugf(
-          "Event %s already triggered %s in %s — no second run",
-          request.eventId(), configPath, request.repoId());
-      return null;
-    }
+    runs.persist(run);
+    runs.flush();
+    supersedeByVersion(run, request);
+    runs.flush();
     return run;
   }
 
@@ -1331,33 +1362,40 @@ public class CiRunService {
           "CI run " + runId + " is not running (" + run.status + ") — nothing to cancel");
     }
     cancelled.add(runId);
+    // Both writes are held through a short outage: this runs on the request thread, outside any
+    // transaction of its own, and each body is nothing but statements — the flag above and the
+    // runner below are outside the retry precisely because they are not.
     boolean neverStarted =
-        QuarkusTransaction.requiringNew()
-            .call(
-                () -> {
-                  CiRun current = runs.findById(runId);
-                  if (current == null || current.status != CiRunStatus.QUEUED) {
-                    return false;
-                  }
-                  current.status = CiRunStatus.FAILED;
-                  current.finishedAt = Instant.now();
-                  current.cancellationReason = reason;
-                  current.supersededByRunId = null;
-                  return true;
-                });
+        DbRetry.inNewTx(
+            "cancel a queued run",
+            () -> {
+              CiRun current = runs.findById(runId);
+              if (current == null || current.status != CiRunStatus.QUEUED) {
+                return false;
+              }
+              current.status = CiRunStatus.FAILED;
+              current.finishedAt = Instant.now();
+              current.cancellationReason = reason;
+              current.supersededByRunId = null;
+              runs.flush();
+              return true;
+            },
+            retryDeadline());
     if (neverStarted) {
       LOG.infof("CI run %s cancelled on request before it started (%s)", runId, reason);
       return;
     }
-    QuarkusTransaction.requiringNew()
-        .run(
-            () -> {
-              CiRun current = runs.findById(runId);
-              if (current != null) {
-                current.cancellationReason = reason;
-                current.supersededByRunId = null;
-              }
-            });
+    DbRetry.runInNewTx(
+        "record a running run's cancellation reason",
+        () -> {
+          CiRun current = runs.findById(runId);
+          if (current != null) {
+            current.cancellationReason = reason;
+            current.supersededByRunId = null;
+            runs.flush();
+          }
+        },
+        retryDeadline());
     runner.cancel(runId);
     LOG.infof("CI run %s cancelled on request (%s)", runId, reason);
   }
