@@ -158,6 +158,22 @@ public class CiRunService {
    */
   private static final String VERSION_FIELD = "version";
 
+  /**
+   * The git host's tag event, by the name it rides the bus under, and the payload field holding the
+   * tag it announces. Together they are what makes {@link #supersedeByVersion} possible: an event
+   * name this engine can recognise, and one field in its payload that orders.
+   *
+   * <p><b>Spelled as strings on purpose.</b> {@code qits-githost-events} is the {@code service}
+   * module's dependency — the listener that binds {@code SCMPublishCommit} is what pays for it —
+   * and this module deliberately has no compile-time knowledge of another context at all. What
+   * keeps the strings honest is {@code bus/ScmPublishTagContractTest}, over in the module where the
+   * record IS on the classpath: it resolves both against {@code SCMPublishTag} itself, so a rename
+   * there is a red suite here rather than a supersede that quietly stops firing.
+   */
+  public static final String TAG_EVENT_NAME = "SCMPublishTag";
+
+  public static final String TAG_NAME_FIELD = "tagName";
+
   public static final String USER_CANCELLED = "USER_CANCELLED";
   public static final String DEDUPED = "DEDUPED";
   public static final int MAX_CANCELLATION_REASON_LENGTH = 255;
@@ -379,6 +395,11 @@ public class CiRunService {
    * repo_id, config_path)} and is still dropped as already-triggered rather than re-run, just on the
    * trigger worker rather than on the run worker, and before a queue slot is spent rather than after.
    * A duplicate frame therefore never reaches the queue at all.
+   *
+   * <p><b>There is a second collapse on this path, and it is not the same one.</b> The constraint
+   * refuses a second run for one event; {@link #supersedeByVersion} refuses a second <em>queued</em>
+   * run for one trigger file when both are tag events, keeping the newest tag of a multi-tag push
+   * and no other. Distinct events, distinct rows, one build.
    *
    * @return the id of the run this recorded, or {@code null} when the dedupe dropped it. The manual
    *     trigger endpoint answers with these ids, which is what lets a 2xx there mean "these rows
@@ -1027,6 +1048,8 @@ public class CiRunService {
                       return false;
                     }
                     runs.persist(run);
+                    runs.flush();
+                    supersedeByVersion(run, request);
                     return true;
                   });
     } catch (RuntimeException e) {
@@ -1045,6 +1068,97 @@ public class CiRunService {
       return null;
     }
     return run;
+  }
+
+  /**
+   * <b>One push carrying many tags is one build, of the newest tag.</b> Every accepted tag-triggered
+   * run collapses against the other queued runs of the same trigger file: the lower tag by {@link
+   * VersionSort} is marked {@code DEDUPED}, which may be the run just accepted.
+   *
+   * <p>It is the event path's twin of the branch supersede in {@link #acceptPostReceive}, down to
+   * the columns it writes, and it exists for the same reason. A release push writes N tag refs and
+   * the git host announces <b>every one of them</b> — deliberately, because {@code SCMPublishTag} is
+   * a fact about the repository and qits-projects' backup consumer needs them all. So the collapse
+   * cannot live in the publisher, and it lives here, in the consumer that turns a fact into work.
+   *
+   * <p><b>Best-effort by design, exactly like the branch supersede.</b> Only {@code QUEUED} rows are
+   * touched: a lower tag whose run has already started keeps running, because cancelling a running
+   * build to save the time it has already spent is a worse trade than letting it finish. What is
+   * guaranteed is convergence, not minimality — N tags in one push leave one run to do.
+   *
+   * <p>Three things are deliberately left alone. A payload neither side can be read a tag out of
+   * supersedes nothing, since "no tag" is not a lower version — it is a failure to compare, and a
+   * failure to compare must not cancel a build. A tag equal to a queued one <em>does</em> supersede
+   * it, because that is a tag that moved and the newer announcement is the current one, which is the
+   * same rule the branch supersede applies to a second push. And a non-tag event never enters here
+   * at all: no other event on this bus carries a field this can order by.
+   *
+   * <p><b>A row names what beat it at the time, so out-of-order tags leave a chain rather than a
+   * star.</b> Only queued rows are candidates, so a run superseded three tags ago is no longer one —
+   * its {@code supersededByRunId} keeps pointing at the run that beat it then, which is a true
+   * statement about that moment and reaches the surviving run by following it. Rewriting the older
+   * rows to name the latest winner would be tidier and would say something no thread ever decided.
+   *
+   * <p>Called inside {@link #acceptEventRun}'s transaction, after the flush, so a row it supersedes
+   * and the row that superseded it commit together or not at all.
+   */
+  private void supersedeByVersion(CiRun accepted, EventRun request) {
+    if (!TAG_EVENT_NAME.equals(request.eventName())) {
+      return;
+    }
+    String tag = tagOf(request.payload());
+    if (tag == null) {
+      return;
+    }
+    CiRun newer = null;
+    String newerTag = null;
+    for (CiRun queued :
+        runs.listQueuedEventRuns(
+            accepted.repoId, accepted.configPath, TAG_EVENT_NAME, accepted.id)) {
+      String queuedTag = tagOf(queued.triggerEventPayload);
+      if (queuedTag == null) {
+        continue;
+      }
+      if (VersionSort.compare(tag, queuedTag) >= 0) {
+        dedupe(queued, accepted);
+      } else if (newerTag == null || VersionSort.compare(queuedTag, newerTag) > 0) {
+        newer = queued;
+        newerTag = queuedTag;
+      }
+    }
+    if (newer != null) {
+      // The push's tags arrived out of order and this one is not the newest. Its row stays as the
+      // record that the tag was announced; the worker's claim reads the status back and drops it,
+      // which is the same path a cancellation of a queued run takes.
+      LOG.infof(
+          "Tag %s in %s is older than queued %s — run %s stands for %s",
+          tag, accepted.repoId, newerTag, newer.id, accepted.configPath);
+      dedupe(accepted, newer);
+    }
+  }
+
+  /** Marks one queued run superseded by another. The idiom both supersedes write, spelled once. */
+  private static void dedupe(CiRun loser, CiRun winner) {
+    loser.status = CiRunStatus.FAILED;
+    loser.finishedAt = winner.createdAt;
+    loser.cancellationReason = DEDUPED;
+    loser.supersededByRunId = winner.id;
+  }
+
+  /**
+   * The tag an {@code SCMPublishTag} payload announces, or null when there is none to read — an
+   * unparseable payload, a missing field, or a blank one. Walked rather than bound, the same rule
+   * {@link #versionOf} follows and for the same native-image reason.
+   */
+  private static String tagOf(String payload) {
+    JsonNode tag =
+        CiEventSelectionEvaluator.resolve(
+            CiEventSelectionEvaluator.parsePayload(payload), TAG_NAME_FIELD);
+    if (tag == null) {
+      return null;
+    }
+    String text = CiEventSelectionEvaluator.asString(tag);
+    return text.isBlank() ? null : text;
   }
 
   /**

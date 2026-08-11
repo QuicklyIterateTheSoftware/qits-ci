@@ -625,6 +625,34 @@ announced push is one run. Every run records why it exists (`triggerType`, `trig
 `BuildSuccessful` carries that event as its `parentId`, so a release train is a chain in
 the event log rather than a set of rows distinguishable from coincidence only by their timestamps.
 
+### One push of many tags: the newest tag, once
+
+A trigger file may declare `event: SCMPublishTag`, and one push can write any number of tag refs.
+The git host announces **every one of them** — a tag is a fact about the repository and qits-projects'
+backup consumer needs them all — so a five-tag release push would otherwise be five runs of one
+pipeline, four of them building a version nobody asked for.
+
+qits-ci collapses them instead. When a tag-triggered run is accepted and another **queued** run
+exists for the same repository and the same trigger file, the one with the **lower tag by version
+sort** is marked `DEDUPED` — the same columns the per-branch push supersede writes
+(`status FAILED`, `cancellationReason DEDUPED`, `supersededByRunId`), and it may be the run that was
+just accepted, since a fan-out arrives in no order. A push of N tags therefore leaves one run to do.
+
+- **Version sort, not string order.** Digit runs compare as numbers, so `2026.810.184518` is newer
+  than `2026.810.98` — which plain string order gets backwards. The rules are in `VersionSort`, and
+  it is hand-rolled rather than a dependency for the reason every client here is.
+- **Only queued runs are touched.** A lower tag whose run has already started keeps running:
+  cancelling a build to save the time it has already spent is the worse trade. What is guaranteed is
+  that a multi-tag push converges, not that it never starts a second container.
+- **Every announced tag still has a row**, so the record says what was announced and what became of
+  it. Only one of them is `QUEUED`. A row's `supersededByRunId` names what beat it *at the time*, so
+  tags arriving out of order leave a chain of them ending at the run that stands.
+- **A tag that cannot be read out of a payload supersedes nothing**, because a failure to compare is
+  not a lower version. **A tag equal to a queued one does** supersede it — that is a tag that moved,
+  and the later announcement is the current one, which is the rule a second push to a branch gets.
+- **Nothing but tags.** No other event on this bus carries a field that orders, so two
+  `BuildSuccessful` events are two independent reasons to build and stay that way.
+
 ### Triggering one by hand
 
 The bus is the primary trigger and stays that way. `POST /ci/api/events/trigger` is the second way

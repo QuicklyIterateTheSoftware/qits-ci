@@ -117,6 +117,29 @@ public class CiRunRepository implements PanacheRepositoryBase<CiRun, String> {
   }
 
   /**
+   * The other queued runs one trigger file has for one event name, the versionsort supersede's
+   * candidates — see {@code CiRunService.supersedeByVersion}.
+   *
+   * <p>Scoped by {@code configPath} rather than by branch, which is the event path's answer to the
+   * same question {@link #listQueuedPushes} asks: a push is one pipeline per branch, and a trigger
+   * file is one pipeline per file. The event NAME is in the predicate because two trigger files can
+   * be one file at two names only by coincidence — what supersedes what is decided by reading both
+   * payloads, and two payloads of different events have no field in common to compare.
+   */
+  public List<CiRun> listQueuedEventRuns(
+      String repoId, String configPath, String eventName, String exceptRunId) {
+    return list(
+        "repoId = ?1 and configPath = ?2 and status = ?3 and triggerType = ?4"
+            + " and triggerEventName = ?5 and id <> ?6",
+        repoId,
+        configPath,
+        CiRunStatus.QUEUED,
+        eu.wohlben.qits.ci.entity.CiTriggerType.EVENT,
+        eventName,
+        exceptRunId);
+  }
+
+  /**
    * Every repository this instance has ever recorded a run for — half of what {@code KnownCiRepos}
    * offers the trigger engine as candidates, and the whole of what {@code GET /ci/api/repositories}
    * answers.

@@ -806,6 +806,36 @@ follows is what biting it feels like.
   but it stays, because it is on ci's *own* datasource and the claim is not, and what it survives is
   a race between two evaluations and a restart mid-evaluation. Two nets, one of which is transactional
   with the run row. Deleting either for tidiness trades a guarantee for a diagram.
+- **There is a SECOND collapse on this path and it is not that one.** `CiRunService.supersedeByVersion`
+  is the event path's twin of the per-branch push supersede in `acceptPostReceive`, down to the
+  columns it writes, and it exists because **`SCMPublishTag` is announced once per tag ref of a
+  push**. The publisher is right to emit all of them — a tag is a fact and qits-projects' backup
+  consumer needs every one — so a trigger file declaring `event: SCMPublishTag` would get one run per
+  tag, four of five building a version nobody asked for. The collapse therefore belongs to the
+  consumer that turns a fact into work.
+
+  **Nothing had to be widened for the tag event to be selectable.** `CiEventTriggerListener` says
+  `"*"` permanently and the engine matches a trigger file's `event:` against the arriving name as a
+  string, so a repository could always name it; what was missing was only the dedupe. `signatures()`
+  is not a list anybody adds an event to.
+
+  Four things about it. It runs **inside `acceptEventRun`'s transaction, after the flush**, so a
+  superseded row and the row that superseded it commit together. It touches **`QUEUED` rows only**,
+  which makes it best-effort by design — a lower tag already running keeps running, because
+  cancelling a build to save time it has already spent is the worse trade, and what is guaranteed is
+  convergence rather than minimality. The loser **may be the run being accepted**, since a fan-out
+  arrives in no order; its row stays as the record that the tag was announced and the worker's claim
+  drops it, which is the path a cancelled queued run already takes. And an **unreadable tag
+  supersedes nothing** while an **equal one supersedes** — a failure to compare is not a lower
+  version, and a tag that moved is the same case a second push to a branch is.
+
+  **`VersionSort` is hand-rolled and `TAG_EVENT_NAME`/`TAG_NAME_FIELD` are strings**, both for rules
+  already on this page: no dependency the native-image builder has to be told about, and `ci/`
+  names no other context's types. The strings are the one thing a compiler cannot check, so
+  `bus/ScmPublishTagContractTest` resolves them against the real `SCMPublishTag` in the module that
+  has the jar — the same guard shape `EventWireReflectionTest` puts over the mix-in's class name.
+  Rename the event or the field in qits-githost and the suite goes red, rather than the supersede
+  quietly ceasing to fire.
 - **The trigger file parser is strict where `ci-post-receive.yml` is lenient**, and the asymmetry is
   the point rather than an inconsistency. In a pipeline an unread key costs a feature; in a
   *selection* it costs correctness, because an absent `when:` means **unconditional** — so a mistyped
