@@ -60,6 +60,22 @@ import org.junit.jupiter.api.Test;
  *
  * <p>The image is pinned to {@code buildpack-deps:scm}, verified to carry {@code git}, {@code bash},
  * {@code wget} and {@code curl} — the whole image contract, with both downloader arms present.
+ *
+ * <p><b>It needs a running qits-containers now, and that is one more precondition rather than a new
+ * kind of one.</b> qits-ci starts no container itself; the orchestrator does. The harness recipe is
+ * one command — run the {@code qits/containers} image with the host's docker socket and this
+ * network, then point {@code -Dqits.containers.url=http://127.0.0.1:<port>} at it:
+ *
+ * <pre>
+ *   docker run -d --name qits-containers-it --network qits-net -p 18080:8080 \
+ *     -v /var/run/docker.sock:/var/run/docker.sock qits/containers:latest
+ *   ./mvnw verify -DskipITs=false -Dqits.containers.url=http://127.0.0.1:18080 \
+ *     -Dqits.ci.daemon-binary=&lt;path&gt;
+ * </pre>
+ *
+ * Absent one, these cases <b>skip</b> rather than fail: an orchestrator is infrastructure this
+ * repository does not run, exactly like the daemon binary, and the clone-alone rule is what makes
+ * that the right answer. The host-networking caveat above is the deliberate exception and stays one.
  */
 @QuarkusTest
 @Tag("extended")
@@ -77,6 +93,12 @@ public class CiDaemonHandshakeIT {
 
   private static final String REPO_ID = "ci-daemon-it-repo";
 
+  /** Where the orchestrator answers, if one is up for this run. See the class javadoc's recipe. */
+  private static final String CONTAINERS_URL =
+      org.eclipse.microprofile.config.ConfigProvider.getConfig()
+          .getOptionalValue("qits.containers.url", String.class)
+          .orElse("http://127.0.0.1:1");
+
   private static final Duration REGISTER = Duration.ofSeconds(120);
   private static final Duration INITIALIZE = Duration.ofSeconds(120);
   private static final Duration FINISH = Duration.ofSeconds(120);
@@ -89,6 +111,7 @@ public class CiDaemonHandshakeIT {
   @Test
   public void aRealContainerRegistersInitializesRunsItsStepAndFinishes() throws Exception {
     assumeTrue(dockerAndImageAvailable(), "docker + " + IMAGE + " required for this IT");
+    assumeTrue(orchestratorReachable(), "a running qits-containers at " + CONTAINERS_URL + " is required");
     assumeTrue(binaryAvailable(), "-Dqits.ci.daemon-binary=<path> required for this IT");
 
     List<String> chunks = Collections.synchronizedList(new ArrayList<>());
@@ -109,6 +132,7 @@ public class CiDaemonHandshakeIT {
                       credentials.daemonId(),
                       credentials.secret(),
                       binaryUrl,
+                      0,
                       false,
                       Map.of()));
           try {
@@ -116,14 +140,14 @@ public class CiDaemonHandshakeIT {
 
             assertTrue(
                 registry.awaitRegistered(credentials.daemonId(), REGISTER),
-                "the daemon never dialled back:\n" + launcher.logs(launched.containerName()));
+                "the daemon never dialled back:\n" + launcher.destroyWithLogs(launched.containerName()));
 
             CiDaemonRegistry.Initialization initialization =
                 registry.awaitInitialized(credentials.daemonId(), INITIALIZE);
             assertEquals(
                 CiDaemonRegistry.Initialization.Status.INITIALIZED,
                 initialization.status(),
-                initialization + "\n" + launcher.logs(launched.containerName()));
+                initialization + "\n" + launcher.destroyWithLogs(launched.containerName()));
 
             // The step is the answer to Initialized — the host initiates nothing toward a container.
             registry.sendRunStep(credentials.daemonId(), "echo marker-$(cat hello.txt) && pwd", 60);
@@ -133,7 +157,7 @@ public class CiDaemonHandshakeIT {
             assertEquals(
                 CiDaemonRegistry.Completion.Status.FINISHED,
                 completion.status(),
-                completion + "\n" + launcher.logs(launched.containerName()));
+                completion + "\n" + launcher.destroyWithLogs(launched.containerName()));
             assertEquals(0, completion.exitCode(), String.join("", chunks));
             assertFalse(completion.timedOut());
 
@@ -151,6 +175,7 @@ public class CiDaemonHandshakeIT {
   @Test
   public void aContainerLaunchedWithTheWrongSecretIsRefusedAndNeverRegisters() throws Exception {
     assumeTrue(dockerAndImageAvailable(), "docker + " + IMAGE + " required for this IT");
+    assumeTrue(orchestratorReachable(), "a running qits-containers at " + CONTAINERS_URL + " is required");
     assumeTrue(binaryAvailable(), "-Dqits.ci.daemon-binary=<path> required for this IT");
 
     withFixture(
@@ -170,6 +195,7 @@ public class CiDaemonHandshakeIT {
                       // The one thing changed: this container holds a secret the host did not mint.
                       credentials.secret().substring(1) + "x",
                       binaryUrl,
+                      0,
                       false,
                       Map.of()));
           try {
@@ -179,7 +205,7 @@ public class CiDaemonHandshakeIT {
                 "a container presenting the wrong secret must never reach REGISTERED");
             // The daemon saw the 1008 and exited; its log is the diagnosis, as for every other
             // failure inside a container.
-            assertFalse(launcher.logs(launched.containerName()).isBlank());
+            assertFalse(launcher.destroyWithLogs(launched.containerName()).isBlank());
           } finally {
             registry.reap(credentials.daemonId());
             launcher.reap(launched.containerName());
@@ -190,6 +216,7 @@ public class CiDaemonHandshakeIT {
   @Test
   public void aContainerThatNeverRegistersIsReapedWithItsOwnLogCaptured() throws Exception {
     assumeTrue(dockerAndImageAvailable(), "docker + " + IMAGE + " required for this IT");
+    assumeTrue(orchestratorReachable(), "a running qits-containers at " + CONTAINERS_URL + " is required");
 
     withFixture(
         (launcher, sha, servedBinaryUrl) -> {
@@ -209,6 +236,7 @@ public class CiDaemonHandshakeIT {
                       credentials.daemonId(),
                       credentials.secret(),
                       servedBinaryUrl + "-does-not-exist",
+                      0,
                       false,
                       Map.of()));
           try {
@@ -259,7 +287,14 @@ public class CiDaemonHandshakeIT {
           RUNTIME, IMAGE, NETWORK, fixture.port(), controlSocket.getPort());
 
       CiDaemonLauncher launcher = new CiDaemonLauncher();
-      launcher.runtime = RUNTIME;
+      launcher.owner = "qits-ci-it";
+      launcher.containers =
+          new eu.wohlben.qits.containers.client.ContainersClient(
+              CONTAINERS_URL,
+              Duration.ofSeconds(30),
+              Duration.ofMinutes(5),
+              eu.wohlben.qits.containers.client.TokenSource.none());
+      launcher.bootReapPatience = Duration.ofSeconds(5);
       launcher.network = NETWORK;
       launcher.containerGitUrl = fixture.containerGitUrl();
       // Told, never derived: the container is handed this exact string and parses nothing out of it.
@@ -267,11 +302,14 @@ public class CiDaemonHandshakeIT {
           "ws://host.docker.internal:" + controlSocket.getPort() + controlSocket.getPath();
       launcher.daemonBinaryUrlTemplate = fixture.containerBinaryUrl();
       launcher.registerTimeoutSeconds = 180;
+      launcher.initTimeoutSeconds = 180;
+      launcher.stepTimeoutSeconds = 300;
+      launcher.stepTimeoutGraceSeconds = 30;
       launcher.outputMaxChars = 65536;
       launcher.memoryLimit = "2g";
-      launcher.pidsLimit = "1024";
+      launcher.pidsLimit = 1024;
       launcher.cpus = "2";
-      launcher.ensureNetwork();
+      // No ensureNetwork: the orchestrator owns the daemon, and the network is named in the spec.
 
       gateCase.run(launcher, sha, launcher.resolveBinaryUrl(""));
     } finally {
@@ -303,17 +341,34 @@ public class CiDaemonHandshakeIT {
     return bare;
   }
 
-  /** The container may still be writing when the register deadline expires; give the log a moment. */
+  /**
+   * The container may still be writing when the register deadline expires; give it a moment before
+   * the one call that reads its log and removes it.
+   *
+   * <p>It used to poll {@code logs} until something appeared, which is not a thing that can be done
+   * any more: the read and the removal are one call, so the second poll would be reading a container
+   * that the first one took away. The sleep is what the loop was really buying.
+   */
   private static String waitForLog(CiDaemonLauncher launcher, String containerName)
       throws InterruptedException {
-    for (int attempt = 0; attempt < 30; attempt++) {
-      String log = launcher.logs(containerName);
-      if (!log.isBlank()) {
-        return log;
+    Thread.sleep(2000);
+    return launcher.destroyWithLogs(containerName);
+  }
+
+  /** Whether an orchestrator is up for this run — a TCP connect, nothing more. */
+  private static boolean orchestratorReachable() {
+    try {
+      java.net.URI uri = java.net.URI.create(CONTAINERS_URL);
+      try (java.net.Socket socket = new java.net.Socket()) {
+        socket.connect(
+            new java.net.InetSocketAddress(
+                uri.getHost(), uri.getPort() < 0 ? 8080 : uri.getPort()),
+            1000);
       }
-      Thread.sleep(200);
+      return true;
+    } catch (Exception e) {
+      return false;
     }
-    return launcher.logs(containerName);
   }
 
   private boolean dockerAndImageAvailable() {

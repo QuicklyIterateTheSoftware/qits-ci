@@ -100,7 +100,45 @@ public class CiDaemonGateIT {
   private static final String IMAGE_WITHOUT_THE_CONTRACT =
       System.getProperty("qits.ci.contractless-image", "debian:bookworm-slim");
 
-  private static final String RUNTIME = System.getProperty("qits.ci.container-runtime", "docker");
+  /**
+   * The docker CLI this test uses for its OWN fixtures and preconditions — seeding an image check,
+   * standing a helper container up. qits-ci itself spawns nothing: every container in the run under
+   * test is the orchestrator's.
+   */
+  private static final String RUNTIME = System.getProperty("qits.ci.runtime", "docker");
+
+  /**
+   * Where the orchestrator answers for this run. qits-ci starts no container itself any more, so a
+   * running qits-containers is a precondition here exactly as docker and the daemon binary are, and
+   * the cases SKIP without one — an orchestrator is infrastructure this repository does not run.
+   *
+   * <p>The harness recipe is one command: run the {@code qits/containers} image with the host's
+   * docker socket and this network, and point this property at it.
+   *
+   * <pre>
+   *   docker run -d --name qits-containers-it --network qits-net -p 18080:8080 \
+   *     -v /var/run/docker.sock:/var/run/docker.sock qits/containers:latest
+   *   ./mvnw verify -DskipITs=false -Dqits.containers.url=http://127.0.0.1:18080 \
+   *     -Dqits.ci.daemon-binary=&lt;path&gt;
+   * </pre>
+   */
+  private static final String CONTAINERS_URL =
+      System.getProperty("qits.containers.url", "http://127.0.0.1:1");
+
+  /** Whether an orchestrator is up for this run — a TCP connect, nothing more. */
+  private static boolean orchestratorReachable() {
+    try {
+      java.net.URI uri = java.net.URI.create(CONTAINERS_URL);
+      try (java.net.Socket socket = new java.net.Socket()) {
+        socket.connect(
+            new java.net.InetSocketAddress(uri.getHost(), uri.getPort() < 0 ? 8080 : uri.getPort()),
+            1000);
+      }
+      return true;
+    } catch (Exception e) {
+      return false;
+    }
+  }
 
   private static final String NETWORK = System.getProperty("qits.ci.network", "qits-net");
 
@@ -165,7 +203,9 @@ public class CiDaemonGateIT {
       overrides.put("qits.ci.daemon-binary-url-template", fixture.containerBinaryUrl());
       overrides.put("qits.ci.daemon-version", DAEMON_VERSION);
       overrides.put("qits.ci.network", NETWORK);
-      overrides.put("qits.ci.container-runtime", RUNTIME);
+      // The orchestrator this gate drives its containers through. See the class javadoc's recipe;
+      // the cases skip when nothing answers there.
+      overrides.put("qits.containers.url", CONTAINERS_URL);
       // Generous: a cold image pull plus a 45MB download over the host gateway.
       overrides.put("qits.ci.daemon-register-timeout-seconds", "180");
       overrides.put("qits.ci.daemon-init-timeout-seconds", "180");
@@ -184,19 +224,19 @@ public class CiDaemonGateIT {
    * not a pattern to spread — the alternative was to pin the test port in advance and race whatever
    * else on the machine wanted it, which trades a visible hack for an intermittent one.
    *
-   * <p>Also does what the boot observer would have: {@code ensureNetwork} is skipped under {@code
-   * TEST} launch mode, by design, so the suites cannot mutate a developer's docker daemon by
-   * accident. This IT is the exception that asks for it explicitly.
+   * <p>It no longer does the boot observer's other job: there is no network to ensure. The
+   * orchestrator owns the docker daemon and the network travels in the spec, so a suite cannot
+   * mutate a developer's docker daemon here even by accident.
    */
   @BeforeEach
   void wireTheLauncherToThisJvm() throws Exception {
     assumeTrue(dockerAndImageAvailable(IMAGE), "docker + " + IMAGE + " required for this IT");
+    assumeTrue(orchestratorReachable(), "a running qits-containers at " + CONTAINERS_URL + " is required");
     assumeTrue(binaryAvailable(), "-Dqits.ci.daemon-binary=<path> required for this IT");
 
     CiDaemonLauncher real = ClientProxy.unwrap(launcher);
     real.containerDaemonUrl =
         "ws://host.docker.internal:" + controlSocket.getPort() + controlSocket.getPath();
-    real.ensureNetwork();
 
     GitHttpBackend.awaitReachableFromAContainer(
         RUNTIME, IMAGE, NETWORK, GateProfile.fixture.port(), controlSocket.getPort());

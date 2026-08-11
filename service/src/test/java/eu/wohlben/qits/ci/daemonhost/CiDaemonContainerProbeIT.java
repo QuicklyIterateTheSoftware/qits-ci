@@ -43,7 +43,33 @@ public class CiDaemonContainerProbeIT {
 
   private static final String IMAGE = System.getProperty("qits.ci.step-image", "buildpack-deps:scm");
 
-  private static final String RUNTIME = System.getProperty("qits.ci.container-runtime", "docker");
+  /** The docker CLI this test uses for its own preconditions. The probe's container is the
+   *  orchestrator's, not this process's. */
+  private static final String RUNTIME = System.getProperty("qits.ci.runtime", "docker");
+
+  /**
+   * Where the orchestrator answers for this run, and a precondition exactly as docker and the daemon
+   * binary are: qits-ci starts no container itself any more. The harness recipe is
+   * {@code CiDaemonGateIT}'s — run the {@code qits/containers} image with the host's docker socket
+   * and point this property at it — and the cases SKIP without one.
+   */
+  private static final String CONTAINERS_URL =
+      System.getProperty("qits.containers.url", "http://127.0.0.1:1");
+
+  /** Whether an orchestrator is up for this run — a TCP connect, nothing more. */
+  private static boolean orchestratorReachable() {
+    try {
+      java.net.URI uri = java.net.URI.create(CONTAINERS_URL);
+      try (java.net.Socket socket = new java.net.Socket()) {
+        socket.connect(
+            new java.net.InetSocketAddress(uri.getHost(), uri.getPort() < 0 ? 8080 : uri.getPort()),
+            1000);
+      }
+      return true;
+    } catch (Exception e) {
+      return false;
+    }
+  }
 
   /** Path to the binary qits-ci-daemon's native build produced. Absent means both cases skip. */
   private static final String BINARY = System.getProperty("qits.ci.daemon-binary");
@@ -58,6 +84,7 @@ public class CiDaemonContainerProbeIT {
   @Test
   public void aRealDaemonRegisteringWithTheHostsOwnCapabilityIsProven() throws Exception {
     assumeTrue(dockerAndImageAvailable(), "docker + " + IMAGE + " required for this IT");
+    assumeTrue(orchestratorReachable(), "a running qits-containers at " + CONTAINERS_URL + " is required");
     assumeTrue(binaryAvailable(), "-Dqits.ci.daemon-binary=<path> required for this IT");
 
     withFixture(
@@ -70,6 +97,7 @@ public class CiDaemonContainerProbeIT {
   @Test
   public void aBinaryUrlThatNeverRegistersIsRejectedWithItsLogCaptured() throws Exception {
     assumeTrue(dockerAndImageAvailable(), "docker + " + IMAGE + " required for this IT");
+    assumeTrue(orchestratorReachable(), "a running qits-containers at " + CONTAINERS_URL + " is required");
 
     withFixture(
         binaryUrl -> {
@@ -94,18 +122,28 @@ public class CiDaemonContainerProbeIT {
    */
   private CiDaemonContainerProbe probe(String binaryUrl) {
     CiDaemonLauncher launcher = new CiDaemonLauncher();
-    launcher.runtime = RUNTIME;
+    launcher.owner = "qits-ci-it";
+    launcher.containers =
+        new eu.wohlben.qits.containers.client.ContainersClient(
+            CONTAINERS_URL,
+            java.time.Duration.ofSeconds(30),
+            java.time.Duration.ofMinutes(5),
+            eu.wohlben.qits.containers.client.TokenSource.none());
+    launcher.bootReapPatience = java.time.Duration.ofSeconds(5);
     launcher.network = NETWORK;
     launcher.containerGitUrl = "http://host.docker.internal:1"; // never dialled -- no clone happens
     launcher.containerDaemonUrl =
         "ws://host.docker.internal:" + controlSocket.getPort() + controlSocket.getPath();
     launcher.daemonBinaryUrlTemplate = binaryUrl;
     launcher.registerTimeoutSeconds = 180;
+    launcher.initTimeoutSeconds = 180;
+    launcher.stepTimeoutSeconds = 300;
+    launcher.stepTimeoutGraceSeconds = 30;
     launcher.outputMaxChars = 65536;
     launcher.memoryLimit = "2g";
-    launcher.pidsLimit = "1024";
+    launcher.pidsLimit = 1024;
     launcher.cpus = "2";
-    launcher.ensureNetwork();
+    // No ensureNetwork: the orchestrator owns the daemon, and the network is named in the spec.
 
     CiDaemonContainerProbe probe = new CiDaemonContainerProbe();
     probe.registry = registry;

@@ -15,8 +15,8 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * The sole production {@link DaemonProbe} (ci-daemon-autoadopt-plan.md §2.3, workstream BW): a real
  * step container with no step. It reuses the exact machinery {@code CiDaemonStepRunner} drives a
  * real step through -- {@link CiDaemonRegistry#registerLaunch}, {@link CiDaemonLauncher#launch},
- * {@link CiDaemonRegistry#awaitRegistered}, {@link CiDaemonLauncher#logs} on failure, {@link
- * CiDaemonRegistry#awaitHello}, {@link CiDaemonRegistry#awaitAckConfirmed} and {@link
+ * {@link CiDaemonRegistry#awaitRegistered}, {@link CiDaemonLauncher#destroyWithLogs} on failure,
+ * {@link CiDaemonRegistry#awaitHello}, {@link CiDaemonRegistry#awaitAckConfirmed} and {@link
  * CiDaemonLauncher#reap} -- so probing a candidate exercises the same production download path a
  * real run would.
  *
@@ -36,15 +36,17 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * can resolve. The container is reaped the moment the verdict is in -- now strictly after {@code
  * AckReceived} or the deadline, never at {@code Hello} -- which is what kills that clone along with
  * it. It is not a host-side execution of the binary either -- the daemon still runs inside the
- * sandbox {@link CiDaemonLauncher#buildArgv} builds, exactly as a step's daemon does.
+ * sandbox {@link CiDaemonLauncher#buildWorkloadSpec} asks for, exactly as a step's daemon does.
  *
  * <p><b>Skipped under {@code LaunchMode.TEST}</b>, the same posture {@link
- * CiDaemonLauncher#onStart} takes toward its own docker work: an ordinary {@code @QuarkusTest} that
+ * CiDaemonLauncher#onStart} takes toward its own boot reap: an ordinary {@code @QuarkusTest} that
  * somehow reaches an {@code UNPROVEN} candidate (this module carries no {@code DaemonProbe} test
  * double of its own -- {@code ci}'s {@code FakeDaemonProbe} does not cross the module's test
- * classpath) must never shell out to real docker. {@link #probeUnconditionally} is the same logic
- * with that guard removed, package-private so a hand-wired instance can drive it against real
- * docker precisely as {@code CiDaemonHandshakeIT} hand-wires a {@link CiDaemonLauncher} for the same
+ * classpath) must never ask a real orchestrator for a real container. {@link
+ * #probeUnconditionally} is the same logic
+ * with that guard removed, package-private so a hand-wired instance can drive it against a real
+ * orchestrator precisely as {@code CiDaemonHandshakeIT} hand-wires a {@link CiDaemonLauncher} for
+ * the same
  * reason -- {@code LaunchMode.current()} is a JVM-wide read that a fresh instance cannot escape, so
  * bypassing the guard is the only way an {@code extended}-tagged {@code @QuarkusTest} IT can prove
  * the real container path at all. {@link #awaitVerdict} is the verdict logic on its own, with no
@@ -107,13 +109,19 @@ public class CiDaemonContainerProbe implements DaemonProbe {
                   credentials.daemonId(),
                   credentials.secret(),
                   launcher.resolveBinaryUrl(version),
+                  // No step, so no step deadline: the register timeout plus the configured default
+                  // is what bounds this container's lifetime, which is generous for a probe and is
+                  // the point -- the reap below is what really ends it.
+                  0,
+                  // A probe never publishes, so it never asks for the socket.
                   false,
                   Map.of()));
       if (!launched.started()) {
-        // Docker itself refused -- no docker, an unpullable probe image. The probe could not run at
-        // all, which is UNKNOWN rather than a verdict about the candidate.
+        // The orchestrator refused, or could not be reached, or could not start the container --
+        // an unpullable probe image, a down daemon. The probe could not run at all, which is UNKNOWN
+        // rather than a verdict about the candidate.
         return new ProbeResult(
-            Verdict.UNKNOWN, "docker refused the probe container: " + launched.error());
+            Verdict.UNKNOWN, "the probe container was not started: " + launched.error());
       }
       return awaitVerdict(credentials.daemonId(), containerName);
     } finally {
@@ -139,8 +147,10 @@ public class CiDaemonContainerProbe implements DaemonProbe {
   ProbeResult awaitVerdict(String daemonId, String containerName) {
     Instant deadline = Instant.now().plusSeconds(registerTimeoutSeconds);
     if (!registry.awaitRegistered(daemonId, remaining(deadline))) {
-      // Never dialled -- the bootstrap's own stderr is the only account, captured before the reap.
-      return new ProbeResult(Verdict.REJECTED, launcher.logs(containerName));
+      // Never dialled -- the bootstrap's own stderr is the only account, and the removal is what
+      // brings it back. The reap in probeUnconditionally's finally then finds nothing, which is a
+      // success.
+      return new ProbeResult(Verdict.REJECTED, launcher.destroyWithLogs(containerName));
     }
     // Registration completes at websocket admission, one round trip before the daemon has said
     // anything -- reading capabilityVersionOf() straight after would see -1/null for a daemon whose

@@ -37,8 +37,8 @@ is enough toolchain: the build wants a `native-image` on `GRAALVM_HOME`, `JAVA_H
 finding none it does not fail — it falls back to pulling a 1.8 GB Mandrel image and compiling under
 docker. That fallback still works and is what a GraalVM-less CI gets; it is just not the intended
 path, and it is worth recognising by name when a build that normally takes two minutes starts
-downloading a container image. Note the coincidence: this service *runs* docker, per step, by
-design (below) — the **build** must not touch it.
+downloading a container image. Note the coincidence: this service *causes* a container to run, per
+step, by design (below) — through qits-containers, and the **build** must not touch docker at all.
 
 Most of the 0.2s is connecting to postgres and running Flyway; the framework itself is up in
 milliseconds. That is the point of packaging it this way — a restart is a non-event rather than a
@@ -107,6 +107,7 @@ rest of qits it reaches over a URL it is configured with:
 | out | `PUT /events/api/events/{uuid}` — one `BuildSuccessful` per **green** run, idempotent (the `RunAnnouncer` seam), and the **only** thing a green run announces | `qits.events.url`, `qits.eventstream.enabled` |
 | out | the same route — one `SoftwareRelease` per artifact a green **release pipeline** declared (the `ReleaseAnnouncer` seam) | the same two keys |
 | out | `ws://…/events/stream` — dialled out and held open, carrying what qits-events broadcasts back | the same two keys; the address is derived, never configured twice |
+| out | `PUT/DELETE /containers/api/containers/<owner>/ci-step/<ref>` — every step container: started, read and removed through qits-containers, which owns the docker daemon. **qits-ci holds no docker socket.** | `qits.containers.url`, `qits.ci.containers.owner` |
 | out | the registry a publishing step pushes to, as `$QITS_REGISTRY` and `$QITS_IMAGE_REPOSITORY` in **every** step container — dialled by the *host's docker daemon*, never by this process | `qits.artifacts.registry-host`, `qits.artifacts.image-repository` |
 | out | the npm registry roots, as `$QITS_NPM_REGISTRY_URL` (hosted, `@qits/*` publishes) and `$QITS_NPM_PROXY_URL` (the npmjs pull-through cache) in **every** step container — dialled by the *step container itself* on the shared network | `qits.artifacts.npm.hosted-url`, `qits.artifacts.npm.proxy-url` |
 | out | the hosted Maven repository root, as `$QITS_MAVEN_REGISTRY_URL` in **every** step container — also dialled by the step container on the shared network | `qits.artifacts.maven.registry-url` |
@@ -338,8 +339,9 @@ with qits-platform-deployments, which pulls `<registry>/<repository>/<applicatio
 `<application>` is by convention the repository's name — the script must spell exactly that, and the
 only enforcement is the convention plus the deployer's `IMAGE_MISSING` telling on a mismatch.
 
-> **`docker: true` makes that step root-equivalent on the host.** It bind-mounts the host's docker
-> socket (`qits.ci.docker-socket-path`) into the step's container, and the socket *is* the daemon
+> **`docker: true` makes that step root-equivalent on the host.** The workload spec carries a
+> `hostDockerSocket` flag and qits-containers bind-mounts the host's docker socket into the step's
+> container — where that socket lives is the orchestrator's deployment fact, not this service's — and the socket *is* the daemon
 > and the daemon is root: such a step can mount host paths, start privileged containers and leave
 > the sandbox at will. The `--cap-drop=ALL` / `no-new-privileges` flags stay on and still fence the
 > step's own process tree, but they do not bound what the daemon will do on its behalf. It is
@@ -742,7 +744,8 @@ event as far as everything downstream is concerned — including the loop warnin
 One container per step, launched from the step's declared image, in sequence — only a step's
 completion starts the next one, and no state crosses steps. Per step:
 
-1. **Launch.** qits-ci mints an id and a secret, then `docker run -d` with the image's entrypoint
+1. **Launch.** qits-ci mints an id and a secret, then asks qits-containers to put a container at
+   `PUT /containers/api/containers/<owner>/ci-step/<container name>` with the image's entrypoint
    overridden to a fixed, host-authored bootstrap: fetch the daemon binary from
    `$QITS_CI_DAEMON_BINARY_URL`, `chmod +x`, `exec`. Nothing about the repository is interpolated
    into that text — the whole contract rides as environment. The image contract is therefore `git`,
@@ -761,17 +764,21 @@ completion starts the next one, and no state crosses steps. Per step:
 6. **Persist at finish.** Chunks feed a bounded in-memory relay that `GET /ci/api/runs/{runId}`
    exposes as `live` while the run is running; the step's **row is written once, already terminal**,
    at the step's end. The database never holds a half-written step.
-7. **Teardown.** The container is `docker rm -f`'d on every path, its secret is forgotten, and the
-   next step starts — or the run closes and the remaining steps are recorded `SKIPPED`.
+7. **Teardown.** The container is deleted on every path, its secret is forgotten, and the next step
+   starts — or the run closes and the remaining steps are recorded `SKIPPED`. A path that needs the
+   container's own log asks for it **on the delete**, so the read-before-removal ordering cannot be
+   lost; the delete is idempotent, so the unconditional one that follows costs nothing.
 
 The same seven steps as a diagram, plus the one thing prose keeps having to disambiguate — the
-control WebSocket every step dials versus the host's docker socket only a `docker: true` step gets
-mounted — are in [`docs/step-execution-flow.md`](docs/step-execution-flow.md). The prose above stays
+control WebSocket every step dials versus the host's docker socket only a `docker: true` step is
+given — are in [`docs/step-execution-flow.md`](docs/step-execution-flow.md). The prose above stays
 the contract; the diagram illustrates it.
 
-The docker CLI is now the **entire** set of processes qits-ci spawns — the config read is an HTTP
-call, so the host needs no `git`. Its docker vocabulary is container lifecycle:
-`run`, `logs`, `rm`, `ps`, `network inspect`/`create`. `exec` is not in it, not even to deliver the
+**qits-ci spawns no process at all** — the config read is an HTTP call, so the host needs no `git`,
+and the container lifecycle is an HTTP call too, so it needs no docker CLI and no socket. What used
+to be `run`, `logs`, `rm`, `ps` and `network inspect`/`create` is four requests to qits-containers:
+one `ensure`, one delete that brings the log back, one plain delete, and one scoped destroy-all at
+boot. `exec` was never in the vocabulary and is not on the wire either, not even to deliver the
 daemon binary.
 
 A step's script is **repo-controlled code**, so the step container is a hostile-code sandbox:
@@ -812,9 +819,9 @@ DOWN naming the rejected versions — an honest "no pin" state, not a boot failu
 /ci/api/daemon` stays answerable to say why. Runs still execute and still fail with today's
 distinguishable states; nothing about an empty ladder refuses a run.
 
-**Failures stay distinguishable.** Docker refusing the launch, a container whose bootstrap never
-produced a daemon (its own `docker logs` tail is captured *before* the reap and becomes the step's
-output), a daemon that registered and then went quiet, a structured setup failure, a lost socket and
+**Failures stay distinguishable.** The orchestrator refusing the launch (or not answering at all), a
+container whose bootstrap never produced a daemon (its own log tail comes back on the very call that
+removes it and becomes the step's output), a daemon that registered and then went quiet, a structured setup failure, a lost socket and
 a genuine step timeout are six different recorded outcomes — none of them is "the step failed with
 exit −1".
 
@@ -881,12 +888,23 @@ a repository's own listing will show.
 
 ## Deploying it
 
-- **Run one qits-ci per docker daemon.** On boot it removes every container carrying the
-  `qits.ci.run` label on the daemon it talks to, because after a crash nothing is left that could say
-  which of them were its own. Two instances sharing one daemon would therefore reap each other's
-  running steps: deploying the second kills the first's in-flight builds, and every restart of either
-  does it again. Give each instance its own docker host or its own daemon; do not point two at one
-  socket to share capacity, and size a single instance with `qits.ci.concurrent-builds` instead.
+- **qits-ci needs no docker socket.** It holds none, mounts none and spawns no process at all:
+  every step container is started, read and removed through **qits-containers**, which is the one
+  service on the platform that talks to a docker daemon. Point `qits.containers.url` at it
+  (scheme+host+port, no path — it defaults to the qits-net alias) and give this service nothing else
+  about docker. A deployment still mounting `/var/run/docker.sock` into qits-ci is giving it
+  root on the host for no reason left in the code.
+- **Two qits-ci instances may share one docker daemon now, and `qits.ci.containers.owner` is what
+  keeps them apart.** The boot reap used to be a host-wide `qits.ci.run` label sweep — it removed
+  every labelled container on the daemon, including one another instance was running a step in, so
+  deploying the second killed the first's in-flight builds. It is now a request for *this owner's*
+  own rows in the orchestrator's registry, and two owners cannot see each other's. The constraint
+  that replaces "one instance per daemon" is smaller and is a config fact rather than a property of
+  the host: **two instances must not share an owner string.** The default reads
+  `quarkus.oidc-client.client-id`, which qits-idp mints per environment (`dev-qits-ci`,
+  `prod-qits-ci`), so two environments on one daemon are already apart; two instances of one
+  environment sharing capacity are not a supported shape — size a single instance with
+  `qits.ci.concurrent-builds` instead.
 - Set `qits.ci.concurrent-builds` to the maximum number of pipelines this qits-ci instance may run
   at once (default **4**, minimum **1**). Steps remain sequential within one pipeline. Size this
   together with the host's CPU and memory and the per-container `qits.ci.cpus`/`memory-limit` caps.

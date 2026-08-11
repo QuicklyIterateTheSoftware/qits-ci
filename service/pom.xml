@@ -131,12 +131,44 @@
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-oidc</artifactId>
         </dependency>
-        <!-- No quarkus-oidc-client here, and its absence is the deliberate half of a pair. This
-             service validates the bearers it RECEIVES (quarkus-oidc, above) and presents one to
-             nobody: the single outbound call that carried a credential was the deploy announcement
-             to qits-platform-deployments, and that call is gone — the deployer subscribes to
-             BuildSuccessful on the bus instead. Adding the extension back means a new outbound
-             caller, not a config change. -->
+        <dependency>
+            <!-- The other direction, BACK after one release without it, and the comment that stood
+                 here said what it would take: "adding the extension back means a new outbound
+                 caller, not a config change". This is that caller. qits-ci asks qits-containers for
+                 every step container it runs, that service guards every route on the caller's own
+                 identity (its OwnerGuard compares the token's `sub` to the owner in the path), and
+                 containers/ContainersClientProducer is where a token becomes a header.
+
+                 Shipped OFF, exactly as its predecessor was: quarkus.oidc-client.client-enabled is
+                 false in application.properties, so the extension builds a disabled client, this
+                 process boots with no secret and dials nothing, and the calls go out bare — which
+                 is the whole fleet's rollout posture while qits.auth.machine.required is off. It
+                 stays independent of the INBOUND gate above: either end of a hop is switched on
+                 first. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-oidc-client</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The orchestrator's client jar: how this service starts and stops step containers now
+                 that it holds no docker socket. A client rather than a vocabulary, so it is the
+                 second thing "Adding a dependency on another context" in AGENTS.md has to be read
+                 against — and the answer is the one the eventstream jar already gets: this is
+                 PLATFORM INFRASTRUCTURE, not another bounded context's SDK. It brings no container,
+                 no framework and no address; qits-containers is where the platform's containers
+                 live the way qits-events is where its events live.
+
+                 IT IS A SNAPSHOT AND MUST NOT SHIP AS ONE, the qits-githost-events arrangement
+                 exactly: qits-containers has cut no release, so 1.0.0-SNAPSHOT resolves from the
+                 local ~/.m2 only and the bootstrap seed-publishes it so a STEP container can build
+                 this repository. The cutover to a calver is one line in the root pom, in the same
+                 commit that first deploys a released qits-containers.
+
+                 A native consumer owes the wire records a registration: containers/
+                 ContainersWireReflection, the second member of EventWireReflection's family and
+                 there for the identical reason. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-containers-client</artifactId>
+        </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-rest-jackson</artifactId>

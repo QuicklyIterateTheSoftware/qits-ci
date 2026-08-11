@@ -26,11 +26,19 @@ import org.junit.jupiter.api.Test;
  *
  * <p><b>The order is reap, then sweep.</b> The sweep does not only write rows — it hands work
  * straight back to the run worker, restarting every interrupted event run and re-enqueueing every
- * {@code QUEUED} one, and that worker launches labelled step containers as soon as it has work. The
- * reap filters on the {@code qits.ci.run} label and nothing else, because after a crash there is
- * nothing left that could tell one process's container from another's — so a reap running second
- * would be free to {@code docker rm -f} a container the restarted run had just started. Reaping
- * first closes the window: nothing can start a run until the host is clean.
+ * {@code QUEUED} one, and that worker asks for step containers as soon as it has work. The reap
+ * asks the orchestrator for every one of this owner's own {@code ci-step} places, and a container a
+ * restarted run has just asked for is <em>also</em> one of this owner's — so a reap running second
+ * would be free to remove it. Reaping first closes the window: nothing can start a run until the
+ * previous life's containers are gone.
+ *
+ * <p><b>The cutover narrowed the scope and did not remove the need for the order</b>, which is
+ * worth stating because it looks as though it should have. What used to select was a host-wide
+ * {@code qits.ci.run} label filter, which could reach another qits-ci's in-flight step; it is this
+ * owner's rows now, and no other instance is reachable at all. What that does not fix is this
+ * instance racing itself. The second net is {@code createdBefore}, stamped once at the reap
+ * observer's entry, so a place created afterwards is outside the set by construction — order first,
+ * instant second, and neither makes the other unnecessary.
  *
  * <p>Three claims, and the first two are the ones that would rot: the annotations are on both
  * observers and ordered the right way round, the container resolves them in that order, and — the

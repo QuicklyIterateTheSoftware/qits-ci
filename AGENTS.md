@@ -26,17 +26,22 @@ second rule of the same kind, and three things follow:
 - **A missing GraalVM does not fail the build.** Quarkus logs `Cannot find the native-image ...
   Attempting to fall back to container build` and shells out to docker for a 1.8 GB Mandrel image.
   Green either way, so the fallback is easy to be in without noticing. Grep a native build's log for
-  that line before believing it proved anything. (This context shells out to `docker` at *runtime*
-  by design, which makes the word useless as a signal in a log — look for the line, not the word.)
+  that line before believing it proved anything. (This context used to shell out to `docker` at
+  *runtime* too, which made the word useless as a signal in a log; it does not any more — every
+  container is qits-containers' — so `docker` in a build log is now about the build. Look for the
+  line anyway.)
 - **Every dependency is a decision about what the builder has to be told.** Reflection, dynamic
   proxies, `ServiceLoader`, resources loaded by computed name and JNI/JNA all need registering, and
   when they are missing the failure lands at *runtime, in the binary*, while the JVM suite stays
-  green. Prefer what is already in the image — `ProcessBuilder` over a process library (which is why
-  `CiProcess` shells out rather than links a docker client) and `java.net.http` over a REST client
-  library (which is why every client in `service/…/githost` is hand-rolled), and
-  `java.lang.foreign` over JNA. If a native build needs configuration to pass, that configuration is
-  part of the change. The repo's one explicit registration is `EventWireReflection` in
-  `service/…/bus/`, and it is worth reading as the worked example of this bullet: the types are
+  green. Prefer what is already in the image — `java.net.http` over a REST client library, which is
+  why every client in `service/…/githost` is hand-rolled and why qits-containers' client jar is one
+  too — and `java.lang.foreign` over JNA. (The older half of this bullet was `ProcessBuilder` over a
+  process library, "which is why `CiProcess` shells out rather than links a docker client".
+  `CiProcess` is **deleted**: this service spawns no process at all now, so the cheapest process
+  library is no process library.) If a native build needs configuration to pass, that configuration
+  is part of the change. There are TWO explicit registrations — `bus/EventWireReflection` and
+  `containers/ContainersWireReflection`, one per jar that builds its own `ObjectMapper` — and the
+  first is worth reading as the worked example of this bullet: the types are
   ordinary records nobody had to think about until a hand-built `ObjectMapper` put them outside
   everything Quarkus scans. See "The event bus".
 - **So is every config default the app boots with.** `quarkus.datasource.ci.jdbc.url` carried
@@ -76,9 +81,15 @@ package:
   qits-platform-deployments' intake, plus the qits-idp credential it carried. It is **gone**, and so
   is its `PdNotifier` port in `ci/control`: the deployer subscribes to `BuildSuccessful` durably now,
   so what used to be an outbound HTTP call of ci's is an ordinary consumption of the deployer's. The
-  intake it posted to still exists as the manual/recovery door; nothing here calls it. That also
-  leaves this service presenting a credential to **nobody** — `quarkus-oidc-client` left the pom with
-  the package.
+  intake it posted to still exists as the manual/recovery door; nothing here calls it, and no key
+  here configures it. `quarkus-oidc-client` left the pom with that package and has since come back
+  for a different hop — the token this service presents to qits-containers, produced in
+  `containers/`. See "Authentication".
+- `service/…/containers/` — the orchestrator client's producer and its native-image registration,
+  and nothing else. It is an *adapter* like `githost` and `bus` are: the seam is
+  `CiStepRunner`/`daemonhost`, and what lives here is only the two things a deployable owes a plain
+  jar — a bean, and a `@RegisterForReflection` for the wire records the jar's own `ObjectMapper`
+  hides from the build step.
 - `ci-daemon-protocol/` — the vendored wire contract (below). Its package is
   `eu.wohlben.qits.cidaemon.protocol`, deliberately not under `eu.wohlben.qits.ci`: it is a copy of
   another repo's module and its package must stay byte-identical with the original.
@@ -129,9 +140,12 @@ sibling directory is the template for what replaces it.
 `service/…/daemonhost/` is the host half of the arrangement qits-workspaces has with its own daemon:
 a step container runs `qits-ci-daemon`, which **dials out** to qits-ci and receives its step as the
 reply to its own `Initialized`. qits-ci never dials in, and — the invariant the whole feature rests
-on — **no code path here runs repo-controlled code as a host process or through `docker exec`**. The
-docker vocabulary is container lifecycle only. `CiDaemonLauncher.BOOTSTRAP` is a `static final
-String` with zero interpolation; a step script never appears in an argv.
+on — **no code path here runs repo-controlled code as a host process or through `docker exec`**.
+There is no docker vocabulary left at all: container lifecycle is four HTTP calls to
+qits-containers, which owns the daemon. `CiDaemonLauncher.BOOTSTRAP` is a `static final String` with
+zero interpolation, and it now travels as its own JSON list element (`entrypoint` `["/bin/sh"]`,
+`args` `["-c", BOOTSTRAP]`), so that property holds by construction rather than by inspection of an
+argv.
 
 Four things bite:
 
@@ -164,22 +178,59 @@ Four things bite:
   run needs while a close is being polite to a peer that is about to be `rm -f`'d anyway.
   The pattern's own coverage is asserted against known strings in the same test: a guard that can be
   silently incomplete is worth exactly what its coverage is, and that coverage used to be unasserted.
-- **The boot sweep is host-wide, so one docker daemon carries one qits-ci.**
-  `CiDaemonLauncher.reapOrphans` removes *every* container labelled `qits.ci.run` on the daemon it
-  talks to. That is not a filter someone forgot to narrow: after a crash nothing is left that could
-  say whose container is whose, which is the entire reason the sweep exists. Two qits-ci instances
-  sharing one docker daemon would therefore reap each other's in-flight steps every time either one
-  booted — a second instance's *deploy* would kill the first's running builds. The constraint is in
-  `README.md`'s deployment section too, and it is the same fact `CiRestartReconciliationIT`'s javadoc
-  states as "do not run this against a host with a live qits-ci on it".
+- **This package holds no docker socket and spawns no process.** Every container it needs is
+  qits-containers': `CiDaemonLauncher` builds a workload spec and sends it, and the four calls it
+  makes — `ensure`, a delete that brings the log back, a plain delete, and a scoped destroy-all —
+  are the whole of what `run`, `logs`, `rm`, `ps` and `network inspect`/`create` became. The client
+  is a plain jar with a producer in `service/…/containers/`; **it never throws**, and its four
+  answers are what every decision here is a `switch` over. A refusal and an unreachable service mean
+  opposite things — one is evidence about the request, the other about nothing at all — and a caller
+  that collapsed them would read "nothing was learned" as "the container was refused" and start a
+  second workload. Do not add a fifth outcome by catching something.
 
-  **The two boot observers are ordered, and the order is reap-then-sweep.** They observe one
-  `StartupEvent` and CDI orders two observers of one event only if they ask, so both carry
+  **`ensure` is ONE attempt, and a 2xx is not automatically a started container.** The create was
+  never retried and must not become retried: this call is on the run worker, an `ensure` may already
+  be pulling an image behind a ten-minute deadline, and a second attempt against a service that
+  answered is a second workload. And an `ensure` whose container did not start is a *true answer* —
+  a 200 whose envelope says `MISSING`, carrying what docker said — so `launch` reads the observed
+  state and records that as `LAUNCH_FAILED`. Reading it as started costs the run its register
+  deadline and then records `NEVER_STARTED` about a container that never existed.
+
+- **The boot reap is scoped to this instance's OWNER, and "one qits-ci per docker daemon" is gone
+  with the sweep that caused it.** `CiDaemonLauncher.destroyAllOwned` deletes this owner's own
+  `ci-step` places created before an instant. It used to be `reapOrphans`, a host-wide
+  `docker ps --filter label=qits.ci.run`, which removed *every* labelled container on the daemon —
+  including one another qits-ci was running a step in — because after a crash nothing was left that
+  could say whose container was whose. The orchestrator's registry is exactly that missing record:
+  it names places by owner and no owner can see another's. What is left of the constraint is one
+  config key, `qits.ci.containers.owner`, which **must equal the machine token's `sub`** (the
+  service's `OwnerGuard` compares them once the gate is on) and therefore defaults to reading
+  `quarkus.oidc-client.client-id`. Two instances must not share it. That coupling is argued in ONE
+  place, the key's own comment in the `ci` jar's `microprofile-config.properties`.
+
+  **The two boot observers are still ordered, and the order is still reap-then-sweep.** They observe
+  one `StartupEvent` and CDI orders two observers of one event only if they ask, so both carry
   `@Priority` — `CiDaemonLauncher.BOOT_REAP_PRIORITY` then `CiRunService.BOOT_SWEEP_PRIORITY`.
-  The reason is the label filter again: `sweepInterrupted` hands work back to the run worker, which
-  starts labelled containers at once, so a reap running second could remove a container a restarted
-  run had just launched. Neither annotation moves alone; `BootReconciliationOrderTest` asserts the
-  pair and that ArC really honours it.
+  The narrowed scope did not remove the reason: `sweepInterrupted` hands work back to the run
+  worker, which asks for step containers at once, and a container this boot just asked for is *also*
+  one of this owner's — so a reap running second could still remove it. The second net is
+  `createdBefore`, stamped **once at the observer's entry** and reused across every retry, so a
+  place created afterwards is outside the set by construction. Order first, instant second; neither
+  makes the other unnecessary, and neither annotation moves alone. `BootReconciliationOrderTest`
+  asserts the pair and that ArC really honours it.
+
+  **An orchestrator that is not up yet delays the reap and never fails the boot.**
+  `qits.ci.containers.boot-reap-patience` (PT60S) is how long it keeps asking; past it, one WARN and
+  boot proceeds, exactly the stance the old sweep took toward a docker that was briefly down and for
+  the same reason — a process that refused to start because a *teardown* could not run cannot
+  recover the runs it is holding. The orphans are then the registry's own `maxAge` GC's.
+
+- **A teardown that needs the log asks for it ON the delete.** `destroyWithLogs` is one call whose
+  far side reads the tail and then removes the container, which is what makes the ordering
+  unloseable; the unconditional `reap` in the step runner's `finally` then finds nothing, which is a
+  success. The tail is bounded **again on this side** against `qits.ci.output-max-chars`: this is
+  the last untrusted boundary before the text becomes a row, and a bound only the sender applies is
+  a bound a buggy or hostile sender does not apply.
 
 This is the execution path, not a plan for one. `CiDaemonStepRunner` is the only implementation of
 `CiStepRunner`; the approach it replaced — one `docker run` of a composite `bash -c` with a
@@ -909,12 +960,32 @@ Don't. Things arrive as an event off the bus, or as a URL in config, or not at a
 no `RepositoryLookup`-style port here and there should be no need for one: a run knows a repo id, a
 branch name and a sha, and everything else it wants it fetches from the git host itself.
 
-**The one dependency that exists is `qits-githost-events`, and it is the shape of the exception
-rather than a hole in the rule.** It is a *vocabulary*: four records and the bus, no client, no
-address, nothing to call. A published event's shape is exactly the kind of contract a jar may carry,
-and the alternative — reading another service's payload by string key — is worse in every direction.
-What the rule forbids is a **client**: an SDK, a REST interface, anything that turns another
-context's availability into this one's.
+**`qits-githost-events` is the first exception, and it is the shape of one rather than a hole in the
+rule.** It is a *vocabulary*: four records and the bus, no client, no address, nothing to call. A
+published event's shape is exactly the kind of contract a jar may carry, and the alternative —
+reading another service's payload by string key — is worse in every direction.
+
+**`qits-containers-client` is the second, and it IS a client — so the rule needs its real boundary
+said out loud.** What is forbidden is a dependency on another **bounded context**: a
+`RepositoryLookup`, an SDK for qits-projects, anything that turns another domain's availability into
+this one's. What is allowed is **platform infrastructure**, and the test is the one the eventstream
+jar already passes: is this the platform's single answer to a capability every module needs, or is
+it one context's model? qits-events is where the platform's events live; qits-containers is where
+its containers live; qits-idp is where its identities live. A client for one of those is the same
+kind of thing as a datasource driver — this service could no more start a container without it than
+it could open a connection without JDBC.
+
+Three properties travel with that, and a jar missing them is not infrastructure:
+
+- **No domain model crosses.** The wire is images, environment and lifetimes — nothing about
+  repositories, runs or pipelines. qits-containers cannot name a `CiRun` and does not want to.
+- **The availability cost is honest and bounded.** Every call is synchronous with a deadline and
+  <em>cannot throw</em>; an unreachable orchestrator costs a step its launch, recorded as
+  `LAUNCH_FAILED`, and never the process.
+- **The jar brings no framework.** No arc, no OIDC extension, no container: `ContainersClient` is a
+  plain class this service makes a bean of in a producer of its own.
+
+A dependency that fails any of those three is a client on another context, whatever it is called.
 
 Never add a JPA relation to another context's entity. `ci_run.repo_id` is a plain `String` column
 in ci's **own** physical database; a foreign key cannot span it.
@@ -930,33 +1001,39 @@ Four things reaching this code are attacker-controlled and must stay that way in
   filesystem path or an argv. Never widen those, never bypass them, never interpolate an identifier
   into a shell string. What changed with the transport is only the answer to a refusal: a 400 to a
   caller became a WARN and a settled event, because there is no caller.
-- **The step's `image`.** It comes from a file in the repository being tested and lands in the
-  `docker run` argv as a positional argument, so it is checked in the same place and to the same
-  standard: `CiIdentifiers.requireImage` rejects blank and anything starting with `-`. Deliberately
-  loose otherwise — which registry hosts, tags and digests resolve is the registry's business. This
-  is hardening rather than a fix: no exploit through it is known (`ProcessBuilder` never
-  shell-splits, and the fixed trailing `-c <BOOTSTRAP>` tokens defeat the obvious re-parses), and
-  "the argument parser will surely never take this for a flag" is not a claim worth re-defending.
+- **The step's `image`.** It comes from a file in the repository being tested and still lands in a
+  `docker run` argv as a positional argument — on the far side of the wire now — so it is checked
+  here before it is sent and to the same standard: `CiIdentifiers.requireImage` rejects blank and
+  anything starting with `-`. Deliberately loose otherwise — which registry hosts, tags and digests
+  resolve is the registry's business. **Two checkpoints, one rule each side owns**:
+  `ContainersIdentifiers` checks it again where a refusal can be a 400 that names the field, and
+  neither check is redundant, because a value refused here never leaves and a value refused there
+  never reaches a daemon. This is hardening rather than a fix: no exploit through it is known
+  (`ProcessBuilder` never shell-splits and the orchestrator assembles its argv element by element),
+  and "the argument parser will surely never take this for a flag" is not a claim worth
+  re-defending.
 - **The step script.** It is code from a repository, and **qits-ci never executes it.** No code
   path here runs repo-controlled code as a host process, and none runs it through `docker exec`. A
   script leaves this process as a field of one JSON frame, on a socket the step container's own
   daemon dialled outbound, and executes as that daemon's child inside a sandbox with
-  `--cap-drop=ALL`, `no-new-privileges` and resource caps. qits-ci's whole docker
-  vocabulary is container lifecycle — `run`, `logs`, `rm`, `ps`, `network inspect`/`create` — and
-  `exec` is not in it, not even as a way to deliver the daemon binary. That CLI is now the **only**
-  program this service spawns at all: reading a repository's config is an HTTP call to the git host,
-  so there is no `git` on the host and nothing left that could be handed pipeline content.
+  `capDropAll`, `noNewPrivileges` and resource caps. qits-ci's whole container vocabulary is
+  lifecycle — put one here, read its log and remove it, remove this owner's own — and `exec` is not
+  in it and cannot be: it is not on the orchestrator's wire at all, not even as a way to deliver the
+  daemon binary. **This service now spawns NO program whatsoever**: reading a repository's config is
+  an HTTP call to the git host, starting a container is an HTTP call to qits-containers, so there is
+  no `git` and no docker CLI on the host and nothing left that could be handed pipeline content.
 
   `bash -c <anything from a repository>` appearing anywhere in this repo, in `src/main` or
-  `src/test`, host-side or inside a docker argv, is the regression this paragraph exists to make
-  unambiguous. The grep is `grep -rn "bash -c\|PRELUDE_FAILED\|docker exec"` over both modules; it
+  `src/test`, host-side or inside a docker argv or a workload spec, is the regression this paragraph
+  exists to make unambiguous. The grep is `grep -rn "bash -c\|PRELUDE_FAILED\|docker exec"` over both modules; it
   must find nothing that executes.
 
   **"A step container never gets a docker socket" was this section's invariant and it is now false.
   What replaced it is narrower and was chosen deliberately, not conceded:** a step container never
   gets one *silently*. A step declares `docker: true` in `.config/qits/ci-post-receive.yml`, the
-  launcher bind-mounts `qits.ci.docker-socket-path` for that step and no other, the config diff shows
-  the declaration, and the run row records that step like any other. Such a step is
+  spec carries `hostDockerSocket` for that step and no other, qits-containers is what mounts it (the
+  socket's path is that service's deployment fact now — `qits.ci.docker-socket-path` is gone), the
+  config diff shows the declaration, and the run row records that step like any other. Such a step is
   **root-equivalent on the host** — the socket is the daemon and the daemon is root, so it can mount
   host paths, start privileged containers and leave the sandbox at will; the cap-drop flags stay on
   and fence the step's own process tree, which is not the same thing as bounding what the daemon will
@@ -1083,12 +1160,31 @@ and a deployment that turns it on with no audience configured fails at **startup
 accepting tokens meant for another service. Which endpoints call the guard, and what a new one owes,
 is under "Addressing"; the deployment steps are in `README.md`.
 
-**This service demands a credential and presents none, and the asymmetry is now structural.** It
-used to ask qits-idp for a token of its own to present to qits-platform-deployments
-(`notify/PdBearer`, `quarkus.oidc-client.client-enabled`, shipped off) — the deploy announcement was
-the one outbound call that carried one. That call is retired and `quarkus-oidc-client` left the pom
-with it, so there is no outbound identity here to configure, switch on, or forget to rotate. Adding
-one back is adding an extension, not flipping a key.
+**This service presents a credential to exactly one hop, and the asymmetry it used to have is
+gone.** It asks qits-idp for a token of its own to present to **qits-containers**, which guards
+every route — reads included — on the caller's own identity: its `OwnerGuard` compares the token's
+`sub` to the owner in the path. So `quarkus.oidc-client.client-id` is not a label here, it is this
+service's **owner string**, and `qits.ci.containers.owner` defaults to reading it.
+`containers/ContainersClientProducer` is where the token becomes a header.
+
+One switch, `quarkus.oidc-client.client-enabled`, shipped **false**, exactly as its predecessor was:
+off, the extension builds a disabled client, the process boots with no secret and dials nothing, and
+the calls go out bare — which is what the orchestrator's own gate (`qits.auth.machine.required`,
+also off) expects. It stays independent of the inbound gate: either end of a hop is switched on
+first.
+
+**This is a NEW arrangement rather than the old one coming back.** The retired one was
+`notify/PdBearer`, a bearer for qits-platform-deployments' HTTP intake, and it went with the call it
+carried when the deployer started subscribing to `BuildSuccessful`. What the pom said in the gap —
+"adding the extension back means a new outbound caller, not a config change" — is exactly what
+happened: a new caller arrived, so the extension did.
+
+**The fetch is bounded.** It sits on the run worker, so the producer writes
+`getTokens(oidcClient).await().atMost(…)` and never any `…AndAwait` spelling; `TokensHelper` caches
+and refreshes, so a restarted idp pauses new issuance and nothing else, and a fetch that fails costs
+the **header** rather than the call — the `TokenSource` contract is that a source which throws is a
+source that returned nothing, so a broken idp is a 401 from qits-containers rather than an exception
+on a build slot.
 
 **`MachineGuardTest` blanks `qits.auth.forward.dev-user` in its profile, and that is not tidiness.**
 Under `%test` the forward-auth mechanism answers every request carrying no `X-Qits-User` with a
@@ -1339,14 +1435,26 @@ contract, tested where it lives.
   the root pom) while flipping `skipITs`: a native build has to run the ITs to be worth anything,
   and this one would fail it for reasons that are about the host's docker and networking rather than
   the binary. `-DskipITs=false` still runs it, unchanged.
-- `CiRestartReconciliationIT` is the boot half of the same story, and the only test that drives
-  **both** startup observers at once: a run left `RUNNING` with its step container still on the host,
-  then `CiDaemonLauncher.reapOrphans` and `CiRunService.sweepInterrupted`, then the container gone and
-  the row `FAILED`. It also asserts an **unlabelled** container survives, which is the whole of what
-  the `qits.ci.run` filter is for.
-  Two things about it. It sits in `control` rather than in `daemonhost` because `sweepInterrupted` is
-  package-private there and the paired assertion is the point; everything it needs from the launcher
-  is public. And **it must not run against a host carrying a live qits-ci**: the boot sweep removes
-  every labelled container by construction, which is correct at boot and destructive mid-run. Tagged
-  `extended` for that reason as much as for docker — it needs docker and a shell image and nothing
-  else, no daemon binary, no git host, no route back to the JVM.
+- `CiRestartReconciliationTest` is the boot half of the same story, and the only test that drives
+  **both** startup observers at once: two runs left `RUNNING`, then `CiDaemonLauncher.destroyAllOwned`
+  and `CiRunService.sweepInterrupted`, then the DELETE asserted to have carried `ci-step` and the
+  boot instant, the push run `FAILED` and the event run recovered from its own snapshot.
+  **It is a plain `@QuarkusTest` now and needs no docker**, which is the cutover paying for itself:
+  its predecessor (`CiRestartReconciliationIT`, tagged `extended`) started real containers, and its
+  one irreplaceable assertion — that an **unlabelled** bystander survived — was the whole of what a
+  host-wide label filter needed proving about. There is no host-wide filter left, so there is no
+  bystander a call from here could reach even in principle; the real-docker proof lives in
+  qits-containers' own suite (`ContainersRestartAdoptionIT`), and a cross-service docker IT here
+  would be that repository's test wearing this one's tags. What is qits-ci's own — the order, the
+  owner, the workload, the instant — is provable against a socket.
+  It sits in `control` rather than in `daemonhost` because `sweepInterrupted` is package-private
+  there and the paired assertion is the point; everything it needs from the launcher is public. It
+  swaps the injected launcher's client for a stub past `ClientProxy.unwrap` and puts it back in a
+  `finally`, which is the same local ugliness `CiDaemonGateIT` documents and the same "not a pattern
+  to spread".
+- **The three `extended` ITs need a running qits-containers now**, and it is one more precondition of
+  the same kind as docker and `-Dqits.ci.daemon-binary`: they `assumeTrue` a TCP connect to
+  `qits.containers.url` and **skip** without one. The harness recipe is in `CiDaemonGateIT`'s javadoc
+  — run the `qits/containers` image with the host's docker socket on `qits-net`, publish a port, and
+  pass `-Dqits.containers.url=http://127.0.0.1:<port>`. They were not run in the cutover commit:
+  they also need a built daemon binary, which is a different repository's release.
