@@ -9,10 +9,22 @@
 #   2. build this repo's docker/Dockerfile, whose builder stage packages that already-built bundle
 #      and never runs an install.
 #
-# A RUN step inside a docker build reaches the public internet but reaches the platform registry by
-# no address at all (not the qits-net alias, not localhost:8081, not host.docker.internal). That is
-# why the halves are split, and it is why this step's image is node-docker-base rather than ci-base:
-# it needs node, npm and git for half one and the docker CLI for half two. The same split, for the
+# THE TWO DOCKER FLAGS on half two. The builder stage resolves jars published only to the
+# platform's own Maven repository, so it has to reach it:
+#
+#   --network host        NOT a custom network: buildkit — the builder format the platform targets,
+#                         because a swarm cannot assume the legacy builder — refuses custom networks
+#                         on a build. Host networking is buildkit-supported and reaches the
+#                         registry's host-published address.
+#   --build-arg           names that address, derived from the same injected env the image tag uses,
+#                         so no address is stated here. The Dockerfile turns it into
+#                         -Dqits.maven.repository.url, which the pom's `qits-maven` repository reads
+#                         and .qits-maven-settings.xml mirrors.
+#
+# Half one stays out of the image build anyway: the client's install is the step container's job,
+# where the lockfile origin swap and the `npm_config_*` environment already live. That is why this
+# step's image is node-docker-base rather than ci-base — it needs node, npm and git for half one and
+# the docker CLI for half two. The same split, for the
 # same reason, as qits-gateway's pipeline and every webui-carrying sibling's — they should keep
 # matching.
 #
@@ -100,8 +112,8 @@ steps:
       cd -
 
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-ci:$QITS_CI_SHA"
-      docker build --network qits-net \
-        --build-arg QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL" \
+      docker build --network host \
+        --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
         -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
       docker rmi "$ref" || true
