@@ -648,6 +648,11 @@ that records them (`consumerId` `ci-release-facts`). A boot sweep pairs anything
 An announcement is published before its row is marked, so the failure this favours is announcing
 twice rather than not at all.
 
+The event's name and its three payload fields are strings on this side — qits-workspaces publishes
+no vocabulary jar — and `ScmReleaseContractTest` is what keeps them honest: a transcription of that
+record, named against its source file, serialized by the real `CanonicalJson` and driven through the
+real listener. Rename a field there and it is renamed here in the same campaign.
+
 ### What an event-triggered step container gets
 
 The four `QITS_EVENT_*` variables, alongside everything every step container already receives:

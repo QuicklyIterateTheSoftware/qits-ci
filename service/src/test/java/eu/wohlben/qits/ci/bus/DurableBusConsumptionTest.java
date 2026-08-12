@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.ci.control.CiDaemonPins;
+import eu.wohlben.qits.ci.control.ReleaseJoin;
 import eu.wohlben.qits.ci.control.DaemonProbe.Verdict;
 import eu.wohlben.qits.ci.control.FakeDaemonProbe;
 import eu.wohlben.qits.ci.persistence.CiDaemonPinRepository;
@@ -402,19 +403,19 @@ public class DurableBusConsumptionTest {
     return releaseFrame(eventId, repository, version, T0);
   }
 
+  /**
+   * The payload comes from {@link ScmReleaseContractTest}, which runs a transcription of
+   * qits-workspaces' record through the real canonical serializer — so what reaches the listener
+   * here is the wire form rather than a hand-typed string that could agree with the reader and
+   * disagree with the writer. That test holds the transcription and says why no jar can.
+   */
   private static EventFrame releaseFrame(
       String eventId, String repository, String version, Instant occurredAt) {
     return new EventFrame(
         eventId,
-        "SCMRelease",
+        ReleaseJoin.RELEASE_EVENT_NAME,
         occurredAt,
-        "{\"branch\":\"main\",\"projectId\":\"p-1\",\"repository\":\""
-            + repository
-            + "\",\"repositoryName\":\""
-            + repository
-            + "\",\"version\":\""
-            + version
-            + "\"}",
+        ScmReleaseContractTest.canonicalPayload(repository, repository, version),
         null,
         null);
   }

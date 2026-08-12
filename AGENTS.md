@@ -684,9 +684,19 @@ WP2; the class javadoc carries the argument in full and the short form is:
   the same arrangement for the same reason. The fact is written before anything is announced, so the
   direction that can go wrong is a re-offered event finding the row already there, which is a no-op.
 - **`SCMRelease`'s name and its three payload fields are strings here**, like the tag event's, and
-  unlike the tag event's they have **no contract test**: qits-workspaces' vocabulary jar is on
-  neither module's classpath, so a rename over there stops the join closing rather than failing a
-  build. `ReleaseJoin.RELEASE_EVENT_NAME` is the one place the name is spelled.
+  their guard is `bus/ScmReleaseContractTest` — the same shape as the tag event's with one
+  indirection, because **qits-workspaces publishes no vocabulary jar**. Measured 2026-08-12: the
+  platform Maven registry serves `qits-githost-events` and `qits-eventstream` and answers `nothing
+  is deployed` for `qits-workspaces-events`, so depending on it would compile from a developer's
+  `~/.m2` and fail to resolve in the release pipeline's own step container. What that test holds
+  instead is a **transcription** of the record's component list, named against its source file, run
+  through the real `CanonicalJson` — so the wire rules stay the library's and only the component
+  list is hand-kept. `DurableBusConsumptionTest` drives those same canonical bytes through the real
+  listener, so the strings are proved to work rather than merely to be present.
+  `ReleaseJoin.RELEASE_EVENT_NAME` is the one place the name is spelled. **A rename in
+  qits-workspaces is a change to that transcription in the same campaign**; landing it there and not
+  here leaves this suite green and the join dead, which is the one failure the test cannot prevent
+  and says so out loud.
 
 The call sits on a run worker and it blocks. That was the trade, and it is bounded
 rather than free: `publish()` never throws, attempts the PUT inline, and gives up after
