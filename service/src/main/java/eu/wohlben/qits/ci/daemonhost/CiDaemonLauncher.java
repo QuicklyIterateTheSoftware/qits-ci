@@ -83,6 +83,14 @@ public class CiDaemonLauncher {
    */
   private static final Duration DESTROY_RETRY_TIMEOUT = Duration.ofSeconds(5);
 
+  /**
+   * How long the launch waits between two attempts at the same place. Five seconds because what it
+   * holds through is a token/JWKS window of tens of seconds — see {@link #launchPatience} — so a
+   * shorter pause only spends the run worker on refusals nobody has fixed yet, and a longer one
+   * spends the window itself.
+   */
+  private static final Duration LAUNCH_RETRY_PAUSE = Duration.ofSeconds(5);
+
   /** How many attempts a plain reap gets, and how long it may spend on all of them together. */
   private static final int REAP_ATTEMPTS = 3;
 
@@ -220,6 +228,14 @@ public class CiDaemonLauncher {
   /** How long the boot reap keeps trying an orchestrator that is not answering yet. */
   @ConfigProperty(name = "qits.ci.containers.boot-reap-patience")
   Duration bootReapPatience;
+
+  /**
+   * How long a launch holds through an orchestrator that cannot authorize it yet, or cannot be
+   * reached at all. The measured window is the trailing edge of a qits-platform-idp cutover — see
+   * {@link #launch} and the key's own comment.
+   */
+  @ConfigProperty(name = "qits.ci.containers.launch-patience")
+  Duration launchPatience;
 
   @ConfigProperty(name = "qits.ci.output-max-chars")
   int outputMaxChars;
@@ -414,12 +430,37 @@ public class CiDaemonLauncher {
    * Ask the orchestrator to put the step container at this run's own place. The daemon dials back;
    * nothing dials in.
    *
-   * <p><b>One attempt, and that is deliberate.</b> A create is not retried here — it never was, and
-   * the reason survives the cutover intact: this call sits on the run worker, an {@code ensure} may
-   * already be pulling an image behind its ten-minute deadline, and a second attempt against a
-   * service that answered would be a second workload rather than a second try. What replaces a
-   * retry is the answer: a refusal is recorded as {@code LAUNCH_FAILED} against the step, which is a
-   * fact about this run, and the run is what gets attempted again.
+   * <p><b>One attempt per answer the orchestrator gave about the request, and a patient loop for
+   * the two answers that are about nothing but the moment.</b> This used to be a single attempt for
+   * every outcome, on the reasoning that a second attempt against a service that answered would be
+   * a second workload. That reasoning holds for every refusal that says something about the request
+   * — {@code SPEC_CONFLICT}, {@code IMAGE_MISSING}, a 400 on a value — and those stay exactly one
+   * attempt. It never applied to the two below, and the 2026-08-12 rebootstrap measured what that
+   * cost: the deploy train replaced qits-platform-idp, and the next three push builds died at step
+   * launch with {@code orchestrator refused: refused 401} while the following ones passed. A build
+   * failed for a reason that had nothing to do with its commit.
+   *
+   * <ul>
+   *   <li><b>401 and 403</b> — the token this process presents was minted by an idp that has just
+   *       been replaced, or the orchestrator's JWKS is a cutover behind. Each attempt asks the
+   *       {@code TokenSource} again, so a fresh post-cutover token is picked up by retrying and by
+   *       nothing else.
+   *   <li><b>Nothing answered</b> — the orchestrator is restarting. Retrying is safe here for a
+   *       reason a bare {@code docker run} never had: {@code ensure} is a PUT per {@code
+   *       (owner, workload, ref)} and the ref is this step's own container name, so a second attempt
+   *       addresses the same place. A container the first attempt created and could not tell us
+   *       about is adopted rather than duplicated.
+   * </ul>
+   *
+   * <p><b>The window sits BESIDE the launch deadline, not inside it.</b> {@link #launchTimeout()}
+   * is one attempt's deadline and stays exactly that — it is mostly an image pull, and shortening
+   * it to fit a retry budget would turn a cold pull into a failed launch. {@code
+   * qits.ci.containers.launch-patience} bounds when a <em>fresh</em> attempt may start, so the worst
+   * case is the patience plus one whole launch deadline (PT90S + 60s as shipped). That is
+   * deliberately far inside {@link #MAX_AGE_SLOP}'s fifteen minutes: an unreachable first attempt
+   * may have created the container, its {@code maxAge} clock starts there, and the slop is what
+   * keeps the registry's GC a backstop rather than a second timeout even then. Nothing downstream
+   * shifts — {@code CiDaemonStepRunner} starts its register deadline when this method returns.
    *
    * <p><b>A 2xx whose container is not there is a failed launch.</b> The wire contract is explicit
    * that an {@code ensure} whose container did not start is a true answer rather than a failed
@@ -427,7 +468,7 @@ public class CiDaemonLauncher {
    * status alone does not answer this method's question. Reading such an answer as "started" would
    * cost the run its register deadline (a minute of a build slot) and then record {@code
    * NEVER_STARTED} for a container that never existed, which is the wrong outcome as well as the
-   * slow one.
+   * slow one. It is not retried either: something answered about this very container.
    */
   public Launched launch(LaunchSpec spec) {
     CiIdentifiers.requireRepoId(spec.repoId());
@@ -439,25 +480,71 @@ public class CiDaemonLauncher {
     CiIdentifiers.requireImage(spec.image());
 
     String name = containerName(spec.runId(), spec.stepIndex());
-    ContainersAnswer<Envelope> answer =
-        containers.ensure(owner, WORKLOAD, name, buildWorkloadSpec(spec), launchTimeout());
-    return switch (answer) {
-      case ContainersAnswer.Created<Envelope> created -> started(spec, name, created.value());
-      case ContainersAnswer.Ready<Envelope> ready -> started(spec, name, ready.value());
-      case ContainersAnswer.Refused<Envelope> refused -> {
-        // Something answered and said no: a 409 IMAGE_MISSING, a 400 on a value, a 403 from the
-        // owner guard. The code travels into the recorded detail because it is what tells an
-        // operator whether to push an image or to fix a token.
-        LOG.warnf("Could not start step container %s: %s", name, refused.detail());
-        yield new Launched(false, name, "orchestrator refused: " + refused.detail());
+    // Assembled once: every attempt asks for the same place under the same spec, which is what makes
+    // the PUT idempotent rather than a second workload.
+    EnsureRequest request = buildWorkloadSpec(spec);
+    Instant giveUpAt = Instant.now().plus(launchPatience);
+    // Never pause past the window itself: a pause longer than the patience would make a short
+    // patience mean one attempt while looking like a window, which is the shape a test cannot see.
+    Duration pause =
+        LAUNCH_RETRY_PAUSE.compareTo(launchPatience) > 0 ? launchPatience : LAUNCH_RETRY_PAUSE;
+    int attempts = 0;
+    while (true) {
+      attempts++;
+      ContainersAnswer<Envelope> answer =
+          containers.ensure(owner, WORKLOAD, name, request, launchTimeout());
+      if (answer.succeeded()) {
+        return started(spec, name, answer.value());
       }
-      case ContainersAnswer.Unreachable<Envelope> unreachable -> {
-        // Nothing answered, so nothing is known about the workload — including whether one exists.
-        // Recorded as a failed launch and never retried here for exactly that reason.
-        LOG.warnf("Could not reach qits-containers to start %s: %s", name, unreachable.cause());
-        yield new Launched(false, name, "orchestrator unreachable: " + unreachable.cause());
+      if (holdThrough(answer) && Instant.now().isBefore(giveUpAt) && sleep(pause)) {
+        LOG.infof(
+            "Attempt %d to start step container %s did not land (%s) — asking again, holding through"
+                + " the window",
+            attempts, name, answer.detail());
+        continue;
       }
-    };
+      return notStarted(name, answer, attempts);
+    }
+  }
+
+  /**
+   * The two answers another attempt could change, and the one place that decision is made.
+   *
+   * <p><b>401 and 403 are in it, and that is the 2026-08-12 lesson.</b> They read like statements
+   * about the request — the owner guard said no — and for a stable deployment they are. Across an
+   * idp cutover they are a statement about the moment instead: the same call with the same owner
+   * succeeds a minute later, because the token or the key that validates it has been replaced.
+   * There is no way to tell the two apart from here, so the patient reading is the safe one — every
+   * call this predicate governs is idempotent, so a retry that was never needed costs one request.
+   *
+   * <p>Everything else is an answer about the request and is taken at its word here: {@code
+   * SPEC_CONFLICT}, {@code IMAGE_MISSING}, a 400 on a value, a 404 saying the place is already gone
+   * — and a 5xx too, which {@link #reap} adds on its own because a teardown may spend a few seconds
+   * on a service whose database is down while a launch may not spend a build slot on one.
+   */
+  private static boolean holdThrough(ContainersAnswer<?> answer) {
+    if (answer.unreachable()) {
+      return true;
+    }
+    return answer instanceof ContainersAnswer.Refused<?> refused
+        && (refused.status() == 401 || refused.status() == 403);
+  }
+
+  /** What a launch that never landed is recorded as — the same two sentences it always was. */
+  private static Launched notStarted(String name, ContainersAnswer<Envelope> answer, int attempts) {
+    if (answer instanceof ContainersAnswer.Unreachable<Envelope> unreachable) {
+      // Nothing answered, so nothing is known about the workload — including whether one exists.
+      LOG.warnf(
+          "Could not reach qits-containers to start %s after %d attempt(s): %s",
+          name, attempts, unreachable.cause());
+      return new Launched(false, name, "orchestrator unreachable: " + unreachable.cause());
+    }
+    // Something answered and said no: a 409 IMAGE_MISSING, a 400 on a value, a 403 from the owner
+    // guard the patience window could not outlast. The code travels into the recorded detail because
+    // it is what tells an operator whether to push an image or to fix a token.
+    LOG.warnf(
+        "Could not start step container %s after %d attempt(s): %s", name, attempts, answer.detail());
+    return new Launched(false, name, "orchestrator refused: " + answer.detail());
   }
 
   /** A 2xx, read for whether a container is actually there — see {@link #launch}'s last paragraph. */
@@ -496,10 +583,12 @@ public class CiDaemonLauncher {
   public String destroyWithLogs(String containerName) {
     ContainersAnswer<DeleteOutcome> answer =
         containers.delete(owner, WORKLOAD, containerName, false, true, DESTROY_TIMEOUT);
-    if (answer.unreachable()) {
+    if (holdThrough(answer)) {
       // One quick second attempt, on a short deadline: a connection refused in the first millisecond
-      // is worth another try, and the caller is a run worker holding a build slot to record a
-      // failure it already knows about.
+      // is worth another try, and so is the 401 an idp cutover leaves behind — the delete is
+      // idempotent and the second attempt asks the TokenSource again. The caller is a run worker
+      // holding a build slot to record a failure it already knows about, so it gets one attempt and
+      // not a window.
       answer = containers.delete(owner, WORKLOAD, containerName, false, true, DESTROY_RETRY_TIMEOUT);
     }
     if (!answer.succeeded()) {
@@ -519,10 +608,11 @@ public class CiDaemonLauncher {
    *
    * <p><b>Bounded retry, then a WARN and nothing else.</b> A reap failure must never fail a green
    * step — the step is over and its result is recorded — so the attempts are few, the budget is
-   * short, and only the two answers another attempt could change are retried: nothing answered, or a
-   * 5xx. A 4xx is a statement about the request and retrying it is a way to spend a run worker
-   * twenty seconds for nothing. What catches whatever is left is the registry's own {@code maxAge}
-   * garbage collection, which is the backstop this whole class now leans on.
+   * short, and only the answers another attempt could change are retried: nothing answered, a 5xx,
+   * and the 401/403 of an idp cutover ({@link #holdThrough}). Every other 4xx is a statement about
+   * the request and retrying it is a way to spend a run worker twenty seconds for nothing. What
+   * catches whatever is left is the registry's own {@code maxAge} garbage collection, which is the
+   * backstop this whole class now leans on.
    */
   public void reap(String containerName) {
     Duration deadline = REAP_BUDGET.dividedBy(REAP_ATTEMPTS);
@@ -537,7 +627,7 @@ public class CiDaemonLauncher {
           // Nothing is there, which is what was asked for.
           return;
         }
-        if (refused.status() < 500) {
+        if (refused.status() < 500 && !holdThrough(answer)) {
           LOG.warnf("Could not remove step container %s: %s", containerName, refused.detail());
           return;
         }
@@ -562,6 +652,11 @@ public class CiDaemonLauncher {
    * names places by owner, two owners cannot see each other's rows, and the constraint is gone: what
    * is left is that two instances must not share an owner, which is one config key rather than a
    * property of the host.
+   *
+   * <p><b>This one needs no classifier and asks for none.</b> It retries every answer that is not a
+   * success until its patience runs out, so the 401 an idp cutover leaves behind is already held
+   * through. {@link #holdThrough} is the narrower rule the two per-container paths need, because
+   * they sit on a run worker rather than on a boot.
    *
    * <p><b>{@code createdBefore} is required and is the second net.</b> The caller stamps it once, at
    * boot, so a container this boot goes on to start is outside the set no matter how long this takes

@@ -188,13 +188,33 @@ Four things bite:
   that collapsed them would read "nothing was learned" as "the container was refused" and start a
   second workload. Do not add a fifth outcome by catching something.
 
-  **`ensure` is ONE attempt, and a 2xx is not automatically a started container.** The create was
-  never retried and must not become retried: this call is on the run worker, an `ensure` may already
-  be pulling an image behind a ten-minute deadline, and a second attempt against a service that
-  answered is a second workload. And an `ensure` whose container did not start is a *true answer* —
+  **`ensure` is ONE attempt per answer ABOUT THE REQUEST, and a 2xx is not automatically a started
+  container.** The old rule read "the create was never retried and must not become retried", and the
+  half of it that is still true is the half about answers: `SPEC_CONFLICT`, `IMAGE_MISSING`, a 400 on
+  a value are one attempt and one recorded `LAUNCH_FAILED`, because this call is on the run worker,
+  an `ensure` may already be pulling an image behind a long deadline, and no window makes an
+  unpublished image appear. And an `ensure` whose container did not start is a *true answer* —
   a 200 whose envelope says `MISSING`, carrying what docker said — so `launch` reads the observed
   state and records that as `LAUNCH_FAILED`. Reading it as started costs the run its register
   deadline and then records `NEVER_STARTED` about a container that never existed.
+
+  **What the rule never covered is the two answers that are about the moment, and 2026-08-12
+  measured the cost.** The deploy train replaced qits-platform-idp and the next three push builds
+  died at step launch with `orchestrator refused: refused 401` while every later one passed: this
+  service's token, or the orchestrator's copy of the signing keys, belonged to the idp that had just
+  been replaced. So a **401, a 403 and an unanswered call** are now held through for
+  `qits.ci.containers.launch-patience` (PT90S, ~5s between attempts), and each attempt asks the
+  `TokenSource` again — which is the only way a post-cutover token gets picked up. **Retrying is safe
+  here for a reason the old `docker run` never had**: `ensure` is a PUT per `(owner, workload, ref)`
+  and the ref is the step container's own name, so every attempt addresses the same place and a
+  container an unanswered attempt created is *adopted*, not duplicated. The window sits **beside**
+  the launch deadline rather than inside it — `launchTimeout()` stays one attempt's deadline, mostly
+  an image pull — so the worst case is the patience plus one of those (90s + 60s), far inside the
+  fifteen minutes of slop under the registry's `maxAge`, which is what keeps that GC a backstop
+  rather than a second timeout. `CiDaemonLauncher.holdThrough` is the one place the classification
+  lives; the teardown paths (`destroyWithLogs`, `reap`) share it, since a DELETE is idempotent and
+  the same blip reaches them. `destroyAllOwned` needs none — it already retries every non-success
+  until its own patience runs out.
 
 - **The boot reap is scoped to this instance's OWNER, and "one qits-ci per docker daemon" is gone
   with the sweep that caused it.** `CiDaemonLauncher.destroyAllOwned` deletes this owner's own

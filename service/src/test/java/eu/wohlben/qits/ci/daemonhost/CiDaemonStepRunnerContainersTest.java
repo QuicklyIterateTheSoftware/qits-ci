@@ -91,6 +91,9 @@ public class CiDaemonStepRunnerContainersTest {
     launcher.containers =
         new ContainersClient(url, Duration.ofSeconds(2), Duration.ofSeconds(5), TokenSource.none());
     launcher.bootReapPatience = Duration.ZERO;
+    // No patience: what this class stages are refusals about the request, which are one attempt at
+    // any setting. The idp-cutover window itself is CiDaemonLauncherContainersTest's subject.
+    launcher.launchPatience = Duration.ZERO;
 
     CiStepRelay relay = new CiStepRelay();
     relay.outputMaxChars = 65536;

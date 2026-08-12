@@ -43,8 +43,18 @@ final class StubContainersServer implements AutoCloseable {
   record Received(
       String method, String path, String query, Map<String, String> headers, String body) {}
 
-  /** One answer a test has queued up. */
+  /**
+   * One answer a test has queued up. A {@code status} of {@link #NO_ANSWER} is the absence of one:
+   * the request is recorded and the connection closed with nothing on it.
+   */
   private record Scripted(int status, String body) {}
+
+  /**
+   * The scripted "nothing answered" — a connection dropped before a status line, which is what the
+   * client reads as {@code Unreachable}. The only other way to stage that is an address nothing
+   * listens on, and an address cannot answer the <em>second</em> request of a retry.
+   */
+  private static final int NO_ANSWER = 0;
 
   private final HttpServer server;
 
@@ -72,6 +82,11 @@ final class StubContainersServer implements AutoCloseable {
       scripted.add(new Scripted(status, body));
     }
     return this;
+  }
+
+  /** Queue one dropped connection, in the same order as the scripted answers. */
+  StubContainersServer scriptSilence() {
+    return script(NO_ANSWER, null);
   }
 
   /** What every unscripted request gets. */
@@ -116,6 +131,11 @@ final class StubContainersServer implements AutoCloseable {
       Scripted answer;
       synchronized (scripted) {
         answer = scripted.isEmpty() ? fallback : scripted.poll();
+      }
+      if (answer.status() == NO_ANSWER) {
+        // Close with no status line at all. The exchange's own close() is what does it, so nothing
+        // here writes a response the client could bind.
+        return;
       }
       byte[] out =
           answer.body() == null ? new byte[0] : answer.body().getBytes(StandardCharsets.UTF_8);

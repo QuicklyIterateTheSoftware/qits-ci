@@ -11,6 +11,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -49,7 +51,34 @@ public class CiDaemonLauncherContainersTest {
           "",
           Map.of());
 
+  /**
+   * A {@link TokenSource} that counts how often it was asked, so a test can say that a retry asks
+   * for a FRESH bearer rather than replaying the one that was just refused. That is the whole
+   * mechanism by which a launch survives an idp cutover: the client asks this source per request,
+   * so a token minted after the cutover is picked up by retrying and by nothing else.
+   */
+  private static final class CountingTokens implements TokenSource {
+
+    private final AtomicInteger asked = new AtomicInteger();
+
+    @Override
+    public Optional<String> bearer() {
+      return Optional.of("token-" + asked.incrementAndGet());
+    }
+
+    int asked() {
+      return asked.get();
+    }
+  }
+
+  private final CountingTokens tokens = new CountingTokens();
+
   private CiDaemonLauncher launcher(String url) {
+    return launcher(url, Duration.ZERO);
+  }
+
+  /** The same launcher, patient about the auth blip for a window a test can afford to wait out. */
+  private CiDaemonLauncher launcher(String url, Duration launchPatience) {
     CiDaemonLauncher launcher = new CiDaemonLauncher();
     launcher.owner = "dev-qits-ci";
     launcher.network = "qits-net";
@@ -73,10 +102,23 @@ public class CiDaemonLauncherContainersTest {
     launcher.workspacesUrl = "http://qits-workspaces:8080";
     // Deadlines a test can afford. The shipped ones are minutes, and they are about an image pull.
     launcher.containers =
-        new ContainersClient(url, Duration.ofSeconds(2), Duration.ofSeconds(5), TokenSource.none());
+        new ContainersClient(url, Duration.ofSeconds(2), Duration.ofSeconds(5), tokens);
     launcher.bootReapPatience = Duration.ZERO;
+    launcher.launchPatience = launchPatience;
     return launcher;
   }
+
+  /**
+   * A window a test can wait out. The shipped one is PT90S with a five-second pause under it; the
+   * pause is capped at the window, so this buys exactly one retry — which is the whole of what these
+   * cases have to observe.
+   *
+   * <p><b>A second rather than a few milliseconds, because the window starts before the FIRST
+   * attempt</b> — that is the shipped semantics, not a test artefact — and the first attempt of a
+   * fresh {@code ContainersClient} pays for the JDK client's own setup. A window shorter than that
+   * setup would make these cases about this machine's speed.
+   */
+  private static final Duration ONE_RETRY = Duration.ofSeconds(1);
 
   /** An address nothing listens on — the only honest way to stage "nothing answered". */
   private static final String NOTHING_ANSWERS = "http://127.0.0.1:1";
@@ -124,22 +166,36 @@ public class CiDaemonLauncherContainersTest {
   }
 
   /**
-   * A refusal is recorded with the service's own word on it, and <b>the create is not retried</b>:
-   * this call sits on the run worker, an ensure may already be pulling an image behind a long
-   * deadline, and a second attempt against a service that answered would be a second workload rather
-   * than a second try. The run is what gets attempted again.
+   * A refusal that is about the REQUEST is recorded with the service's own word on it and is
+   * <b>not</b> retried, patience window or no: this call sits on the run worker, an ensure may
+   * already be pulling an image behind a long deadline, and no window makes an unpublished image
+   * appear. The run is what gets attempted again.
    */
   @Test
   public void aRefusedCreateIsOneAttemptAndCarriesTheServicesOwnWord() throws Exception {
     try (StubContainersServer stub = new StubContainersServer()) {
       stub.fallback(409, "{\"code\":\"IMAGE_MISSING\",\"message\":\"nothing published maven:3.9\"}");
 
-      CiDaemonLauncher.Launched launched = launcher(stub.url()).launch(spec);
+      CiDaemonLauncher.Launched launched = launcher(stub.url(), ONE_RETRY).launch(spec);
 
       assertFalse(launched.started());
       assertTrue(launched.error().contains("IMAGE_MISSING"), launched.error());
       assertTrue(launched.error().contains("nothing published maven:3.9"), launched.error());
-      assertEquals(1, stub.received().size(), "a create is not retried");
+      assertEquals(1, stub.received().size(), "a create the service answered about is not retried");
+    }
+  }
+
+  /** The same claim for the other refusal a step container can earn — the spec changed under a ref. */
+  @Test
+  public void aSpecConflictIsOneAttemptEvenWithAPatienceWindow() throws Exception {
+    try (StubContainersServer stub = new StubContainersServer()) {
+      stub.fallback(409, "{\"code\":\"SPEC_CONFLICT\",\"message\":\"this ref runs another spec\"}");
+
+      CiDaemonLauncher.Launched launched = launcher(stub.url(), ONE_RETRY).launch(spec);
+
+      assertFalse(launched.started());
+      assertTrue(launched.error().contains("SPEC_CONFLICT"), launched.error());
+      assertEquals(1, stub.received().size(), "no window answers a conflict");
     }
   }
 
@@ -151,6 +207,93 @@ public class CiDaemonLauncherContainersTest {
     // Named as the network fact it is. A caller reading this as a refusal would conclude the
     // workload was refused; nothing was learned about the workload at all.
     assertTrue(launched.error().startsWith("orchestrator unreachable: "), launched.error());
+  }
+
+  // --- the idp-cutover window ---------------------------------------------------------------------
+
+  /**
+   * <b>The measured failure this loop exists for.</b> On the 2026-08-12 rebootstrap the deploy train
+   * replaced qits-platform-idp and the next three push builds died at step launch with {@code
+   * orchestrator refused: refused 401}, while every later one passed. A 401 is not a statement about
+   * the request when the identity provider has just been replaced — it is a statement about the
+   * moment — so the launch asks again, and <b>asks for a fresh bearer while doing so</b>, which is
+   * the only way a post-cutover token can be picked up.
+   */
+  @Test
+  public void anAuthBlipIsHeldThroughAndEachAttemptAsksForAFreshToken() throws Exception {
+    try (StubContainersServer stub = new StubContainersServer()) {
+      stub.script(401, "{\"code\":\"401\",\"message\":\"unauthorized\"}")
+          .script(
+              201,
+              "{\"containerName\":\"" + CONTAINER + "\",\"state\":{\"desired\":\"RUNNING\","
+                  + "\"observed\":\"STARTING\"}}");
+
+      CiDaemonLauncher.Launched launched = launcher(stub.url(), ONE_RETRY).launch(spec);
+
+      assertTrue(launched.started(), launched.error());
+      assertEquals(2, stub.received().size(), "the blip is held through");
+      assertEquals(2, tokens.asked(), "a retry asks the TokenSource again");
+      assertEquals("Bearer token-2", stub.last().headers().get("Authorization"));
+    }
+  }
+
+  /** A 403 from the owner guard is the same window read from the orchestrator's side of it. */
+  @Test
+  public void aForbiddenIsHeldThroughToo() throws Exception {
+    try (StubContainersServer stub = new StubContainersServer()) {
+      stub.script(403, "{\"code\":\"403\",\"message\":\"owner mismatch\"}")
+          .script(
+              200,
+              "{\"containerName\":\"" + CONTAINER + "\",\"state\":{\"desired\":\"RUNNING\","
+                  + "\"observed\":\"RUNNING\"}}");
+
+      assertTrue(launcher(stub.url(), ONE_RETRY).launch(spec).started());
+      assertEquals(2, stub.received().size());
+    }
+  }
+
+  /**
+   * <b>Past the window it is an ordinary failed launch, named as the auth refusal it is.</b> The
+   * patience holds through a cutover; an owner that is simply wrong is not a cutover, and a run must
+   * not sit on a build slot forever to find that out.
+   */
+  @Test
+  public void aPersistentAuthRefusalEndsAsALaunchThatNamesIt() throws Exception {
+    try (StubContainersServer stub = new StubContainersServer()) {
+      stub.fallback(401, "{\"code\":\"401\",\"message\":\"unauthorized\"}");
+
+      CiDaemonLauncher.Launched launched = launcher(stub.url(), ONE_RETRY).launch(spec);
+
+      assertFalse(launched.started());
+      assertTrue(launched.error().startsWith("orchestrator refused: "), launched.error());
+      assertTrue(launched.error().contains("401"), launched.error());
+      assertTrue(stub.received().size() >= 2, "the window was spent before giving up");
+    }
+  }
+
+  /**
+   * <b>Nothing answering is held through as well, and it is safe for a reason a {@code docker run}
+   * never had.</b> An {@code ensure} is a PUT per (owner, workload, ref) and the ref is this step's
+   * own container name, so a second attempt addresses the same place: a container the first attempt
+   * created and could not report is adopted rather than duplicated.
+   */
+  @Test
+  public void anOrchestratorThatWasRestartingIsAskedAgain() throws Exception {
+    try (StubContainersServer stub = new StubContainersServer()) {
+      stub.scriptSilence()
+          .script(
+              201,
+              "{\"containerName\":\"" + CONTAINER + "\",\"state\":{\"desired\":\"RUNNING\","
+                  + "\"observed\":\"STARTING\"}}");
+
+      CiDaemonLauncher.Launched launched = launcher(stub.url(), ONE_RETRY).launch(spec);
+
+      assertTrue(launched.started(), launched.error());
+      assertEquals(2, stub.received().size());
+      // The same place both times, which is what makes the second attempt an adoption.
+      assertEquals(
+          "/containers/api/containers/dev-qits-ci/ci-step/" + CONTAINER, stub.last().path());
+    }
   }
 
   // --- the teardown that brings the log back ------------------------------------------------------
@@ -218,6 +361,25 @@ public class CiDaemonLauncherContainersTest {
       launcher(stub.url()).reap(CONTAINER);
 
       assertEquals(2, stub.received().size(), "a 5xx is the class another attempt could change");
+    }
+  }
+
+  /**
+   * <b>The same window, on the teardown.</b> A delete is idempotent, so the 401 an idp cutover
+   * leaves behind is retried here exactly as it is on the launch — and a reap that gave up on it
+   * would leave the orchestrator's {@code maxAge} GC to collect a container this process could have
+   * removed at once.
+   */
+  @Test
+  public void aReapRetriesAnAuthBlipAndThenSucceeds() throws Exception {
+    try (StubContainersServer stub = new StubContainersServer()) {
+      stub.script(401, "{\"code\":\"401\",\"message\":\"unauthorized\"}")
+          .script(204, null);
+
+      launcher(stub.url()).reap(CONTAINER);
+
+      assertEquals(2, stub.received().size(), "an idempotent delete may be asked again");
+      assertEquals(2, tokens.asked(), "and the second attempt asks for a fresh bearer");
     }
   }
 
