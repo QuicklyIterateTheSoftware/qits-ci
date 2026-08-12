@@ -117,6 +117,7 @@ public class CiDaemonStepRunnerContainersTest {
         "http://qits-artifacts:8080/artifacts/daemons/qits-ci-daemon/deadbeef",
         900,
         false,
+        "",
         Map.of());
   }
 

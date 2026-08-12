@@ -300,6 +300,12 @@ public class CiDaemonLauncher {
    * the step seam. It is the single input that changes the sandbox, and it changes it in exactly one
    * way: the orchestrator mounts the host's docker socket. See {@link #buildWorkloadSpec}.
    *
+   * <p>{@code user} is the step's other declaration, and the only other thing about a step that
+   * reaches the sandbox. Empty means the image's own default; a name means {@code --user}, which is
+   * the only place a step's user can be set — the container runs {@code --cap-drop=ALL} and can
+   * neither {@code su} nor {@code chown} once it is running. The parser refuses it beside
+   * {@code docker}, so the two never arrive together.
+   *
    * <p>{@code stepTimeoutSeconds} is the step's own deadline, carried here for one purpose: it is a
    * term of the lifetime the registry will collect this container at ({@link #maxAgeSeconds}). Zero
    * means the pipeline declared none, and the configured default stands in — a probe, which has no
@@ -317,6 +323,7 @@ public class CiDaemonLauncher {
       String daemonBinaryUrl,
       int stepTimeoutSeconds,
       boolean docker,
+      String user,
       Map<String, String> env) {}
 
   /**
@@ -744,7 +751,12 @@ public class CiDaemonLauncher {
             // daemon runs inside this sandbox and the script is its child, so these bound both.
             new Security(true, true, memoryLimit, memoryLimit, pidsLimit, cpus),
             null,
-            containerName(spec.runId(), spec.stepIndex()));
+            containerName(spec.runId(), spec.stepIndex()),
+            // The other declared opt-in, and the reason it is here rather than in the script: the
+            // sandbox above takes CAP_SETUID, CAP_SETGID and CAP_CHOWN away, so `su` and `chown`
+            // both fail inside the container whatever it tries. Empty is the image's own default.
+            // The parser refuses this beside `docker`, so a socket-holding step is always root.
+            value(spec.user()));
     // EPHEMERAL: a step container runs once and exits, so a recreate under a changed spec is a
     // refusal rather than a restart — which is right for a place named after one step of one run.
     return EnsureRequest.of(workload, Policy.ephemeral(maxAgeSeconds(spec)));

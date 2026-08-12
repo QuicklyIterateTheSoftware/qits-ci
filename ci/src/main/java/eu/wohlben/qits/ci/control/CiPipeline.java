@@ -29,6 +29,20 @@ public record CiPipeline(List<CiStepDecl> steps) {
    * the socket is the daemon and the daemon is root. That is why the flag is declared in the
    * repository's own config: it shows up in a config diff, and no step acquires it silently.
    *
+   * <p>{@code user} is who the container's first process runs as. <b>Empty means the config declared
+   * none</b>, which is the image's own default and is what every step has had until now. It exists
+   * because a step cannot change user from the inside: a step container is started
+   * {@code --cap-drop=ALL}, so it has no CAP_SETUID and no CAP_SETGID and {@code su} fails whatever
+   * the script says — and no CAP_CHOWN either, so even root cannot {@code chown} the checkout.
+   * Measured 2026-08-12, on qits-containers' post-receive step. The image has to carry a passwd
+   * entry for the name: zonky's {@code initdb}, the reason a suite wants a non-root user at all,
+   * refuses uid 0 and calls {@code getpwuid}.
+   *
+   * <p><b>{@code user} with {@code docker: true} is a parse error</b> — a step holding the host's
+   * socket stays root. The socket's group is the host's fact, not this repository's, so a non-root
+   * step could not use it anyway; refusing the pair is what keeps that from being discovered as a
+   * permission denied halfway through a publish.
+   *
    * <p>{@code branches} is the step's own {@code branches:} filter, {@link #runsOnBranch evaluated}
    * before the container launches. <b>Empty means the config declared none</b>, and the empty list
    * has exactly one origin: {@code branches: []} in a file is a parse error, because both readings
@@ -39,6 +53,7 @@ public record CiPipeline(List<CiStepDecl> steps) {
       String script,
       Integer timeoutSeconds,
       boolean docker,
+      String user,
       List<BranchFilter> branches) {
 
     /**

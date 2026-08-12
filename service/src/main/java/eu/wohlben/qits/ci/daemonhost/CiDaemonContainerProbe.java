@@ -115,6 +115,8 @@ public class CiDaemonContainerProbe implements DaemonProbe {
                   0,
                   // A probe never publishes, so it never asks for the socket.
                   false,
+                  // And it runs no repository's script, so it takes the image's own user.
+                  "",
                   Map.of()));
       if (!launched.started()) {
         // The orchestrator refused, or could not be reached, or could not start the container --

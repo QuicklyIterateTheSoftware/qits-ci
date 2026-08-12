@@ -53,6 +53,17 @@ final class CiConfigSchema {
   /** The per-step branch filter — legal in a pipeline file, an error in a trigger file. */
   static final String BRANCHES_KEY = "branches";
 
+  /** Who the step's container runs as. Legal in both file kinds; refused beside {@code docker}. */
+  static final String USER_KEY = "user";
+
+  /**
+   * What a {@code user:} may spell: a passwd name or a bare uid. Deliberately narrower than
+   * anything docker accepts — a value here becomes an argv element, so it must not open with a
+   * {@code -} or carry a {@code :} (which is {@code --user}'s own {@code user:group} separator and
+   * would let one word declare a group nobody wrote down).
+   */
+  private static final String USER_CHARS = "[a-z0-9_][a-z0-9_-]*";
+
   /**
    * The matcher vocabulary, spelled once for everything that reads one. {@code regex} is
    * deliberately absent; adding one is a decision about the DSL, not a convenience, and it belongs
@@ -138,12 +149,14 @@ final class CiConfigSchema {
       if (!(entry instanceof Map<?, ?> step)) {
         throw new CiConfigException("Step " + i + ": expected a mapping, got: " + typeOf(entry));
       }
+      boolean docker = optionalDocker(step, i);
       steps.add(
           new CiStepDecl(
               requireString(step, "image", i),
               requireString(step, "script", i),
               optionalTimeoutSeconds(step, i),
-              optionalDocker(step, i),
+              docker,
+              optionalUser(step, i, docker),
               optionalBranches(step, i, rejectBranchesIn)));
     }
     return new CiPipeline(List.copyOf(steps));
@@ -191,6 +204,63 @@ final class CiConfigSchema {
           "Step " + index + ": 'docker' must be a boolean, got: " + typeOf(value));
     }
     return docker;
+  }
+
+  /**
+   * The optional per-step {@code user}: who the container's first process runs as. Absent means the
+   * image's own default — root, for every base image the platform builds on — which is what every
+   * step has had until now.
+   *
+   * <p>It is declared here rather than done in the script because it <b>cannot</b> be done in the
+   * script. A step container is started {@code --cap-drop=ALL}, so it holds neither CAP_SETUID nor
+   * CAP_SETGID and {@code su} cannot switch user at all, and neither CAP_CHOWN, so even root cannot
+   * {@code chown} the checkout. The adduser/chown/su preamble two pipelines carried was impossible
+   * by construction; measured 2026-08-12 on qits-containers, as
+   * {@code chown: /workspace: Operation not permitted}. The one moment a user can be chosen is the
+   * {@code docker run}, which is what this key reaches.
+   *
+   * <p><b>{@code user} beside {@code docker: true} is refused.</b> A step holding the host's docker
+   * socket stays root: the socket's ownership is the host's fact and not this repository's, so a
+   * non-root step could not drive it — and the refusal is here rather than at the socket because a
+   * permission denied halfway through a publish is the expensive way to learn it. Widening this is
+   * a decision about the socket's group, not a convenience.
+   *
+   * <p>Held to the {@code timeout-seconds}/{@code docker} standard: a value this parser knows and
+   * cannot read is a config error, never a quiet default. A mis-spelled user that fell back to root
+   * would run the suite as root and fail deep inside a test with initdb's own message.
+   */
+  private static String optionalUser(Map<?, ?> step, int index, boolean docker) {
+    Object value = step.get(USER_KEY);
+    if (value == null) {
+      return "";
+    }
+    if (!(value instanceof String user) || user.isBlank()) {
+      throw new CiConfigException(
+          "Step " + index + ": '" + USER_KEY + "' must be a name or a uid, got: " + typeOf(value));
+    }
+    if (!user.matches(USER_CHARS)) {
+      throw new CiConfigException(
+          "Step "
+              + index
+              + ": '"
+              + USER_KEY
+              + "' must be a lowercase name or a bare uid ("
+              + USER_CHARS
+              + "), got: '"
+              + user
+              + "'");
+    }
+    if (docker) {
+      throw new CiConfigException(
+          "Step "
+              + index
+              + ": '"
+              + USER_KEY
+              + "' cannot be combined with 'docker: true' — a step holding the host's docker socket"
+              + " runs as root, because the socket's ownership is the host's and not this"
+              + " repository's. Split the work into two steps.");
+    }
+    return user;
   }
 
   /**

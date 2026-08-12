@@ -272,7 +272,8 @@ has stayed additive over that core:
 
 ```yaml
 steps:
-  - image: qits/build-images/ci-base:latest    # required — the container this step runs in
+  - image: qits/build-images/maven-base:latest # required — the container this step runs in
+    user: build                                # optional — else the image's own user (root)
     script: ./mvnw -B -ntp verify              # required — bash, run in the checkout
   - image: qits/build-images/ci-base:latest
     docker: true                               # optional, default false — see the warning below
@@ -288,8 +289,29 @@ steps:
 
 Unknown keys — top level or per step — are never read, so a repo may carry config for a newer
 qits-ci. Keys that *are* known and unreadable (`timeout-seconds: soon`, `docker: yes-please`,
-`branches: []`) are a `CONFIG_ERROR` run instead: a repo that meant to bound a step, to ask for a
-socket or to scope a step must find out.
+`branches: []`, `user: build:root`) are a `CONFIG_ERROR` run instead: a repo that meant to bound a
+step, to ask for a socket, to scope a step or to drop root must find out.
+
+### Running a step as somebody
+
+`user:` is a passwd name or a bare uid, and it becomes the container's `--user`. Absent means the
+image's own user, which is root for every base image the platform builds on.
+
+**It is a declaration rather than something a script does, because a script cannot do it.** A step
+container is started `--cap-drop=ALL`: without CAP_SETUID and CAP_SETGID `su` cannot switch user at
+all, and without CAP_CHOWN even root cannot `chown` the checkout. Measured 2026-08-12, on
+qits-containers' first real run — `chown: /workspace: Operation not permitted`. The only moment a
+user can be chosen is the launch, which is what this key reaches.
+
+**The image has to back the name with a passwd entry.** Docker accepts an unknown uid happily, but
+anything calling `getpwuid` fails for a user that exists only as a number — and that is the reason
+this key exists at all: zonky's embedded postgres refuses to `initdb` as uid 0 and looks the user up.
+`maven-base` carries `build` (uid 1001) and pre-creates `/workspace`, since a non-root container user
+cannot make a directory at the root of the filesystem.
+
+**`user:` with `docker: true` is a `CONFIG_ERROR`.** A step holding the host's docker socket stays
+root: the socket's ownership is the host's fact and not a repository's. Split the work into two
+steps, which is what every publishing pipeline here already does.
 
 ### Binding a step to branches
 

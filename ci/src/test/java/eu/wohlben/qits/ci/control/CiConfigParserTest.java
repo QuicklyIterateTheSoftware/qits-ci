@@ -155,6 +155,79 @@ public class CiConfigParserTest {
             .docker());
   }
 
+  // --- the per-step user ---
+
+  @Test
+  public void anAbsentUserKeyLeavesTheStepOnTheImagesOwnUser() {
+    // The backward-compatibility clause again, and it is the security-relevant direction: a step
+    // that named nobody must run exactly as it did before this key existed.
+    assertEquals(
+        "",
+        parser.parse("steps:\n  - image: alpine:3\n    script: \"true\"\n").steps().get(0).user());
+  }
+
+  @Test
+  public void aDeclaredUserIsCarriedThrough() {
+    // A name and a bare uid are both spellings docker takes, and both are what an image provides.
+    // The declaration exists at all because a step container runs --cap-drop=ALL: no CAP_SETUID for
+    // `su`, no CAP_CHOWN for the checkout, so the launch is the only moment a user can be chosen.
+    // Measured 2026-08-12 on qits-containers — `chown: /workspace: Operation not permitted`.
+    assertEquals(
+        "build",
+        parser
+            .parse("steps:\n  - image: maven-base:latest\n    script: ./mvnw verify\n    user: build\n")
+            .steps()
+            .get(0)
+            .user());
+    assertEquals(
+        "1001",
+        parser
+            .parse("steps:\n  - image: maven-base:latest\n    script: ./mvnw verify\n    user: \"1001\"\n")
+            .steps()
+            .get(0)
+            .user());
+  }
+
+  @Test
+  public void anUnusableUserIsAConfigErrorRatherThanIgnored() {
+    // Known key, the timeout-seconds/docker standard. A mis-spelled user quietly falling back to
+    // root would run the suite as root and fail deep inside a test with initdb's own message.
+    for (String user :
+        List.of(
+            "user: build:root", // --user's own user:group form, in one value
+            "user: -u", // option-shaped
+            "user: Build", // the charset is lowercase
+            "user: \"root user\"",
+            "user: \"\"",
+            "user: 1001", // a YAML integer is not a string here
+            "user: true")) {
+      assertThrows(
+          CiConfigException.class,
+          () -> parser.parse("steps:\n  - image: alpine:3\n    script: \"true\"\n    " + user + "\n"),
+          user);
+    }
+  }
+
+  @Test
+  public void aUserBesideDockerIsRefused() {
+    // A step holding the host's socket stays root: the socket's ownership is the host's fact and
+    // not this repository's, so a non-root step could not drive it. Refused at parse rather than
+    // discovered as a permission denied halfway through a publish.
+    CiConfigException refused =
+        assertThrows(
+            CiConfigException.class,
+            () ->
+                parser.parse(
+                    """
+                    steps:
+                      - image: ci-base:latest
+                        docker: true
+                        user: build
+                        script: docker build .
+                    """));
+    assertTrue(refused.getMessage().contains("docker: true"), refused.getMessage());
+  }
+
   // --- the per-step branch filter ---
 
   @Test

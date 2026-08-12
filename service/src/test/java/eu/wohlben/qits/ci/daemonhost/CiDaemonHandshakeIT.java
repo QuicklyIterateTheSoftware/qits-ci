@@ -134,6 +134,7 @@ public class CiDaemonHandshakeIT {
                       binaryUrl,
                       0,
                       false,
+                      "",
                       Map.of()));
           try {
             assertTrue(launched.started(), "docker refused the launch: " + launched.error());
@@ -197,6 +198,7 @@ public class CiDaemonHandshakeIT {
                       binaryUrl,
                       0,
                       false,
+                      "",
                       Map.of()));
           try {
             assertTrue(launched.started(), launched.error());
@@ -238,6 +240,7 @@ public class CiDaemonHandshakeIT {
                       servedBinaryUrl + "-does-not-exist",
                       0,
                       false,
+                      "",
                       Map.of()));
           try {
             assertTrue(launched.started(), launched.error());

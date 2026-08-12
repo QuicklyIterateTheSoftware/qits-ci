@@ -36,6 +36,12 @@ public interface CiStepRunner {
    * because it is a <em>property of the step</em> — one step of a run may have it and the next may
    * not, and the run row records each of them the same way.
    *
+   * <p>{@code user} is the step's own {@code user:} declaration, carried across untouched like
+   * {@code docker}. Empty means the config named nobody and the image's default stands. The
+   * implementation turns it into the container's {@code --user}, which is the only place it can be
+   * turned into anything: a step container runs {@code --cap-drop=ALL} and can neither {@code su}
+   * nor {@code chown} from the inside.
+   *
    * <p>{@code env} is <b>run-scoped</b> environment the container gets on top of the fixed contract:
    * today exactly the {@code QITS_EVENT_*} four an event-triggered run carries, and empty on every
    * push. It is a map rather than four fields because what it holds is a property of the <em>trigger</em>
@@ -55,6 +61,7 @@ public interface CiStepRunner {
       String daemonBinaryUrl,
       int timeoutSeconds,
       boolean docker,
+      String user,
       Map<String, String> env) {}
 
   /**
