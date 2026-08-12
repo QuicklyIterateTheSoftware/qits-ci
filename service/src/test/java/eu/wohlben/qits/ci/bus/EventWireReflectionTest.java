@@ -50,6 +50,17 @@ public class EventWireReflectionTest {
   /** The private nested mix-in {@link EventWireReflection} can only name as a string. */
   private static final String MIXIN = "eu.wohlben.qits.eventstream.control.CanonicalJson$QitsEventMixin";
 
+  /**
+   * Signatures this service consumes by <b>walking</b> the payload rather than binding it, so no
+   * registration is owed and none is possible.
+   *
+   * <p>{@code SCMRelease} is qits-workspaces' event and its vocabulary jar is on neither module's
+   * classpath here — {@code ScmReleaseListener} reads three fields with {@code readTree} for exactly
+   * that reason, which is the same reason the trigger engine reads every payload that way. A type
+   * that ever starts being bound leaves this set in the same commit.
+   */
+  private static final Set<String> WALKED = Set.of("SCMRelease");
+
   @Inject @Any Instance<QitsDurableEventListener> listeners;
 
   @Test
@@ -75,12 +86,18 @@ public class EventWireReflectionTest {
    * still a defect, and this is the line that catches it at build time instead.
    *
    * <p><b>Written against signatures rather than classes, because the durable seam has no {@code
-   * eventType()}.</b> All three listeners here take an {@code EventFrame} and deserialize what they
+   * eventType()}.</b> All the listeners here take an {@code EventFrame} and deserialize what they
    * want themselves, so the class each one binds to is not something a test can ask the bean for.
    * What it can ask is the name each one subscribes to, and the registration's own targets carry
    * those names: a signature is an event class's simple name, by the same derivation the typed seam
-   * used. {@code "*"} is skipped — a listener that wants everything is promising to bind nothing in
-   * particular, and the trigger engine really does read its payloads with {@code readTree}.
+   * used.
+   *
+   * <p><b>Two exemptions, and both are "this listener binds nothing".</b> {@code "*"} is skipped
+   * because a listener that wants everything promises to bind nothing in particular, and the trigger
+   * engine really does read its payloads with {@code readTree}. {@link #WALKED} is the named form of
+   * the same thing for a listener that wants one event it walks rather than binds — the rule this
+   * test enforces is about binding, and a signature listed there is a claim that nothing on that path
+   * ever reaches Jackson's binder.
    */
   @Test
   public void everyDurableListenersSignatureNamesARegisteredType() {
@@ -91,7 +108,7 @@ public class EventWireReflectionTest {
             .collect(Collectors.toSet());
     for (QitsDurableEventListener listener : listeners) {
       for (String signature : listener.signatures()) {
-        if (QitsRawEventListener.ALL.equals(signature)) {
+        if (QitsRawEventListener.ALL.equals(signature) || WALKED.contains(signature)) {
           continue;
         }
         assertTrue(

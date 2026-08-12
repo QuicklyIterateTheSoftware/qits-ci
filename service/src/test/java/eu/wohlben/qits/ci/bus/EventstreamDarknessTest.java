@@ -34,7 +34,8 @@ import org.junit.jupiter.api.Test;
  * An {@code Instance} injection point counts as a use, which is why no {@code @Unremovable} is
  * needed; this is the assertion that keeps that true rather than believed. It matters most for
  * {@code ScmPublishCommitListener}: removed, this service still serves every read and simply never
- * builds a push again.
+ * builds a push again. {@code ScmReleaseListener} is the same class of silence one step along —
+ * removed, no release fact is ever recorded and every release publishes without announcing.
  *
  * <p><b>And their consumer ids are asserted here because they are storage.</b> Each one keys a
  * {@code consumed_event} ledger and a {@code consumer_watermark}; changing one silently mints a
@@ -59,7 +60,7 @@ public class EventstreamDarknessTest {
   }
 
   @Test
-  public void allFourDurableListenersAreRegisteredBeans() {
+  public void allFiveDurableListenersAreRegisteredBeans() {
     Set<Class<?>> registered =
         StreamSupport.stream(listeners.spliterator(), false)
             .map(listener -> (Class<?>) ClientProxy.unwrap(listener).getClass())
@@ -70,7 +71,8 @@ public class EventstreamDarknessTest {
                 BuildSuccessfulListener.class,
                 CiEventTriggerListener.class,
                 DaemonReleaseListener.class,
-                ScmPublishCommitListener.class)),
+                ScmPublishCommitListener.class,
+                ScmReleaseListener.class)),
         "a listener removed as unused subscribes to nothing and is never swept: " + registered);
   }
 
@@ -80,8 +82,9 @@ public class EventstreamDarknessTest {
     assertEquals("ci-event-triggers", CiEventTriggerListener.CONSUMER_ID);
     assertEquals("ci-daemon-adopt", DaemonReleaseListener.CONSUMER_ID);
     assertEquals("ci-push-runs", ScmPublishCommitListener.CONSUMER_ID);
+    assertEquals("ci-release-facts", ScmReleaseListener.CONSUMER_ID);
     assertEquals(
-        4,
+        5,
         StreamSupport.stream(listeners.spliterator(), false)
             .map(QitsDurableEventListener::consumerId)
             .distinct()

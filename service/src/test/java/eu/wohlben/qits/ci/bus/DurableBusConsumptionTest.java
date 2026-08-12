@@ -8,6 +8,7 @@ import eu.wohlben.qits.ci.control.CiDaemonPins;
 import eu.wohlben.qits.ci.control.DaemonProbe.Verdict;
 import eu.wohlben.qits.ci.control.FakeDaemonProbe;
 import eu.wohlben.qits.ci.persistence.CiDaemonPinRepository;
+import eu.wohlben.qits.ci.persistence.CiScmReleaseRepository;
 import eu.wohlben.qits.eventstream.QitsRawEventListener;
 import eu.wohlben.qits.eventstream.control.DurableFunnel;
 import eu.wohlben.qits.eventstream.control.EventFrame;
@@ -25,7 +26,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The four bus listeners as <b>durable</b> consumers: what the claim ledger settles, what stays
+ * The five bus listeners as <b>durable</b> consumers: what the claim ledger settles, what stays
  * owed, and what a late arrival is allowed to do.
  *
  * <p>Driven through {@link DurableFunnel} directly rather than over the socket, which is the same
@@ -59,9 +60,13 @@ public class DurableBusConsumptionTest {
 
   @Inject ScmPublishCommitListener pushes;
 
+  @Inject ScmReleaseListener scmReleases;
+
   @Inject CiDaemonPins pins;
 
   @Inject CiDaemonPinRepository repo;
+
+  @Inject CiScmReleaseRepository releases;
 
   @Inject FakeDaemonProbe probe;
 
@@ -69,7 +74,12 @@ public class DurableBusConsumptionTest {
   void resetState() {
     StubEventsServer.reset();
     probe.reset();
-    QuarkusTransaction.requiringNew().run(repo::deleteAll);
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              repo.deleteAll();
+              releases.deleteAll();
+            });
     ClientProxy.unwrap(pins).configuredVersion = Optional.empty();
   }
 
@@ -298,6 +308,80 @@ public class DurableBusConsumptionTest {
     assertEquals(0, repo.count());
   }
 
+  // --- ScmReleaseListener: ci-release-facts ---
+
+  /**
+   * The release fact, recorded once. A duplicate delivery must not write a second row and must not
+   * drive a second round of announcements — the claim is what settles it, and the fact row's own
+   * unique constraint is the net underneath on ci's datasource.
+   */
+  @Test
+  public void anScmReleaseIsRecordedOnceAcrossADuplicateDelivery() {
+    String repository = "release-facts-repo-" + anId().substring(0, 8);
+    EventFrame frame = releaseFrame(anId(), repository, "2026.812.101500");
+
+    assertEquals(DurableFunnel.Result.HANDLED, funnel.offer(scmReleases, frame));
+    assertEquals(DurableFunnel.Result.SKIPPED, funnel.offer(scmReleases, frame));
+
+    assertTrue(
+        QuarkusTransaction.requiringNew()
+            .call(() -> releases.released(repository, "2026.812.101500")),
+        "the join's other half is now in, durably");
+    assertEquals(
+        1,
+        QuarkusTransaction.requiringNew()
+            .call(() -> releases.count("repoId = ?1", repository))
+            .longValue());
+  }
+
+  /** One signature, knowable at startup: only qits-workspaces publishes it, and only for a real
+   *  release. */
+  @Test
+  public void theReleaseFactListenerSubscribesToTheOneEventThatMeansARelease() {
+    assertEquals(Set.of("SCMRelease"), scmReleases.signatures());
+  }
+
+  /**
+   * Poison on this path: an unreadable payload, and one naming no repository or no version. The
+   * join's key is exactly those two, so nothing about such an event could ever close it — the same
+   * bytes fail identically on every offer, and a throw would hold this consumer's watermark behind
+   * one bad release forever.
+   */
+  @Test
+  public void anScmReleaseWithNoKeyToJoinOnIsSettledRatherThanOwed() {
+    assertEquals(
+        DurableFunnel.Result.HANDLED,
+        funnel.offer(scmReleases, new EventFrame(anId(), "SCMRelease", T0, "not json", null, null)));
+    assertEquals(
+        DurableFunnel.Result.HANDLED,
+        funnel.offer(
+            scmReleases,
+            new EventFrame(anId(), "SCMRelease", T0, "{\"version\":\"1.0.0\"}", null, null)));
+    assertEquals(
+        DurableFunnel.Result.HANDLED,
+        funnel.offer(
+            scmReleases,
+            new EventFrame(anId(), "SCMRelease", T0, "{\"repository\":\"r\"}", null, null)));
+  }
+
+  /**
+   * A frame with no {@code occurredAt} is <b>not</b> poison here, unlike on the daemon ladder: this
+   * join orders nothing by it, so the fact is recorded with this instance's own clock rather than
+   * declined. A release that could not be recorded would be a release nobody ever announces.
+   */
+  @Test
+  public void anScmReleaseWithNoOccurredAtIsStillRecorded() {
+    String repository = "undated-release-repo-" + anId().substring(0, 8);
+
+    assertEquals(
+        DurableFunnel.Result.HANDLED,
+        funnel.offer(scmReleases, releaseFrame(anId(), repository, "2026.812.111500", null)));
+
+    assertTrue(
+        QuarkusTransaction.requiringNew()
+            .call(() -> releases.released(repository, "2026.812.111500")));
+  }
+
   // --- frames, in the canonical alphabetical-key shape the wire uses ---
 
   private static String anId() {
@@ -310,6 +394,27 @@ public class DurableBusConsumptionTest {
         "BuildSuccessful",
         T0,
         "{\"branch\":\"main\",\"commitSha\":\"cafebabe\",\"repoId\":\"" + repoId + "\"}",
+        null,
+        null);
+  }
+
+  private static EventFrame releaseFrame(String eventId, String repository, String version) {
+    return releaseFrame(eventId, repository, version, T0);
+  }
+
+  private static EventFrame releaseFrame(
+      String eventId, String repository, String version, Instant occurredAt) {
+    return new EventFrame(
+        eventId,
+        "SCMRelease",
+        occurredAt,
+        "{\"branch\":\"main\",\"projectId\":\"p-1\",\"repository\":\""
+            + repository
+            + "\",\"repositoryName\":\""
+            + repository
+            + "\",\"version\":\""
+            + version
+            + "\"}",
         null,
         null);
   }

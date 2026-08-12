@@ -3,8 +3,14 @@ package eu.wohlben.qits.ci.control;
 import java.time.Instant;
 
 /**
- * The port {@link CiRunService} announces a <b>published artifact</b> through — the second seam the
+ * The port {@link ReleaseJoin} announces a <b>published artifact</b> through — the second seam the
  * event bus hangs off, beside {@link RunAnnouncer} and deliberately not the same one.
+ *
+ * <p><b>The caller is the join and no longer the run.</b> {@link CiRunService} used to call this
+ * directly from a green run; it now hands what the run published to {@link ReleaseJoin}, which calls
+ * this only once an {@code SCMRelease} for the same {@code (repository, version)} has been seen. A
+ * bootstrap replay restores a tag, builds green and reaches this port never. Nothing about the
+ * signature or the semantics of one call changed with that move.
  *
  * <p>The two are separate because they say different things about the same green run.
  * {@code RunAnnouncer} says <em>a build passed</em>, once, for every green run there has ever been.
@@ -23,8 +29,9 @@ import java.time.Instant;
  * sole production implementation is {@code service/…/bus/SoftwareReleaseAnnouncer}, and zero
  * implementations is a supported configuration. <b>The same must-not-block rule as
  * {@link RunAnnouncer}</b>, with the same reason and one sharper edge: this runs on the
- * run worker and a release pipeline may declare several artifacts, so an unreachable
- * qits-events costs the publish timeout <em>per artifact</em>.
+ * run worker or on the bus's dispatch thread, a release pipeline may declare several artifacts, and
+ * the join holds the owed rows locked across the calls — so an unreachable qits-events costs the
+ * publish timeout <em>per artifact</em>.
  */
 public interface ReleaseAnnouncer {
 
@@ -36,9 +43,9 @@ public interface ReleaseAnnouncer {
    *     that goes wrong has to be traceable to the run it came from.
    * @param repoId the repository whose pipeline published it — this repo, not the upstream that
    *     triggered it
-   * @param version the version, read out of the triggering event's payload. qits-ci publishes
-   *     nothing when that field is absent: the declaration was written for a trigger that cannot
-   *     feed it.
+   * @param version the version, read out of the triggering event's payload — {@code version} on an
+   *     {@code SCMRelease}, {@code tagName} on an {@code SCMPublishTag}. qits-ci publishes nothing
+   *     when neither is there: the declaration was written for a trigger that cannot feed it.
    * @param packageType {@code npm}, {@code maven}, {@code docker} or {@code daemon} — {@link
    *     CiArtifact.Type#declared()}, the keyword the trigger file used, which is also the wire value
    * @param packageName the exact package name, unqualified for docker ({@code qits/qits-stt}): no

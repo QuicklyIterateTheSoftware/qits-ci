@@ -105,7 +105,7 @@ rest of qits it reaches over a URL it is configured with:
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + the pin ladder's answer (`qits.ci.daemon-version` is the ladder's bottom rung, never demoted) |
 | out | `PUT /events/api/events/{uuid}` — one `BuildSuccessful` per **green** run, idempotent (the `RunAnnouncer` seam), and the **only** thing a green run announces | `qits.events.url`, `qits.eventstream.enabled` |
-| out | the same route — one `SoftwareRelease` per artifact a green **release pipeline** declared (the `ReleaseAnnouncer` seam) | the same two keys |
+| out | the same route — one `SoftwareRelease` per artifact a green **release pipeline** declared (the `ReleaseAnnouncer` seam), and **only once an `SCMRelease` for the same (repository, version) has been seen** — see "The release join" | the same two keys |
 | out | `ws://…/events/stream` — dialled out and held open, carrying what qits-events broadcasts back | the same two keys; the address is derived, never configured twice |
 | out | `PUT/DELETE /containers/api/containers/<owner>/ci-step/<ref>` — every step container: started, read and removed through qits-containers, which owns the docker daemon. **qits-ci holds no docker socket.** | `qits.containers.url`, `qits.ci.containers.owner` |
 | out | the registry a publishing step pushes to, as `$QITS_REGISTRY` and `$QITS_IMAGE_REPOSITORY` in **every** step container — dialled by the *host's docker daemon*, never by this process | `qits.artifacts.registry-host`, `qits.artifacts.image-repository` |
@@ -212,7 +212,9 @@ since a step publishes an image from inside its own container and answers with a
 `SoftwareRelease`, through a third seam — `ReleaseAnnouncer` in `ci/control`, implemented by
 `service/…/bus/SoftwareReleaseAnnouncer`. It is a separate port from `RunAnnouncer` because it says
 something else: not "a build passed" but "this exact package is in qits-artifacts and you can
-install it". See "The release pipeline, and what it declares".
+install it". It is also the one announcement that is **gated**: it waits for an `SCMRelease` for the
+same `(repository, version)`, so a bootstrap replay restoring a release tag publishes silently. See
+"The release pipeline, and what it declares" and "The release join".
 
 qits-ci is also the **first consumer** of the same bus: `service/…/bus/BuildSuccessfulListener`
 receives its own announcement back off `/events/stream` and logs it. Nothing hangs off that yet; it
@@ -229,8 +231,9 @@ subscribe frame is the union of all three, `"*"` collapsing it to `["*"]`.
 
 **Every qits-ci listener is durable**, because each of them acts on something a lost event would
 silently not do: a push that is never built, a release train that stops triggering, a daemon release
-that is never adopted. Their consumer ids — the stable names their bookkeeping is keyed on — are
-`ci-push-runs`, `ci-event-triggers`, `ci-release-train` and `ci-daemon-adopt`.
+that is never adopted, a release nobody announces. Their consumer ids — the stable names their
+bookkeeping is keyed on — are `ci-push-runs`, `ci-event-triggers`, `ci-release-train`,
+`ci-daemon-adopt` and `ci-release-facts`.
 
 **The trigger engine says `"*"` permanently**, so this service's
 subscribe frame *is* `["*"]`: the event names it cares about live in other repositories' files and
@@ -590,7 +593,7 @@ When a run whose trigger file declared artifacts goes **green**, qits-ci publish
 | Field | What |
 |---|---|
 | `repository` | the repository whose pipeline published it — this repo, not the upstream |
-| `version` | read out of the **triggering** event's payload `version` field |
+| `version` | read out of the **triggering** event's payload: `version` on an `SCMRelease`, `tagName` on an `SCMPublishTag` (a release stamp IS the name of the tag the release push created) |
 | `packageType` | `npm`, `maven` or `docker`, as declared |
 | `packageName` | the declared name, verbatim |
 
@@ -608,10 +611,42 @@ Three consequences worth stating plainly:
   `SoftwareRelease` is additional, never a replacement.
 - **A repository with no release pipeline publishes nothing, and the train stops there.** That is
   not a failure mode, it is the design: an event nothing declares a trigger for is a `continue`.
-- **A declaration whose trigger carries no `version` publishes nothing**, with a WARN naming the run
+- **A declaration whose trigger carries no version publishes nothing**, with a WARN naming the run
   and the event. The version belongs to the release the pipeline built and qits-ci will not invent
-  one; a file declaring artifacts against an event that carries no version was written for a trigger
-  that cannot feed it.
+  one; a file declaring artifacts against an event that carries neither `version` nor `tagName` was
+  written for a trigger that cannot feed it.
+- **And a green pipeline is only half of it.** The announcement also needs an `SCMRelease` for the
+  same `(repository, version)` — see the next section.
+
+### The release join: a `SoftwareRelease` needs a real release
+
+A green release pipeline is **not enough** to announce. qits-ci announces a `SoftwareRelease` for a
+`(repository, version)` only when both of these exist, in either order:
+
+1. a **green release-pipeline run** for that pair, and
+2. an **`SCMRelease`** for that pair — the event only qits-workspaces publishes, and only for a real
+   release.
+
+The reason is the bootstrap. A rebootstrap restores each repository's release **tag** so the platform
+re-derives its artifacts; that is a restore, not a release, and it produces `SCMPublishTag` alone.
+Announcing off the tag made every replay impersonate a release: the train woke, every consumer ran a
+bump, and each bump ended in a release call against a qits-workspaces the boot had not deployed yet.
+A replay has no novelty to announce, and `SCMRelease` is exactly the platform's word for novelty.
+
+Both halves are rows, so the two may arrive in any order and a restart between them costs nothing:
+
+- an `SCMRelease`-triggered run carries both facts on one row and announces at green, with no lookup
+  — which is also what keeps a hand-supplied event through `POST /ci/api/events/trigger` working;
+- a tag-triggered run that finds the release already recorded announces at green;
+- a tag-triggered run that finishes first leaves the announcement **owed**, and the `SCMRelease`
+  makes it when it arrives;
+- a tag-triggered run whose release never comes never announces. **No timeout and no fallback.**
+
+The owed announcements live in `ci_release_announcement` (`announced_at` null is "still owed"), the
+release facts in `ci_scm_release`, and `service/…/bus/ScmReleaseListener` is the durable consumer
+that records them (`consumerId` `ci-release-facts`). A boot sweep pairs anything a crash left owed.
+An announcement is published before its row is marked, so the failure this favours is announcing
+twice rather than not at all.
 
 ### What an event-triggered step container gets
 

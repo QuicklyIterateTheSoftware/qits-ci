@@ -537,7 +537,7 @@ a watermark is paged forward from qits-events' log at startup and on a schedule,
 delay rather than a hole. `event-delivery-guarantees-plan.md` in the superproject is the design and
 `eventstream/AGENTS.md` is the contract; what follows is only what is qits-ci's to get right.
 
-**Each listener's `consumerId()` is STORAGE, not a label**, and the four shipped are literals in
+**Each listener's `consumerId()` is STORAGE, not a label**, and the five shipped are literals in
 `EventstreamDarknessTest` for that reason:
 
 | bean | `consumerId()` | `signatures()` | `selects` |
@@ -546,6 +546,7 @@ delay rather than a hole. `event-delivery-guarantees-plan.md` in the superprojec
 | `CiEventTriggerListener` | `ci-event-triggers` | `["*"]` | default (see below) |
 | `BuildSuccessfulListener` | `ci-release-train` | `BuildSuccessful` | default |
 | `DaemonReleaseListener` | `ci-daemon-adopt` | `SoftwareRelease` | the daemon's own releases |
+| `ScmReleaseListener` | `ci-release-facts` | `SCMRelease` | default |
 
 **`ScmPublishCommitListener` is the push intake**, and it replaced an HTTP endpoint rather than
 joining one. `POST /ci/api/events/post-receive` is gone: qits-githost publishes `SCMPublishCommit`
@@ -643,8 +644,49 @@ Three things about that second seam are worth having in front of you:
 - **The version is read at completion, not at accept.** It comes out of the triggering event's
   payload, which is on no column and exists only in the worker's closure — so it travels down into
   `runSteps` with the declaration. Reading it later is what lets a red run announce nothing *and*
-  warn about nothing; a declaration whose trigger carries no `version` is a WARN and no event, since
-  a blank version would publish a package reference nothing can resolve.
+  warn about nothing; a declaration whose trigger carries no version is a WARN and no event, since
+  a blank version would publish a package reference nothing can resolve. **Two events feed it and
+  they spell it differently**: `version` on an `SCMRelease`, `tagName` on an `SCMPublishTag`, whose
+  value IS the version string because a release stamp is the name of the tag the release push
+  created. `CiRunService.releaseVersionOf` is the one place that choice is made, and it had to exist
+  before the join below could have anything to join on.
+
+### The release join, and why the port has a gatekeeper now
+
+**A green release pipeline no longer announces on its own.** `CiRunService.announceRelease` hands
+what the run published to `ReleaseJoin` (`ci/control`), and that is what calls `ReleaseAnnouncer` —
+only once an `SCMRelease` for the same `(repository, version)` has been seen. bootstrap-replay-plan.md's
+WP2; the class javadoc carries the argument in full and the short form is:
+
+- A **restore** re-establishes SCM state and produces `SCMPublishTag` alone. A **release** also
+  announces novelty, and only qits-workspaces publishes `SCMRelease`. Announcing off the tag made
+  every rebootstrap impersonate a release — the train woke against a platform the boot had not
+  finished deploying, and the same eight repositories went red every time.
+- **The two facts race on a real release, so both halves are rows.** `ci_release_announcement` holds
+  what a green run owes (`announced_at` null is "still owed"), `ci_scm_release` holds what was really
+  released. Either arrival order works and a restart between them costs nothing.
+- **An `SCMRelease`-triggered run takes no lookup at all.** The event that caused it IS the release
+  announcement, so the join closes by construction — which is what keeps every recipe that still
+  declares `event: SCMRelease` behaving exactly as before, and what keeps the manual trigger door
+  working (a hand-supplied event rides no bus and leaves no fact row).
+- **A tag-triggered run with no release behind it never announces. No timeout, no fallback.** The
+  owed rows stay as the readable account of what published without being released.
+- **Published first, marked after**, inside one transaction holding the owed rows locked
+  (`lockOwed`). So two drivers of one key cannot both announce, and a crash between the publish and
+  the commit leaves the row owed for the boot sweep. At-least-once by choice: losing an announcement
+  is the failure the platform forbids, making one twice is the nuisance the other way round.
+- **The boot sweep runs on its own thread** (`ci-release-join-sweep`), and that is the
+  `DaemonReleaseListener.reconcileFromLog` lesson applied: a startup observer that blocks on the
+  network loses the healthcheck race and cd kills the deployment.
+- **`ScmReleaseListener` writes in its own transaction, not the claim's.** The claim lives on the
+  eventstream datasource and the fact row on ci's, and one JTA transaction does not take both —
+  measured, as `Enlisted connection used without active transaction`. `acceptPostReceive` already had
+  the same arrangement for the same reason. The fact is written before anything is announced, so the
+  direction that can go wrong is a re-offered event finding the row already there, which is a no-op.
+- **`SCMRelease`'s name and its three payload fields are strings here**, like the tag event's, and
+  unlike the tag event's they have **no contract test**: qits-workspaces' vocabulary jar is on
+  neither module's classpath, so a rename over there stops the join closing rather than failing a
+  build. `ReleaseJoin.RELEASE_EVENT_NAME` is the one place the name is spelled.
 
 The call sits on a run worker and it blocks. That was the trade, and it is bounded
 rather than free: `publish()` never throws, attempts the PUT inline, and gives up after
@@ -1084,7 +1126,9 @@ Keep it that way; do not buffer a step's output whole.
 context's database or migration history.
 
 **The ordinary rule is back: keep appending, never edit an applied one.** `V2__run_causation.sql`
-is that rule being followed — `ci_run.causation_id`, the platform's generic CausedRow column,
+and `V3__release_join.sql` are that rule being followed. The second adds the release join's two
+tables — `ci_release_announcement` and `ci_scm_release`, see "The release join" — and touches
+nothing that was already there. The first adds `ci_run.causation_id`, the platform's generic CausedRow column,
 nullable, no backfill (`trigger_event_id` keeps the history) and part of no constraint. **For a
 bus-arrived event the value is set EXPLICITLY in `acceptEventRun`, not left to the stamp** — the
 row is written on `ci-trigger-worker`, behind the queue hop where the ambient scope has already
@@ -1094,8 +1138,10 @@ trigger, which evaluates on the request thread under the REST filter's restored 
 causation decisions themselves are enforced by `ArchRulesTest` in the `ci` module: every `@Entity`
 here implements `CausedRow` (CiRun) or declares `@Uncaused` with its reason in the javadoc (CiStep
 — its run carries the cause, and its row is written on the run worker where no scope stands;
-CiDaemonPin — `event_id` is already the adopting event). A new entity that skips the decision fails
-the build naming the class.
+CiDaemonPin — `event_id` is already the adopting event; CiReleaseAnnouncement — `trigger_event_id`
+is already the cause, and it is on the row because the published event is stamped with it;
+CiScmRelease — `event_id` is already the announcing release). A new entity that skips the decision
+fails the build naming the class.
 
 `V1__init.sql` is the rest of the schema. The nine H2 migrations it replaces (V1-V8 plus a Java V9) are
 history in this repository's log and are not a prefix of this lineage: the move off H2 is a

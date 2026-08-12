@@ -188,13 +188,17 @@ public class CiRunService {
   /** The green-run event port (see {@link RunAnnouncer}); zero implementations is fine. */
   @Inject Instance<RunAnnouncer> runAnnouncers;
 
-  /** The published-artifact port (see {@link ReleaseAnnouncer}); zero implementations is fine. */
-  @Inject Instance<ReleaseAnnouncer> releaseAnnouncers;
+  /**
+   * The gate a published artifact goes through — see {@link ReleaseJoin}. This class decides that a
+   * release pipeline finished and what it published; that one decides whether the platform is
+   * allowed to hear about it.
+   */
+  @Inject ReleaseJoin releaseJoin;
 
   /**
    * The field a release pipeline's version comes out of. It is the triggering event's payload, read
    * by name — {@code SCMRelease} carries it, and a trigger file declaring artifacts against an event
-   * that does not was written for something this cannot feed.
+   * that does not, and that is not the tag event either, was written for something this cannot feed.
    */
   private static final String VERSION_FIELD = "version";
 
@@ -855,60 +859,75 @@ public class CiRunService {
   }
 
   /**
-   * Announces what a green <b>release pipeline</b> published — one announcement per declared
-   * artifact, through {@link ReleaseAnnouncer}, after {@link #announceRun} because "this build
-   * passed" is the more general statement of the two.
+   * Hands what a green <b>release pipeline</b> published to {@link ReleaseJoin} — after {@link
+   * #announceRun}, because "this build passed" is the more general statement of the two.
    *
    * <p><b>It is additional and never a replacement.</b> Every green run still announces itself
    * exactly as before; a declaration adds N events, it removes none. A run with no declaration —
    * every push and every ordinary event pipeline — reaches this method with a null and does nothing.
    *
+   * <p><b>Whether the platform hears about it is not decided here.</b> A green run says what it
+   * published; {@link ReleaseJoin} says whether that was a release or a bootstrap replay restoring a
+   * tag. This method's job ends at the key, and the key is where the two halves have to agree — see
+   * {@link #releaseVersionOf}.
+   *
    * <p><b>A declaration whose trigger carries no version publishes nothing, loudly.</b> The version
    * is not qits-ci's to invent: it belongs to the release the pipeline built, and the only place it
    * exists is the payload of the event that triggered the run. So a file declaring artifacts against
-   * an event with no {@code version} field is a file written for a trigger that cannot feed it, and
-   * the honest answer is a WARN naming the run and the event rather than an announcement with a
-   * guessed or blank version — which downstream would install.
+   * an event that carries neither a {@code version} nor a tag name is a file written for a trigger
+   * that cannot feed it, and the honest answer is a WARN naming the run and the event rather than an
+   * announcement with a guessed or blank version — which downstream would install.
    */
   private void announceRelease(CiRun run, Instant finishedAt, DeclaredRelease release) {
     if (release == null) {
       return;
     }
-    String version = versionOf(release.eventPayload());
+    String version = releaseVersionOf(run.triggerEventName, release.eventPayload());
     if (version == null) {
       LOG.warnf(
-          "Run %s: %s declares %d artifact(s), but the %s event that triggered it carries no '%s' —"
-              + " nothing published",
-          run.id, run.configPath, release.artifacts().size(), run.triggerEventName, VERSION_FIELD);
+          "Run %s: %s declares %d artifact(s), but the %s event that triggered it carries neither"
+              + " '%s' nor '%s' — nothing published",
+          run.id,
+          run.configPath,
+          release.artifacts().size(),
+          run.triggerEventName,
+          VERSION_FIELD,
+          TAG_NAME_FIELD);
       return;
     }
-    for (CiArtifact artifact : release.artifacts()) {
-      for (ReleaseAnnouncer announcer : releaseAnnouncers) {
-        try {
-          announcer.onArtifactPublished(
-              run.id,
-              run.repoId,
-              version,
-              artifact.type().declared(),
-              artifact.name(),
-              finishedAt,
-              run.triggerEventId);
-        } catch (RuntimeException e) {
-          // Per artifact, so one failed announcement never costs the siblings theirs.
-          LOG.warnf(e, "Announcing artifact %s of run %s failed", artifact.name(), run.id);
-        }
-      }
-    }
+    releaseJoin.onGreenReleaseRun(
+        new ReleaseJoin.Published(
+            run.id,
+            run.repoId,
+            version,
+            run.triggerEventName,
+            run.triggerEventId,
+            finishedAt,
+            release.artifacts()));
   }
 
   /**
-   * The triggering event's {@code version}, or null when there is none to read.
+   * The version a green release pipeline published under, taken from the event that triggered it, or
+   * null when there is none to read.
+   *
+   * <p><b>Two events feed it and they spell it differently, which is why this is one method rather
+   * than one field name.</b> An {@code SCMRelease} carries {@code version}. An {@code
+   * SCMPublishTag} carries {@code tagName}, and that IS the version string: a release stamp is the
+   * name of the tag the release push created, so a tag-triggered release pipeline and the {@code
+   * SCMRelease} for the same release land on the same key. Both spellings had to be readable here
+   * for {@link ReleaseJoin} to have anything to join — bootstrap-replay-plan.md's WP1 is what moves
+   * the release recipes onto the tag event.
    *
    * <p>The payload is walked rather than bound, which is the trigger engine's rule and the same one
-   * that keeps this path free of native-image reflection metadata. A non-string value is compared as
-   * its JSON literal exactly as a selection would read it, so a version that arrives as a number is
+   * that keeps this path free of native-image reflection metadata. A non-string value is read as its
+   * JSON literal exactly as a selection would read it, so a version that arrives as a number is
    * announced as the digits it was written with rather than refused.
    */
+  private static String releaseVersionOf(String eventName, String payload) {
+    return TAG_EVENT_NAME.equals(eventName) ? tagOf(payload) : versionOf(payload);
+  }
+
+  /** The triggering event's {@code version}, or null when there is none to read. */
   private static String versionOf(String payload) {
     JsonNode version =
         CiEventSelectionEvaluator.resolve(

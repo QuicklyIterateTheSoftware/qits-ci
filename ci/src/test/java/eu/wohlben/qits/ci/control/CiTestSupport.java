@@ -1,20 +1,29 @@
 package eu.wohlben.qits.ci.control;
 
+import eu.wohlben.qits.ci.persistence.CiReleaseAnnouncementRepository;
 import eu.wohlben.qits.ci.persistence.CiRunRepository;
+import eu.wohlben.qits.ci.persistence.CiScmReleaseRepository;
 import eu.wohlben.qits.ci.persistence.CiStepRepository;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 
 /**
- * Base for ci {@code @QuarkusTest}s: wipes both tables (steps first — FK) outside the test's own
+ * Base for ci {@code @QuarkusTest}s: wipes the tables (steps first — FK) outside the test's own
  * transaction and resets the fakes, so every test starts from a clean slate (the {@code
  * ArtifactsTestSupport} pattern).
+ *
+ * <p>The release join's two tables are wiped here too, and the reason is the same one that makes the
+ * trigger engine's shared candidate list bite: they outlive a run row on purpose, so a release fact
+ * one test recorded would close another test's join and turn "held, nothing announced" into an
+ * announcement nobody asked for.
  */
 public abstract class CiTestSupport {
 
   @Inject protected CiRunRepository runs;
   @Inject protected CiStepRepository steps;
+  @Inject protected CiReleaseAnnouncementRepository announcements;
+  @Inject protected CiScmReleaseRepository scmReleases;
   @Inject protected FakeCiStepRunner fakeRunner;
   @Inject protected FakeCiConfigSource fakeConfig;
   @Inject protected FakeCandidateRepos fakeCandidates;
@@ -40,6 +49,8 @@ public abstract class CiTestSupport {
             () -> {
               steps.deleteAll();
               runs.deleteAll();
+              announcements.deleteAll();
+              scmReleases.deleteAll();
             });
     fakeRunner.reset();
     fakeConfig.reset();
