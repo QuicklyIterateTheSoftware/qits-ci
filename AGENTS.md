@@ -1059,6 +1059,17 @@ Three properties travel with that, and a jar missing them is not infrastructure:
 
 A dependency that fails any of those three is a client on another context, whatever it is called.
 
+**Pin both at RELEASED calver, never at a snapshot, and 2026-08-12 is why.** Each carried
+`1.0.0-SNAPSHOT` behind a comment saying it must not ship as one — correct, and inert, because the
+bootstrap seed-published both into the registry and they resolved there for months. A salvage
+re-seeded the artifacts store without them and **nothing went red**, because every qits-ci build
+afterwards reused docker's cached maven layer: ten CACHED layers, including the one that resolves
+dependencies. The first source change since invalidated that layer, resolved for real, and the
+release run died on both jars at once. The lesson generalises past these two: **a green build that
+did not resolve anything is not evidence that it could**, so when a pin changes — or when the
+registry is re-seeded — purge the artifact from `~/.m2` and build, which is the only local way to
+ask the registry the question the step container will ask.
+
 Never add a JPA relation to another context's entity. `ci_run.repo_id` is a plain `String` column
 in ci's **own** physical database; a foreign key cannot span it.
 
