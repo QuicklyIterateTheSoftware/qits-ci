@@ -173,7 +173,8 @@ public class CiDaemonLauncherTest {
                 new Security(true, true, "4g", "4g", 2048L, "2"),
                 null,
                 "qits-ci-01234567-412621e6-2",
-                ""),
+                "",
+                null),
             // 60 register + 120 initialize + 900 default step + 60 grace + 900 slop.
             Policy.ephemeral(2040L),
             Recreate.never),
@@ -217,7 +218,8 @@ public class CiDaemonLauncherTest {
         original.security(),
         original.pullPolicy(),
         original.explicitName(),
-        original.user());
+        original.user(),
+        original.init());
   }
 
   @Test
@@ -275,7 +277,8 @@ public class CiDaemonLauncherTest {
         original.security(),
         original.pullPolicy(),
         original.explicitName(),
-        "");
+        "",
+        original.init());
   }
 
   @Test

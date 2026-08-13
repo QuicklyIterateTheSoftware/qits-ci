@@ -851,7 +851,11 @@ public class CiDaemonLauncher {
             // sandbox above takes CAP_SETUID, CAP_SETGID and CAP_CHOWN away, so `su` and `chown`
             // both fail inside the container whatever it tries. Empty is the image's own default.
             // The parser refuses this beside `docker`, so a socket-holding step is always root.
-            value(spec.user()));
+            value(spec.user()),
+            // No tini: the daemon is PID 1, exactly as it was before the spec could say otherwise.
+            // Known cost, known already: killed orphans stay zombies until the container exits.
+            // Flipping this on is a behavior decision for its own change, not this call site's.
+            null);
     // EPHEMERAL: a step container runs once and exits, so a recreate under a changed spec is a
     // refusal rather than a restart — which is right for a place named after one step of one run.
     return EnsureRequest.of(workload, Policy.ephemeral(maxAgeSeconds(spec)));
