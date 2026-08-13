@@ -57,8 +57,7 @@
 #                               this service hosts no git, so the read 404s and every push records
 #                               "no pipeline", indistinguishable from a repository that never opted
 #                               in. Point it at qits-artifacts on qits-net.
-#   QITS_CI_CONTAINER_GIT_URL   the same base as reachable from inside a step container. Its
-#                               host.docker.internal default assumes host-run docker.
+#   QITS_CI_CONTAINER_GIT_URL   the same base as reachable from inside a step container.
 #   QITS_CI_NETWORK             the network step containers join; it has to be the one the alias
 #                               above resolves on.
 #   QITS_AUTH_MACHINE_REQUIRED  false (the default) means the event intake — which triggers
@@ -72,29 +71,9 @@
 #
 # See README.md, "Deploying it", for the whole surface.
 #
-# --- READ THIS BEFORE DEPLOYING: ci is not a self-contained process -------------------------------
-# ci is HOST-SIDE by design (README.md, "How a step runs") — it does its work by shelling out,
-# so the runtime stage below is deliberately NOT the usual "the binary and nothing else". ONE
-# external program is part of this service's *runtime*, and it is not something a config value can
-# substitute:
-#
-#   docker  `CiDaemonLauncher` starts one detached container per step (and removes it again, and
-#           sweeps orphans at boot); its `ensureNetwork()` observer fires on `StartupEvent`. The CLI
-#           is installed below — but it is only half of what a deployment has to supply, and the
-#           other half is a decision, not a default:
-#
-#             THE DOCKER SOCKET IS NOT IN THIS IMAGE. Run with
-#             `-v /var/run/docker.sock:/var/run/docker.sock`, or ci can start no step.
-#
-#           That mount hands this container control of the host's docker daemon, which is
-#           root-equivalent. This repo is emphatic that a *step* container never gets the socket
-#           (README.md, "How a step runs"); ci itself needs it, and that asymmetry is the whole
-#           trust boundary, so it is left as an explicit deployment act rather than baked in.
-#           Without it the service still starts and serves: `ensureNetwork` logs one WARN and each
-#           step fails with a docker connection error instead of a pipeline result.
-#
-#           Only docker's CLI is here. `qits.ci.container-runtime` names the binary ci invokes, so
-#           pointing it at anything else makes supplying that CLI the deployment's problem.
+# --- this image ships the binary alone -------------------------------------------------------------
+# ci spawns no process. Step containers start through qits-containers over HTTP (README.md, "How a
+# step runs"), so the runtime stage carries no docker CLI and the deployment mounts no docker socket.
 #
 # --- stage `build`: native-compile ----------------------------------------------------------------
 # The builder JDK MUST be 25: native-image cannot read bytecode newer than its own JDK, and this
@@ -201,30 +180,15 @@ RUN d=service/src/main/webui/dist/qits-spa-ci/browser; \
 FROM localhost:8082/redhat/ubi9/ubi-minimal:9.6
 WORKDIR /work
 
-# The docker CLI comes from Docker's own repository because no UBI repository carries a
-# docker-compatible client at all; the repo definition is removed again afterwards so the shipped
-# image does not carry a third-party package source it has no reason to consult.
-#
-# `git-core` used to stand beside it, for the bare mirror ci fetched pipeline config into. The config
-# is an HTTP read off the git host's content routes now — no clone, no mirror, no git — so the
-# package is gone rather than kept "just in case": what a runtime image carries is what a deployment
-# has to trust, and nothing here shells `git` any more.
-#
-# No ENV HOME accompanies it. Checked rather than assumed: run as 1001 with HOME=/ (unwritable,
-# which is what an image with no passwd entry gets) the CLI does everything ci asks of it. And a
-# HOME here would read like the user.home workaround the header refuses, which is worse than
-# useless — it does not make user.home resolve either.
-RUN printf '[docker-ce-stable]\nname=Docker CE Stable\nbaseurl=https://download.docker.com/linux/centos/9/$basearch/stable\nenabled=1\ngpgcheck=1\ngpgkey=https://download.docker.com/linux/centos/gpg\n' \
-      > /etc/yum.repos.d/docker-ce.repo \
- && microdnf -y --setopt=install_weak_deps=0 --nodocs install docker-ce-cli \
- && microdnf -y clean all \
- && rm -f /etc/yum.repos.d/docker-ce.repo
+# NO PACKAGES ARE INSTALLED HERE, and two used to be. A docker CLI stood here until step containers
+# started through qits-containers over HTTP; `git-core` stood beside it, for the bare mirror ci
+# fetched pipeline config into, until that config became an HTTP read off the git host's content
+# routes. Neither is kept "just in case": what a runtime image carries is what a deployment has to
+# trust, and nothing here shells anything any more.
 
 # `quarkus.package.output-name` names the binary `qits-ci` (no -runner suffix), so the process is
-# identifiable in `ps`/`docker top` — which matters more here than elsewhere, because this service's
-# own work is spawning `docker run` children and a step's process tree gets read while debugging a
-# run. That name is spelled a third time in service/pom.xml as failsafe's `native.image.path`; all
-# three move together.
+# identifiable in `ps`/`docker top` while debugging a container. That name is spelled a third time in
+# service/pom.xml as failsafe's `native.image.path`; all three move together.
 COPY --from=build --chown=1001:root /src/service/target/qits-ci /work/qits-ci
 RUN chmod +x /work/qits-ci
 

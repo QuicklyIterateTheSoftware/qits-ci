@@ -1092,7 +1092,7 @@ Four things reaching this code are attacker-controlled and must stay that way in
   `ContainersIdentifiers` checks it again where a refusal can be a 400 that names the field, and
   neither check is redundant, because a value refused here never leaves and a value refused there
   never reaches a daemon. This is hardening rather than a fix: no exploit through it is known
-  (`ProcessBuilder` never shell-splits and the orchestrator assembles its argv element by element),
+  (the orchestrator assembles its argv element by element and through no shell),
   and "the argument parser will surely never take this for a flag" is not a claim worth
   re-defending.
 - **The step script.** It is code from a repository, and **qits-ci never executes it.** No code
