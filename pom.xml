@@ -57,7 +57,7 @@
              snapshot nobody published"; qits-githost released the jar on 2026-08-12 and this is that
              release. What kept the snapshot working until then was the bootstrap seed-publishing it
              into the registry, which is not a release and does not survive one being re-seeded. -->
-        <qits.githost-events.version>2026.812.172928</qits.githost-events.version>
+        <qits.githost-events.version>2026.813.164937</qits.githost-events.version>
         <!-- qits-containers' client jar: the orchestrator qits-ci asks for every step container.
              Framework-free — one class, four answers, no arc and no OIDC extension — which is what
              lets service/ produce it as a bean in three lines.
