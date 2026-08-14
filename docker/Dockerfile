@@ -159,7 +159,19 @@ COPY . .
 # not a tidier one of its own — a layer boundary is exactly what it is undoing.
 ARG QITS_MAVEN_REPOSITORY_URL=http://registry.dev.localhost:8080/artifacts/maven/maven
 ENV QITS_MAVEN_REPOSITORY_URL=$QITS_MAVEN_REPOSITORY_URL
-RUN d=service/src/main/webui/dist/qits-spa-ci/browser; \
+#
+# --- and how Maven authenticates, once that repository stops answering anonymously ----------------
+# The two secret mounts put the CI run's commissioned client into THIS `RUN`'s environment and
+# nowhere else — not a layer, not the image history. That is why they are not build args: this image
+# is pullable, and a build arg is recorded where anyone who pulls it can read it.
+# `.qits-maven-settings.xml` reads the two variables as the `qits-maven-network` server.
+#
+# Absent secrets leave both variables unset, which is the state every build is in today and the
+# state a host-side `docker build` is in permanently: Maven sends credentials only when a repository
+# answers 401, and the registry does not yet.
+RUN --mount=type=secret,id=qits-client-id,env=QITS_MAVEN_AUTH_USR \
+    --mount=type=secret,id=qits-client-secret,env=QITS_MAVEN_AUTH_PSW \
+    d=service/src/main/webui/dist/qits-spa-ci/browser; \
     test -f "$d/index.html" || { \
       echo "No built client at $d." >&2; \
       echo "The build context must carry one: run 'npm ci && npm run build'" >&2; \

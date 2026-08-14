@@ -11,4 +11,17 @@
       <url>${env.QITS_MAVEN_REPOSITORY_URL}</url>
     </mirror>
   </mirrors>
+  <servers>
+    <!-- The credential that answers the registry's 401 once reads are gated. The id is the MIRROR's
+         id, because a mirror is the server Maven authenticates against. Maven presents a server's
+         username and password only when a repository challenges, so while reads are anonymous —
+         today, and for any in-network build that never sees a 401 — these two lines are unused
+         literals: an unset variable stays unexpanded and is never sent anywhere. The image build
+         supplies both from BuildKit secret mounts; see docker/Dockerfile. -->
+    <server>
+      <id>qits-maven-network</id>
+      <username>${env.QITS_MAVEN_AUTH_USR}</username>
+      <password>${env.QITS_MAVEN_AUTH_PSW}</password>
+    </server>
+  </servers>
 </settings>
