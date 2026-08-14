@@ -85,6 +85,10 @@ package:
   here configures it. `quarkus-oidc-client` left the pom with that package and has since come back
   for a different hop — the token this service presents to qits-containers, produced in
   `containers/`. See "Authentication".
+- `service/…/idp/` — the qits-idp commissioning adapter: the client, the run-scoped memory of what
+  it minted, and the reconciliation that reaps what no run owns. Another *adapter*, and another
+  hand-rolled `java.net.http` client for the reason the whole `githost` package is one. See "The
+  credential is commissioned per run".
 - `service/…/containers/` — the orchestrator client's producer and its native-image registration,
   and nothing else. It is an *adapter* like `githost` and `bus` are: the seam is
   `CiStepRunner`/`daemonhost`, and what lives here is only the two things a deployable owes a plain
@@ -154,11 +158,60 @@ the container writes for itself. `BOOTSTRAP`'s last block writes `$DOCKER_CONFIG
 `$QITS_CI_REGISTRY_AUTH_CONFIG` when both are set, which keeps zero interpolation intact (the
 credential is a variable the shell reads, never a word in the text) and puts the file at
 `CiDaemonLauncher.REGISTRY_AUTH_DIR` under `/tmp` — **outside `/workspace`**, so it is in neither
-the clone nor any `docker build` context a step runs from it. The two variables exist only when
-`qits.ci.registry-auth.client-id` and `…client-secret` are both set **and** the step declared
-`docker: true`; anything else sends the environment that always shipped. Note `CiDaemonLauncherTest`
+the clone nor any `docker build` context a step runs from it. The two variables exist only when the
+run has **commissioned** a credential (below) **and** the step declared `docker: true`; anything
+else sends the environment that always shipped. Note `CiDaemonLauncherTest`
 asserts `BOOTSTRAP` contains no `docker` — the variable is upper case and a program would not be, so
 that assertion still means what it meant.
+
+### The credential is commissioned per run
+
+**`qits.ci.registry-auth.client-id`/`…client-secret` are gone.** They were one static pair, shared
+by every run of every repository, readable by every publishing step's repo-authored script, and
+alive for as long as the deployment was. qits-idp grew a commissioning API and `service/…/idp/` is
+the adapter for it:
+
+- **`IdpCommissioner`** — hand-rolled `java.net.http`, like every other client here. `POST
+  <quarkus.oidc-client.auth-server-url>/api/clients` with HTTP Basic of **this service's own** oidc
+  client and `{"contextKind":"ci-run","contextId":"<runId>"}`; `DELETE …/{clientId}` gives one back
+  (404 is "already gone", which is what was asked for); `GET …/clients` lists this owner's live ones.
+  **The address is derived, never configured** — a second key would be a second thing to keep in step
+  with the first, and two idps would mean minting against one and presenting tokens signed by the
+  other.
+- **`RunCommissions`** — the run-scoped memory, one entry per run, populated **lazily at the first
+  `docker: true` step** and reused by every later one. A pipeline of plain steps asks qits-idp for
+  nothing; a run is one credential rather than one per step, which is one thing to leak instead of N.
+  Not a row: a commission is worth exactly one run, and a run does not survive this process.
+- **`CommissionReconciler`** — the durable half. On boot (after both existing boot observers, on its
+  own `ci-commission-reconcile` thread — `DaemonReleaseListener`'s healthcheck lesson) and hourly, it
+  lists and deletes every `ci-run` row whose `contextId` is not a `QUEUED`/`RUNNING` run and which
+  this process is not holding right now. **A listing it could not read reaps nothing**: `live()`
+  answers an empty `Optional` rather than an empty list precisely so the two cannot be confused.
+
+Three decisions worth keeping in front of you:
+
+- **A commission that cannot be made fails the STEP.** `CiDaemonLauncher.launch` catches
+  `CommissionFailedException` and records `LAUNCH_FAILED` with a message naming the call. Launching
+  credential-less would turn an idp blip into a push 401 minutes later, inside somebody's build, with
+  nothing in the record naming the cause. The retry window is `qits.ci.commission.patience` and its
+  classification is `holdThrough`'s — 401, a 5xx and nothing answering are about the moment; a 403
+  (a commissioned client may not commission) and a 400 are about the request and stand at once.
+- **The fallback arm is byte-identical to the old unset-keys behaviour.** With
+  `quarkus.oidc-client.client-enabled` off there is nothing to commission with, so nothing is
+  commissioned and nothing is injected — the arm every test in this repo is on.
+- **The secret reaches the container in exactly two forms**: base64 inside the docker document, and
+  raw as `$QITS_COMMISSIONED_CLIENT_SECRET` beside `$QITS_COMMISSIONED_CLIENT_ID`, which is what a
+  BuildKit secret mount (`--secret id=…,env=QITS_COMMISSIONED_CLIENT_SECRET`) consumes without
+  writing a layer. `RunCommissioningTest` asserts that list is exactly one environment entry long and
+  that nothing else sent — argv, entrypoint, labels, the container name, the bootstrap — contains it.
+
+**`DOCKER_BUILDKIT=1` and `BUILDX_NO_DEFAULT_ATTESTATIONS=1` ride along on the same docker-only
+scope.** Every step image ships buildx as of qits-oci 2026.814.110556, so a legacy build here is a
+*silent fallback* rather than an image with no choice — and a silent fallback is what quietly drops a
+`--secret` mount. The first flag turns that into a loud error; the second keeps a push a single
+manifest, because buildx attaches provenance and SBOM attestations by default and the platform
+registry expects one manifest per tag. Neither is a credential, so both reach a docker step on a
+deployment that commissions nothing.
 
 Four things bite:
 
@@ -1260,8 +1313,13 @@ and a deployment that turns it on with no audience configured fails at **startup
 accepting tokens meant for another service. Which endpoints call the guard, and what a new one owes,
 is under "Addressing"; the deployment steps are in `README.md`.
 
-**This service presents a credential to exactly one hop, and the asymmetry it used to have is
-gone.** It asks qits-idp for a token of its own to present to **qits-containers**, which guards
+**This service presents a credential to two hops now, and both are the same identity.** It asks
+qits-idp for a token of its own to present to **qits-containers**, and it presents the same client
+id and secret as HTTP Basic to **qits-idp itself** to commission one credential per run (see "The
+credential is commissioned per run"). One is a bearer this service holds, the other is a credential
+it mints for a container; both live or die with `quarkus.oidc-client.client-enabled`.
+
+qits-containers guards
 every route — reads included — on the caller's own identity: its `OwnerGuard` compares the token's
 `sub` to the owner in the path. So `quarkus.oidc-client.client-id` is not a label here, it is this
 service's **owner string**, and `qits.ci.containers.owner` defaults to reading it.
@@ -1271,7 +1329,9 @@ One switch, `quarkus.oidc-client.client-enabled`, shipped **false**, exactly as 
 off, the extension builds a disabled client, the process boots with no secret and dials nothing, and
 the calls go out bare — which is what the orchestrator's own gate (`qits.auth.machine.required`,
 also off) expects. It stays independent of the inbound gate: either end of a hop is switched on
-first.
+first. **It is also the commissioning switch**: `IdpCommissioner.enabled()` reads the same key plus
+both halves of the credential behind it, so a deployment that has not turned the oidc client on
+commissions nothing and a step container's environment is what it always was.
 
 **This is a NEW arrangement rather than the old one coming back.** The retired one was
 `notify/PdBearer`, a bearer for qits-platform-deployments' HTTP intake, and it went with the call it

@@ -108,6 +108,7 @@ rest of qits it reaches over a URL it is configured with:
 | out | the same route — one `SoftwareRelease` per artifact a green **release pipeline** declared (the `ReleaseAnnouncer` seam), and **only once an `SCMRelease` for the same (repository, version) has been seen** — see "The release join" | the same two keys |
 | out | `ws://…/events/stream` — dialled out and held open, carrying what qits-events broadcasts back | the same two keys; the address is derived, never configured twice |
 | out | `PUT/DELETE /containers/api/containers/<owner>/ci-step/<ref>` — every step container: started, read and removed through qits-containers, which owns the docker daemon. **qits-ci holds no docker socket.** | `qits.containers.url`, `qits.ci.containers.owner` |
+| out | `POST/DELETE/GET /idp/api/clients` — one commissioned oidc client per run, minted at its first `docker: true` step and deleted when the run closes; the pair a publishing step pushes with | `quarkus.oidc-client.auth-server-url` + `…client-id` / `…credentials.secret`, `quarkus.oidc-client.client-enabled` |
 | out | the registry a publishing step pushes to, as `$QITS_REGISTRY` and `$QITS_IMAGE_REPOSITORY` in **every** step container — dialled by the *host's docker daemon*, never by this process | `qits.artifacts.registry-host`, `qits.artifacts.image-repository` |
 | out | the npm registry roots, as `$QITS_NPM_REGISTRY_URL` (hosted, `@qits/*` publishes) and `$QITS_NPM_PROXY_URL` (the npmjs pull-through cache) in **every** step container — dialled by the *step container itself* on the shared network | `qits.artifacts.npm.hosted-url`, `qits.artifacts.npm.proxy-url` |
 | out | the hosted Maven repository root, as `$QITS_MAVEN_REGISTRY_URL` in **every** step container — also dialled by the step container on the shared network | `qits.artifacts.maven.registry-url` |
@@ -378,17 +379,31 @@ The build and the push both happen in the *host's* daemon — the step's CLI is 
 registry address must resolve and be trusted **from the docker host**, not from this process. The
 step image supplies the docker CLI; the platform supplies the socket and the two coordinates.
 
-**A registry that wants a login gets one, and the step's script says nothing about it.** An
-in-network registry answers an anonymous push; one behind the edge answers it with a docker Bearer
-challenge, and the CLI then exchanges a *stored* username/password for a short-lived token at the
-realm the challenge names — by itself, with no `docker login` in the pipeline. So a deployment sets
-`qits.ci.registry-auth.client-id` / `…client-secret` (a qits-idp client with push rights) and every
-step that declared `docker: true` is handed `$DOCKER_CONFIG` pointing at a directory holding the
-`config.json` the CLI reads. **Both keys or neither**, and a step without the socket is handed
-nothing — it cannot push, so it has no use for a credential. Set neither and a step container's
-environment is exactly what it always was, which is the case a deployment on an anonymous registry
-stays in. The file lives under `/tmp`, never in the checkout, so it can never reach a
-`docker build` context.
+**A registry that wants a login gets one, the credential is this run's own, and the step's script
+says nothing about either.** An in-network registry answers an anonymous push; one behind the edge
+answers it with a docker Bearer challenge, and the CLI then exchanges a *stored* username/password
+for a short-lived token at the realm the challenge names — by itself, with no `docker login` in the
+pipeline. So at the **first step of a run that declared `docker: true`**, qits-ci asks qits-idp to
+commission a client for that run and hands the step `$DOCKER_CONFIG` pointing at a directory holding
+the `config.json` the CLI reads, plus `$QITS_COMMISSIONED_CLIENT_ID` and
+`$QITS_COMMISSIONED_CLIENT_SECRET` for a BuildKit secret mount. Every later docker step of the same
+run reuses the pair; the run's end deletes it. A step without the socket is handed nothing — it
+cannot push, so it has no use for a credential. The file lives under `/tmp`, never in the checkout,
+so it can never reach a `docker build` context.
+
+**There are no `qits.ci.registry-auth.*` keys any more.** The credential used to be one static pair
+in a deployment's environment, shared by every run of every repository; a deployment still setting
+them is setting nothing. What decides whether anything is commissioned is
+`quarkus.oidc-client.client-enabled` — off (the shipped default) and a step container's environment
+is exactly what it always was, which is the case a deployment on an anonymous registry stays in.
+
+**A commission that could not be made fails the step**, naming the call, rather than launching a
+step with no credential: an unreachable idp must not surface as a mysterious push 401 minutes later.
+
+**Two BuildKit variables ride the same scope.** A step declaring `docker: true` also gets
+`DOCKER_BUILDKIT=1` and `BUILDX_NO_DEFAULT_ATTESTATIONS=1`. Every step image ships buildx, so the
+first turns a silent fall back to the legacy builder into a loud error, and the second keeps a push a
+single manifest rather than an attestation index the platform registry does not expect.
 
 **Publishing an npm package needs none of that.** `$QITS_NPM_REGISTRY_URL` (hosted — where `@qits/*`
 is published) and `$QITS_NPM_PROXY_URL` (the pull-through cache of npmjs every install resolves
@@ -1024,15 +1039,22 @@ a repository's own listing will show.
   registry speaks plain HTTP the daemon also needs it in `insecure-registries`. Same class of fact as
   the socket mount, and now the same socket serves both. qits-cd ships the same two keys and derives
   its pull references from them, so the two services must agree.
-- **Set `qits.ci.registry-auth.client-id` / `…client-secret` only if that registry refuses an
-  anonymous push.** They are a qits-idp client id and secret with push rights, and when **both** are
-  set every step declaring `docker: true` gets `$DOCKER_CONFIG` and a `config.json` holding
+- **Configure no push credential at all: it is commissioned per run.** `qits.ci.registry-auth.*` is
+  gone, and a deployment still setting it is setting nothing. When
+  `QUARKUS_OIDC_CLIENT_CLIENT_ENABLED` is on, qits-ci asks qits-idp — at
+  `<QUARKUS_OIDC_CLIENT_AUTH_SERVER_URL>/api/clients`, with its own client id and secret as HTTP
+  Basic — for a client per run, and every step declaring `docker: true` gets `$DOCKER_CONFIG` and a
+  `config.json` holding
   `{"auths":{"<qits.artifacts.registry-host>":{"auth":"<base64 id:secret>"}}}` — which is all the
-  docker CLI needs to answer the edge's Bearer challenge on its own. Either one unset ships the
+  docker CLI needs to answer the edge's Bearer challenge on its own — plus the pair itself as
+  `$QITS_COMMISSIONED_CLIENT_ID`/`$QITS_COMMISSIONED_CLIENT_SECRET`. With the oidc client off, the
   behaviour that shipped before: no file, no variable, an anonymous push. Reads stay anonymous
-  either way, so a deployment pulling from that registry configures nothing. The credential is
-  readable by the step's own script, which runs repo-authored code — scope the client to pushing and
-  nothing else.
+  either way, so a deployment pulling from that registry configures nothing. **What the idp must
+  grant that client is push rights on the registry and nothing else** — it is readable by the step's
+  own script, which runs repo-authored code, and it is worth one pipeline rather than every future
+  one. The leftovers of a killed process are reaped at boot and hourly
+  (`qits.ci.commission.reconcile-interval`); a commission that could not be made fails the step
+  after `qits.ci.commission.patience`.
 - Leave `qits.artifacts.npm.hosted-url` / `qits.artifacts.npm.proxy-url` and
   `qits.artifacts.maven.registry-url` alone on a deployment where
   qits-artifacts answers to its usual alias: they are reached **from a step container**, on
