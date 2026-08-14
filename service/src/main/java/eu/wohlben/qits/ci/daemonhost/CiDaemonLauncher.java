@@ -23,6 +23,7 @@ import jakarta.inject.Inject;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -292,6 +293,23 @@ public class CiDaemonLauncher {
 
   @ConfigProperty(name = "qits.artifacts.image-repository")
   String artifactsImageRepository;
+
+  /**
+   * Every registry host the run's credential is written into the docker {@code config.json} for.
+   *
+   * <p><b>The docker client sends a login per host, so one entry is one host's worth of auth.</b>
+   * That was enough while a step both pulled and pushed against {@code
+   * qits.artifacts.registry-host}; it stopped being enough when a step image started arriving from
+   * the mirror vhost, because a document naming only the push registry leaves the pull
+   * unauthenticated and the build dies on a 401 nothing in the pipeline mentions.
+   *
+   * <p><b>The default is exactly {@code qits.artifacts.registry-host}</b>, so a deployment that has
+   * not widened it sends the document it always sent. A deployment behind the edge sets both vhosts
+   * — {@code registry.dev.localhost:8080,mirror.dev.localhost:8080} — and every entry shares the one
+   * commissioned pair, because it is one identity at one idp whatever hostname fronts it.
+   */
+  @ConfigProperty(name = "qits.ci.docker-auth-hosts")
+  List<String> dockerAuthHosts;
 
   /**
    * The credential a step pushes an image with: <b>this run's own</b>, commissioned at qits-idp when
@@ -967,15 +985,18 @@ public class CiDaemonLauncher {
    * <p><b>The scope is the decision that survived the cutover.</b> Only a step that declared {@code
    * docker: true} is handed this: the credential exists for a push over the mounted socket, and a
    * step without the socket has nothing to push with — so the narrow scope costs nothing and keeps
-   * the secret out of every container that cannot use it. The registry it names is {@code
-   * qits.artifacts.registry-host}, the same value the step reads as {@code $QITS_REGISTRY}: a
-   * credential for an address a pipeline does not push to would be a login nothing performs.
+   * the secret out of every container that cannot use it.
    *
-   * <p><b>Hand-written JSON, and it stays that way.</b> The document is four fixed keys around one
-   * base64 value, and base64 has no character JSON escapes — so the only value that could need
-   * quoting is the registry host, a deployment fact, escaped here anyway rather than trusted. A
-   * Jackson mapper for eight tokens would be one more graph the native-image builder has to be told
-   * about, which is the rule the whole {@code githost} package already follows.
+   * <p><b>One entry per host in {@link #dockerAuthHosts}, all carrying the same pair.</b> The docker
+   * client picks a login by registry hostname, so a build that pulls from one host and pushes to
+   * another needs both named — see that field for what widened this and why the default is still
+   * the one address the step reads as {@code $QITS_REGISTRY}.
+   *
+   * <p><b>Hand-written JSON, and it stays that way.</b> The document is fixed keys around one base64
+   * value per host, and base64 has no character JSON escapes — so the only values that could need
+   * quoting are the hostnames, deployment facts, escaped here anyway rather than trusted. A Jackson
+   * mapper for a dozen tokens would be one more graph the native-image builder has to be told about,
+   * which is the rule the whole {@code githost} package already follows.
    *
    * <p>The base64 is the docker CLI's own encoding of {@code id:secret}, the same bytes {@code
    * docker login} would store — <b>not</b> encryption, and no better protected than an environment
@@ -987,8 +1008,43 @@ public class CiDaemonLauncher {
             .encodeToString(
                 (commission.clientId() + ":" + commission.secret())
                     .getBytes(StandardCharsets.UTF_8));
-    String host = value(artifactsRegistryHost).replace("\\", "\\\\").replace("\"", "\\\"");
-    return "{\"auths\":{\"" + host + "\":{\"auth\":\"" + auth + "\"}}}";
+    StringBuilder document = new StringBuilder("{\"auths\":{");
+    boolean first = true;
+    for (String host : authHosts()) {
+      if (!first) {
+        document.append(',');
+      }
+      first = false;
+      document
+          .append('"')
+          .append(host.replace("\\", "\\\\").replace("\"", "\\\""))
+          .append("\":{\"auth\":\"")
+          .append(auth)
+          .append("\"}");
+    }
+    return document.append("}}").toString();
+  }
+
+  /**
+   * The hosts of the document, in the order they were configured, blanks dropped and duplicates
+   * collapsed — a repeated host would be a duplicate JSON key, which is legal and useless.
+   *
+   * <p>An unset list means the registry host alone, which is both the shipped default's value and
+   * the tolerance the hand-wired launchers in the ITs rely on: an unset field is a test's silence
+   * rather than a wiring failure.
+   */
+  private List<String> authHosts() {
+    List<String> hosts = new ArrayList<>();
+    for (String each : dockerAuthHosts == null ? List.<String>of() : dockerAuthHosts) {
+      String host = value(each).trim();
+      if (!host.isEmpty() && !hosts.contains(host)) {
+        hosts.add(host);
+      }
+    }
+    if (hosts.isEmpty()) {
+      hosts.add(value(artifactsRegistryHost));
+    }
+    return hosts;
   }
 
   /**

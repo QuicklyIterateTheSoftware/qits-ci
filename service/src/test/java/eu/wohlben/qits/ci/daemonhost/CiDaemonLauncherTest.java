@@ -60,6 +60,7 @@ public class CiDaemonLauncherTest {
     launcher.cpus = "2";
     launcher.artifactsRegistryHost = "qits-artifacts:8080";
     launcher.artifactsImageRepository = "qits";
+    launcher.dockerAuthHosts = List.of("qits-artifacts:8080");
     launcher.artifactsNpmHostedUrl = "http://qits-artifacts:8080/artifacts/npm/npm/";
     launcher.artifactsNpmProxyUrl = "http://qits-artifacts:8080/artifacts/npm/npmjs/";
     launcher.artifactsMavenRegistryUrl = "http://qits-artifacts:8080/artifacts/maven/maven";

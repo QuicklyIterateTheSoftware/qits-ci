@@ -205,6 +205,15 @@ Three decisions worth keeping in front of you:
   writing a layer. `RunCommissioningTest` asserts that list is exactly one environment entry long and
   that nothing else sent — argv, entrypoint, labels, the container name, the bootstrap — contains it.
 
+**The document names every host in `qits.ci.docker-auth-hosts`, not just the push registry.** The
+docker client picks a login by registry hostname, so one entry is one host's worth of auth — which
+was enough while a step pulled and pushed against the same address, and stopped being enough when a
+step image started arriving `FROM mirror.dev.localhost:8080/…`: a document naming only the registry
+leaves the *pull* unauthenticated and the build dies on a 401 no pipeline mentions. The default is
+exactly `qits.artifacts.registry-host`, so an unwidened deployment sends the document it always sent;
+behind the edge it is both vhosts, and every entry carries the same commissioned pair because it is
+one identity at one idp whatever hostname fronts it.
+
 **`DOCKER_BUILDKIT=1` and `BUILDX_NO_DEFAULT_ATTESTATIONS=1` ride along on the same docker-only
 scope.** Every step image ships buildx as of qits-oci 2026.814.110556, so a legacy build here is a
 *silent fallback* rather than an image with no choice — and a silent fallback is what quietly drops a

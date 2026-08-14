@@ -389,7 +389,9 @@ the `config.json` the CLI reads, plus `$QITS_COMMISSIONED_CLIENT_ID` and
 `$QITS_COMMISSIONED_CLIENT_SECRET` for a BuildKit secret mount. Every later docker step of the same
 run reuses the pair; the run's end deletes it. A step without the socket is handed nothing — it
 cannot push, so it has no use for a credential. The file lives under `/tmp`, never in the checkout,
-so it can never reach a `docker build` context.
+so it can never reach a `docker build` context. It carries **one entry per host in
+`qits.ci.docker-auth-hosts`** — the docker client picks a login by hostname, so a build that pulls
+its base image from the mirror vhost and pushes to the registry vhost needs both named.
 
 **There are no `qits.ci.registry-auth.*` keys any more.** The credential used to be one static pair
 in a deployment's environment, shared by every run of every repository; a deployment still setting
@@ -1055,6 +1057,13 @@ a repository's own listing will show.
   one. The leftovers of a killed process are reaped at boot and hourly
   (`qits.ci.commission.reconcile-interval`); a commission that could not be made fails the step
   after `qits.ci.commission.patience`.
+- **Set `qits.ci.docker-auth-hosts` to every registry host a step build touches, if that is more
+  than one.** The docker client sends a login per hostname, so the `config.json` needs an entry per
+  host — the push registry *and* whatever a step image is pulled from. The default is
+  `qits.artifacts.registry-host` alone, which is right for a deployment that pulls and pushes at one
+  address; behind the edge it is
+  `QITS_CI_DOCKER_AUTH_HOSTS=registry.dev.localhost:8080,mirror.dev.localhost:8080`. All entries
+  share the run's one commissioned pair.
 - Leave `qits.artifacts.npm.hosted-url` / `qits.artifacts.npm.proxy-url` and
   `qits.artifacts.maven.registry-url` alone on a deployment where
   qits-artifacts answers to its usual alias: they are reached **from a step container**, on

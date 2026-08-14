@@ -67,6 +67,9 @@ public class RunCommissioningTest {
     launcher.cpus = "2";
     launcher.artifactsRegistryHost = "qits-artifacts:8080";
     launcher.artifactsImageRepository = "qits";
+    // The shipped default: the push registry alone, which is what the key's own default expression
+    // resolves to. The widened case is its own test below.
+    launcher.dockerAuthHosts = List.of("qits-artifacts:8080");
     launcher.artifactsNpmHostedUrl = "http://qits-artifacts:8080/artifacts/npm/npm/";
     launcher.artifactsNpmProxyUrl = "http://qits-artifacts:8080/artifacts/npm/npmjs/";
     launcher.artifactsMavenRegistryUrl = "http://qits-artifacts:8080/artifacts/maven/maven";
@@ -147,6 +150,49 @@ public class RunCommissioningTest {
     // --secret id=…,env=QITS_COMMISSIONED_CLIENT_SECRET writes no layer, where a --build-arg would.
     assertEquals("run-client-1", env.get("QITS_COMMISSIONED_CLIENT_ID"));
     assertEquals("run-s3cr3t-1", env.get("QITS_COMMISSIONED_CLIENT_SECRET"));
+  }
+
+  @Test
+  public void everyConfiguredHostGetsAnEntryAndTheyShareTheOnePair() {
+    // Post-flip a step pulls its base image `FROM mirror.dev.localhost:8080/...` and pushes to the
+    // registry vhost. The docker client picks a login BY HOSTNAME, so a document naming only the
+    // push registry leaves the pull unauthenticated and the build dies on a 401 no pipeline
+    // mentions. One entry per host, one commissioned identity behind all of them.
+    CiDaemonLauncher launcher = launcher(idp.runCommissions(PATIENCE));
+    launcher.dockerAuthHosts = List.of("registry.dev.localhost:8080", "mirror.dev.localhost:8080");
+
+    String document =
+        launcher.buildWorkloadSpec(step(RUN, 1, true)).spec().env().get("QITS_CI_REGISTRY_AUTH_CONFIG");
+
+    String auth =
+        Base64.getEncoder()
+            .encodeToString("run-client-1:run-s3cr3t-1".getBytes(StandardCharsets.UTF_8));
+    assertEquals(
+        "{\"auths\":{\"registry.dev.localhost:8080\":{\"auth\":\""
+            + auth
+            + "\"},\"mirror.dev.localhost:8080\":{\"auth\":\""
+            + auth
+            + "\"}}}",
+        document);
+    // Still one commission: the hosts are vhosts of one platform and the credential is one identity
+    // at one idp, so widening the document must not widen what is minted.
+    assertEquals(1, idp.posted.size());
+  }
+
+  @Test
+  public void aRepeatedOrBlankHostIsNotASecondEntry() {
+    // A duplicate would be a duplicate JSON key — legal and useless — and a blank one an entry for
+    // the empty host. Both are config slips rather than requests.
+    CiDaemonLauncher launcher = launcher(idp.runCommissions(PATIENCE));
+    launcher.dockerAuthHosts = List.of("qits-artifacts:8080", " ", "qits-artifacts:8080");
+
+    String document =
+        launcher.buildWorkloadSpec(step(RUN, 1, true)).spec().env().get("QITS_CI_REGISTRY_AUTH_CONFIG");
+
+    String auth =
+        Base64.getEncoder()
+            .encodeToString("run-client-1:run-s3cr3t-1".getBytes(StandardCharsets.UTF_8));
+    assertEquals("{\"auths\":{\"qits-artifacts:8080\":{\"auth\":\"" + auth + "\"}}}", document);
   }
 
   @Test
