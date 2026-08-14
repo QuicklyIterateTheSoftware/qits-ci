@@ -6,6 +6,7 @@ import eu.wohlben.qits.ci.persistence.CiScmReleaseRepository;
 import eu.wohlben.qits.ci.persistence.CiStepRepository;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.inject.Inject;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 
 /**
@@ -27,6 +28,7 @@ public abstract class CiTestSupport {
   @Inject protected FakeCiStepRunner fakeRunner;
   @Inject protected FakeCiConfigSource fakeConfig;
   @Inject protected FakeCandidateRepos fakeCandidates;
+  @Inject protected CiRunService runService;
 
   /**
    * Drop everything this test thread has already loaded, so the next read really goes to the
@@ -54,6 +56,9 @@ public abstract class CiTestSupport {
             });
     fakeRunner.reset();
     fakeConfig.reset();
+    // No patience by default: a test that stages an unreachable git host asserts the decision, not
+    // the shipped five minutes of sitting out a redeploy. The retry test arms its own schedule.
+    runService.unreachableRetryDelays(List.of());
     // Empty by default, so no suite evaluates a trigger it did not ask for — the same reason the
     // eventstream module's recording raw listeners want nothing until a test arms them.
     fakeCandidates.reset();

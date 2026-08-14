@@ -383,11 +383,44 @@ public class CiRunServiceTest extends CiTestSupport {
 
   @Test
   public void unreachableGitHostRecordsNothing() {
+    // The retry schedule is empty here (CiTestSupport), so the first unreachable answer decides.
     repoId = UUID.randomUUID().toString();
     sha = "0123456789abcdef";
     fakeConfig.put(repoId, sha, ConfigLookup.unreachable());
     service.execute(repoId, "main", sha);
     assertEquals(0, service.runsFor(repoId).size());
+  }
+
+  @Test
+  public void anUnreachableGitHostIsRetriedAndTheRunSurvivesTheBounce() {
+    // The 2026-08-13 loss: the deploy train bounced the git host, the very next push's config read
+    // failed once, and the discarded row cost the whole deploy — the announcing event was already
+    // consumed. Patience is the fix, so two failures followed by an answer must build green.
+    service.unreachableRetryDelays(List.of(java.time.Duration.ZERO, java.time.Duration.ZERO));
+    repoId = UUID.randomUUID().toString();
+    sha = "0123456789abcdef";
+    fakeConfig.put(repoId, sha, ConfigLookup.unreachable());
+    fakeConfig.put(repoId, sha, ConfigLookup.unreachable());
+    fakeConfig.put(repoId, sha, ConfigLookup.found(CONFIG_TWO_STEPS));
+
+    service.execute(repoId, "main", sha);
+
+    assertEquals(CiRunStatus.SUCCESS, soleRun().status);
+    assertEquals(3, fakeConfig.configReads().stream().filter((repoId + "@" + sha)::equals).count());
+  }
+
+  @Test
+  public void aGitHostStillUnreachableAfterThePatienceRecordsNothing() {
+    // The schedule ran out and every read failed: the old decision stands, just later.
+    service.unreachableRetryDelays(List.of(java.time.Duration.ZERO));
+    repoId = UUID.randomUUID().toString();
+    sha = "0123456789abcdef";
+    fakeConfig.put(repoId, sha, ConfigLookup.unreachable());
+
+    service.execute(repoId, "main", sha);
+
+    assertEquals(0, service.runsFor(repoId).size());
+    assertEquals(2, fakeConfig.configReads().stream().filter((repoId + "@" + sha)::equals).count());
   }
 
   @Test

@@ -127,8 +127,10 @@ import org.jboss.logging.Logger;
  * <ul>
  *   <li>no config file ⇒ the row is <b>discarded</b> (opt-in: a repository that declares no pipeline
  *       must not accumulate a row per push);
- *   <li>git host unreachable ⇒ <b>discarded</b>, warn-logged (a read failure must not invent a gate,
- *       and inventing one is exactly what leaving a red row behind would be);
+ *   <li>git host unreachable ⇒ the read is retried through {@link #UNREACHABLE_RETRY_DELAYS} first
+ *       — long enough to sit out a git-host redeploy, which is when this legitimately happens —
+ *       and only then <b>discarded</b>, warn-logged (a read failure must not invent a gate, and
+ *       inventing one is exactly what leaving a red row behind would be);
  *   <li>the repository no longer holds the commit ⇒ <b>discarded</b>, including when the discovery
  *       happens later, in a step container's own checkout — the push it belonged to no longer
  *       exists, so a red run would blame a commit whose build was never broken;
@@ -247,6 +249,37 @@ public class CiRunService {
    * in-flight run anyway.
    */
   private final Set<String> cancelled = ConcurrentHashMap.newKeySet();
+
+  /**
+   * How long the worker keeps re-asking an unreachable git host for a pushed commit's config before
+   * it decides. The schedule has to outlast a git-host <em>redeploy</em>, not a blip: the deploy
+   * train bounces the git host and the next push's config read lands seconds later on a dead pooled
+   * connection (2026-08-13, qits-containers — the discarded row cost the whole deploy, because the
+   * announcing event was already consumed when the row was accepted). A full stop-first redeploy of
+   * the git host has been observed to take over two minutes, so the schedule sums to almost five.
+   */
+  static final List<Duration> UNREACHABLE_RETRY_DELAYS =
+      List.of(
+          Duration.ofSeconds(2),
+          Duration.ofSeconds(5),
+          Duration.ofSeconds(10),
+          Duration.ofSeconds(20),
+          Duration.ofSeconds(30),
+          Duration.ofSeconds(45),
+          Duration.ofSeconds(60),
+          Duration.ofSeconds(60),
+          Duration.ofSeconds(60));
+
+  /** The schedule above, per instance so the suite can trade patience for speed. */
+  private List<Duration> unreachableRetryDelays = UNREACHABLE_RETRY_DELAYS;
+
+  /**
+   * A method rather than a bare field, and that is load-bearing: this bean is normal-scoped, so
+   * tests hold a client proxy — a field write would land on the proxy and change nothing.
+   */
+  void unreachableRetryDelays(List<Duration> delays) {
+    unreachableRetryDelays = List.copyOf(delays);
+  }
 
   private ExecutorService worker;
 
@@ -531,6 +564,33 @@ public class CiRunService {
   }
 
   /**
+   * The config read, held through the window a git-host redeploy opens. {@code UNREACHABLE} is the
+   * only answer retried: {@code ABSENT} and {@code GONE} are definite answers from a host that is
+   * up, and the caller must decide on them at once. A cancellation ends the patience early — the
+   * caller's switch then acts on whatever the last read said, exactly as if the schedule had run
+   * out.
+   */
+  private ConfigLookup readConfigPatiently(CiRun run) {
+    ConfigLookup lookup = configSource.read(run.repoId, run.branch, run.commitSha);
+    for (Duration delay : unreachableRetryDelays) {
+      if (lookup.status() != ConfigLookup.Status.UNREACHABLE || cancelled.contains(run.id)) {
+        return lookup;
+      }
+      LOG.warnf(
+          "Could not read CI config for %s@%s — retrying in %ds",
+          run.repoId, run.commitSha, delay.toSeconds());
+      try {
+        Thread.sleep(delay.toMillis());
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        return lookup;
+      }
+      lookup = configSource.read(run.repoId, run.branch, run.commitSha);
+    }
+    return lookup;
+  }
+
+  /**
    * What an event-triggered run's step containers see, and the whole of it.
    *
    * <p>The payload goes in <b>verbatim</b>, as the canonical JSON qits-events stored — no per-field
@@ -602,7 +662,7 @@ public class CiRunService {
     String branch = run.branch;
     String sha = run.commitSha;
 
-    ConfigLookup lookup = configSource.read(repoId, branch, sha);
+    ConfigLookup lookup = readConfigPatiently(run);
     switch (lookup.status()) {
       case ABSENT -> {
         // Opt-in: the repository declares no pipeline for this push, so it gets no row. The row
@@ -619,8 +679,12 @@ public class CiRunService {
       }
       case UNREACHABLE -> {
         // A read failure must not invent a gate, and leaving a red row behind is precisely that:
-        // the commit is very likely fine and this process simply could not ask.
-        LOG.warnf("Could not fetch %s from the git host — no CI run recorded for %s", sha, repoId);
+        // the commit is very likely fine and this process simply could not ask. The read above has
+        // already been patient through a whole git-host redeploy, so by here the host is properly
+        // down, not bouncing.
+        LOG.warnf(
+            "Could not fetch %s from the git host after %d retries — no CI run recorded for %s",
+            sha, unreachableRetryDelays.size(), repoId);
         discardRun(run.id);
         return;
       }
