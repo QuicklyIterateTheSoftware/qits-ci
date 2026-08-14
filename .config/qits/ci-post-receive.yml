@@ -116,7 +116,11 @@ steps:
         --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
         -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
-      docker rmi "$ref" || true
+      # NO `docker rmi "$ref"`: on a CI host it frees nothing — the layers stay in the builder's
+      # cache either way — while under the containerd image store it drops the last reference to
+      # content a concurrent build of this same Dockerfile may still be resolving. Two builds of
+      # this one Dockerfile do run concurrently, main's and environment/dev's, which is the race
+      # that broke the release of 2026-08-11.
 
   - image: qits/build-images/node-base:latest
     branches:
