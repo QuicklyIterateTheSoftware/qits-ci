@@ -13,11 +13,10 @@ import eu.wohlben.qits.containers.client.ContainersWire.Security;
 import eu.wohlben.qits.containers.client.ContainersWire.Spec;
 import eu.wohlben.qits.ci.daemonhost.CiDaemonLauncher.LaunchSpec;
 import eu.wohlben.qits.ci.error.BadRequestException;
-import java.util.Base64;
+import eu.wohlben.qits.ci.idp.StubIdp;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -61,23 +60,17 @@ public class CiDaemonLauncherTest {
     launcher.cpus = "2";
     launcher.artifactsRegistryHost = "qits-artifacts:8080";
     launcher.artifactsImageRepository = "qits";
+    launcher.dockerAuthHosts = List.of("qits-artifacts:8080");
     launcher.artifactsNpmHostedUrl = "http://qits-artifacts:8080/artifacts/npm/npm/";
     launcher.artifactsNpmProxyUrl = "http://qits-artifacts:8080/artifacts/npm/npmjs/";
     launcher.artifactsMavenRegistryUrl = "http://qits-artifacts:8080/artifacts/maven/maven";
     launcher.artifactsDocsUrl = "http://qits-artifacts:8080/artifacts/docs/docs";
     launcher.workspacesUrl = "http://qits-workspaces:8080";
-    // The shipped state of the push credential: two keys nobody set. Written out rather than left
-    // null, because "unset" is the case half of this file is about.
-    launcher.registryAuthClientId = Optional.empty();
-    launcher.registryAuthClientSecret = Optional.empty();
-    return launcher;
-  }
-
-  /** The same launcher on a deployment that configured a registry push credential. */
-  private CiDaemonLauncher launcherWithRegistryAuth() {
-    CiDaemonLauncher launcher = launcher();
-    launcher.registryAuthClientId = Optional.of("dev-qits-ci");
-    launcher.registryAuthClientSecret = Optional.of("push-s3cr3t");
+    // The shipped state of the push credential: an oidc client that is off, so nothing is
+    // commissioned and nothing is injected. Written out rather than left null, because "this
+    // deployment cannot commission" is the case half of this file is about — the commissioned path
+    // itself is RunCommissioningTest's, against a real stub idp.
+    launcher.commissions = StubIdp.disabledCommissions();
     return launcher;
   }
 
@@ -204,15 +197,45 @@ public class CiDaemonLauncherTest {
     // image's CLI looks at — which is why there is no path in this request at all any more.
     assertTrue(withDocker.spec().hostDockerSocket());
 
-    // And it is the ONLY difference: the sandbox does not relax for a publish step, because
-    // capDropAll and noNewPrivileges cost a socket client nothing and keeping them unconditional is
-    // what keeps them meaning something for the steps that never opt in. Asserted as an
-    // exactly-one-field diff rather than as two spot checks — the same claim the old argv test made
-    // by deleting two list elements and comparing the rest.
+    // And the sandbox does not relax for a publish step: capDropAll and noNewPrivileges cost a
+    // socket client nothing and keeping them unconditional is what keeps them meaning something for
+    // the steps that never opt in. The diff is the socket plus the two BuildKit variables, which
+    // are a build MODE rather than a privilege — asserted as an exact residue rather than as spot
+    // checks, the same claim the old argv test made by deleting list elements and comparing the
+    // rest.
     assertNotEquals(plain, withDocker);
-    assertEquals(plain, new EnsureRequest(withoutSocket(withDocker.spec()), withDocker.policy(), withDocker.recreate()));
+    assertEquals(
+        plain,
+        new EnsureRequest(
+            withoutSocket(withoutBuildKit(withDocker.spec())),
+            withDocker.policy(),
+            withDocker.recreate()));
     assertTrue(withDocker.spec().security().capDropAll());
     assertTrue(withDocker.spec().security().noNewPrivileges());
+  }
+
+  /** The two BuildKit variables taken back out, so the residue is comparable to a plain step's. */
+  private static Spec withoutBuildKit(Spec original) {
+    Map<String, String> env = new LinkedHashMap<>(original.env());
+    env.remove("DOCKER_BUILDKIT");
+    env.remove("BUILDX_NO_DEFAULT_ATTESTATIONS");
+    return new Spec(
+        original.image(),
+        original.entrypoint(),
+        original.args(),
+        env,
+        original.extraLabels(),
+        original.network(),
+        original.aliases(),
+        original.addHosts(),
+        original.volumeMounts(),
+        original.sharedMounts(),
+        original.hostDockerSocket(),
+        original.security(),
+        original.pullPolicy(),
+        original.explicitName(),
+        original.user(),
+        original.init());
   }
 
   /** The one field under test, put back to what a step that declared nothing would have sent. */
@@ -362,90 +385,55 @@ public class CiDaemonLauncherTest {
     }
   }
 
-  /** The one document a configured deployment hands a publishing step, written out. */
-  private static String expectedAuthConfig() {
-    String auth =
-        Base64.getEncoder()
-            .encodeToString("dev-qits-ci:push-s3cr3t".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-    return "{\"auths\":{\"qits-artifacts:8080\":{\"auth\":\"" + auth + "\"}}}";
-  }
-
   @Test
-  public void aConfiguredCredentialReachesAPublishingStepAsAFileTheBootstrapWrites() {
-    Map<String, String> env = launcherWithRegistryAuth().buildWorkloadSpec(publishing()).spec().env();
-
-    // The directory, which is what DOCKER_CONFIG means to the docker CLI — it reads config.json
-    // inside it — and which is under /tmp rather than in the checkout, so a `docker build` from
-    // /workspace can never carry the credential into a published image.
-    assertEquals("/tmp/qits-ci-registry-auth", env.get("DOCKER_CONFIG"));
-    assertTrue(env.get("DOCKER_CONFIG").startsWith("/tmp/"), env.get("DOCKER_CONFIG"));
-
-    // And the document, byte for byte: the registry it names is the same address the step reads as
-    // $QITS_REGISTRY, and the credential is the CLI's own base64 of id:secret.
-    assertEquals(expectedAuthConfig(), env.get("QITS_CI_REGISTRY_AUTH_CONFIG"));
-    assertEquals(env.get("QITS_REGISTRY"), "qits-artifacts:8080");
-
-    // The bootstrap is what turns the value into the file, from the two variables and nothing else.
+  public void theBootstrapIsWhatTurnsACredentialIntoAFileAndItDoesItBeforeTheDaemonRuns() {
+    // The document itself is commissioned per run and asserted in RunCommissioningTest; what is
+    // pinned here is the mechanism, which is a property of BOOTSTRAP alone: two variables, a file
+    // under /tmp — never in the checkout, so a `docker build` from /workspace can never carry the
+    // credential into a published image — and written before the daemon becomes PID 1, or the step
+    // would run before the file existed.
     String bootstrap = CiDaemonLauncher.BOOTSTRAP;
     assertTrue(bootstrap.contains("\"$DOCKER_CONFIG/config.json\""), bootstrap);
     assertTrue(bootstrap.contains("$QITS_CI_REGISTRY_AUTH_CONFIG"), bootstrap);
-    // Written before the daemon becomes PID 1, or the step would run before the file existed.
+    assertTrue(CiDaemonLauncher.REGISTRY_AUTH_DIR.startsWith("/tmp/"), CiDaemonLauncher.REGISTRY_AUTH_DIR);
     assertTrue(
         bootstrap.indexOf("config.json") < bootstrap.indexOf("exec /tmp/qits-ci-daemon"), bootstrap);
   }
 
   @Test
-  public void aStepWithoutTheSocketNeverSeesTheCredential() {
-    // Scoped to the one step that can push. A step with no socket cannot use a login, and a secret
-    // in the environment of a container running repo-authored code is a secret that repo can read —
-    // so the narrow scope is the whole of what keeps this credential where it is needed.
-    Map<String, String> env = launcherWithRegistryAuth().buildWorkloadSpec(spec).spec().env();
-    assertEquals(contractEnv(), env);
-    assertFalse(env.containsKey("DOCKER_CONFIG"));
-    assertFalse(env.containsKey("QITS_CI_REGISTRY_AUTH_CONFIG"));
+  public void aDeploymentThatCannotCommissionSendsExactlyWhatItAlwaysSent() {
+    // The byte-identical case, and the reason the fallback arm exists: a registry that answers an
+    // anonymous push is the shape this platform shipped with, and a deployment with no oidc client
+    // must not gain a credential variable, a file or a directory. What a docker step does gain is
+    // the two BuildKit variables, which are a build mode rather than a credential.
+    assertEquals(contractEnv(), launcher().buildWorkloadSpec(spec).spec().env());
+
+    Map<String, String> publishingEnv = launcher().buildWorkloadSpec(publishing()).spec().env();
+    Map<String, String> expected = contractEnv();
+    expected.put("DOCKER_BUILDKIT", "1");
+    expected.put("BUILDX_NO_DEFAULT_ATTESTATIONS", "1");
+    assertEquals(expected, publishingEnv);
+    assertFalse(publishingEnv.containsKey("DOCKER_CONFIG"));
+    assertFalse(publishingEnv.containsKey("QITS_CI_REGISTRY_AUTH_CONFIG"));
+    assertFalse(publishingEnv.containsKey("QITS_COMMISSIONED_CLIENT_ID"));
+    assertFalse(publishingEnv.containsKey("QITS_COMMISSIONED_CLIENT_SECRET"));
   }
 
   @Test
-  public void anUnconfiguredDeploymentSendsExactlyWhatItAlwaysSent() {
-    // The byte-identical case: a registry that answers an anonymous push is the shape this platform
-    // shipped with, and a deployment on it must not gain a variable, a file or a directory.
-    for (LaunchSpec each : List.of(spec, publishing())) {
-      Map<String, String> env = launcher().buildWorkloadSpec(each).spec().env();
-      assertEquals(contractEnv(), env);
-      assertFalse(env.containsKey("DOCKER_CONFIG"));
-      assertFalse(env.containsKey("QITS_CI_REGISTRY_AUTH_CONFIG"));
-    }
-  }
+  public void onlyADockerStepIsToldToUseBuildKit() {
+    // Every step image ships buildx as of qits-oci 2026.814.110556, so a legacy build is a SILENT
+    // FALLBACK rather than an image with no choice — and a silent fallback is what quietly drops a
+    // --secret mount. DOCKER_BUILDKIT=1 makes it a loud error instead. The second variable keeps a
+    // push a single manifest: buildx attaches provenance and SBOM attestations by default, and the
+    // platform registry expects one manifest per tag.
+    Map<String, String> publishingEnv = launcher().buildWorkloadSpec(publishing()).spec().env();
+    assertEquals("1", publishingEnv.get("DOCKER_BUILDKIT"));
+    assertEquals("1", publishingEnv.get("BUILDX_NO_DEFAULT_ATTESTATIONS"));
 
-  @Test
-  public void halfACredentialIsNoCredential() {
-    // A config mistake must read as "nothing was configured" rather than as an authentication
-    // failure deep inside somebody's build, so either half missing writes nothing.
-    for (String[] half :
-        new String[][] {{"dev-qits-ci", ""}, {"", "push-s3cr3t"}, {"dev-qits-ci", "   "}}) {
-      CiDaemonLauncher launcher = launcher();
-      launcher.registryAuthClientId = Optional.of(half[0]);
-      launcher.registryAuthClientSecret = Optional.of(half[1]);
-      Map<String, String> env = launcher.buildWorkloadSpec(publishing()).spec().env();
-      assertEquals(contractEnv(), env, "half a credential must send none: " + List.of(half));
-    }
-  }
-
-  @Test
-  public void theSecretIsNeverASubstringOfAnythingSent() {
-    // It leaves this process base64-encoded inside one JSON value and in no other form — not in the
-    // bootstrap, not in an argv, not in a label, not in a second environment variable. The launcher
-    // logs no environment map at all, which is why there is nothing here to mask.
-    EnsureRequest request = launcherWithRegistryAuth().buildWorkloadSpec(publishing());
-    for (Map.Entry<String, String> entry : request.spec().env().entrySet()) {
-      assertFalse(
-          entry.getValue().contains("push-s3cr3t"),
-          "the raw secret must not appear in the environment: " + entry.getKey());
-    }
-    assertFalse(String.valueOf(request.spec().args()).contains("push-s3cr3t"));
-    assertFalse(String.valueOf(request.spec().entrypoint()).contains("push-s3cr3t"));
-    assertFalse(String.valueOf(request.spec().extraLabels()).contains("push-s3cr3t"));
-    assertFalse(CiDaemonLauncher.BOOTSTRAP.contains("push-s3cr3t"));
+    // And no step that cannot build gets an opinion about how builds are done.
+    Map<String, String> plainEnv = launcher().buildWorkloadSpec(spec).spec().env();
+    assertFalse(plainEnv.containsKey("DOCKER_BUILDKIT"));
+    assertFalse(plainEnv.containsKey("BUILDX_NO_DEFAULT_ATTESTATIONS"));
   }
 
   /**

@@ -9,8 +9,8 @@
 #   2. build this repo's docker/Dockerfile, whose builder stage packages that already-built bundle
 #      and never runs an install.
 #
-# THE TWO DOCKER FLAGS on half two. The builder stage resolves jars published only to the
-# platform's own Maven repository, so it has to reach it:
+# THE DOCKER FLAGS on half two. The builder stage resolves jars published only to the platform's own
+# Maven repository, so it has to reach it — and, once those reads are gated, authenticate to it:
 #
 #   --network host        NOT a custom network: buildkit — the builder format the platform targets,
 #                         because a swarm cannot assume the legacy builder — refuses custom networks
@@ -20,6 +20,8 @@
 #                         so no address is stated here. The Dockerfile turns it into
 #                         -Dqits.maven.repository.url, which the pom's `qits-maven` repository reads
 #                         and .qits-maven-settings.xml mirrors.
+#   --secret (twice)      the run's commissioned idp client, reaching ONE `RUN`'s environment and no
+#                         layer — which is why it is not a third build arg. See the Dockerfile.
 #
 # Half one stays out of the image build anyway: the client's install is the step container's job,
 # where the lockfile origin swap and the `npm_config_*` environment already live. That is why this
@@ -111,12 +113,25 @@ steps:
       npm run build
       cd -
 
+      # THE CREDENTIAL IS A SECRET MOUNT AND NEVER A BUILD ARG — an arg is recorded in the image
+      # history, and this image is pullable. The launcher injects the run's commissioned idp client
+      # as $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET; these two flags hand that
+      # pair to the mounts on the Dockerfile's mvnw RUN, which is the only place it exists.
+      # Unconditional on purpose: a missing env source is NOT an error — measured on buildx v0.36.1,
+      # `--secret id=x,env=DOES_NOT_EXIST` builds green and the mounted variable is simply unset —
+      # so these lines do nothing at all until a run carries the pair.
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-ci:$QITS_CI_SHA"
       docker build --network host \
         --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
+        --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
+        --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
         -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
-      docker rmi "$ref" || true
+      # NO `docker rmi "$ref"`: on a CI host it frees nothing — the layers stay in the builder's
+      # cache either way — while under the containerd image store it drops the last reference to
+      # content a concurrent build of this same Dockerfile may still be resolving. Two builds of
+      # this one Dockerfile do run concurrently, main's and environment/dev's, which is the race
+      # that broke the release of 2026-08-11.
 
   - image: qits/build-images/node-base:latest
     branches:

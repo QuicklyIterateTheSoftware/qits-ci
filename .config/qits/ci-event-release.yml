@@ -110,9 +110,19 @@ steps:
       cd -
 
       # --- half two: the image ------------------------------------------------------------------
+      # Same doctrine for the credential: a SECRET MOUNT, never a build arg, because an arg is
+      # recorded in the history of a pullable image. The launcher injects the run's commissioned idp
+      # client as $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET. Unconditional — a
+      # missing env source is NOT a buildx error, measured on v0.36.1 — so it is inert until a run
+      # carries the pair. ci-post-receive.yml has the same two flags; keep them matched.
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-ci:$QITS_CI_SHA"
       docker build --network host \
         --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
+        --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
+        --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
         -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
-      docker rmi "$ref" || true
+      # NO `docker rmi "$ref"`: on a CI host it frees nothing — the layers stay in the builder's
+      # cache either way — while under the containerd image store it drops the last reference to
+      # content a concurrent build of this same Dockerfile may still be resolving, which is the
+      # race that broke the release of 2026-08-11.
