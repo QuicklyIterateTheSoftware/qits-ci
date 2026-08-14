@@ -34,7 +34,7 @@
          and the mandatory -Dqits.variant=oauth|forwardauth|local auth profiles. -->
     <groupId>eu.wohlben.qits</groupId>
     <artifactId>qits-ci</artifactId>
-    <version>2026.812.184140</version>
+    <version>2026.814.74449</version>
     <packaging>pom</packaging>
     <name>qits-ci</name>
 
@@ -85,7 +85,7 @@
              should fail. -->
         <qits.db-core.version>2026.811.165001</qits.db-core.version>
         <qits.arch-rules.version>2026.811.165001</qits.arch-rules.version>
-        <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
+        <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>

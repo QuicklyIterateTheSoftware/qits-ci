@@ -378,14 +378,27 @@ The build and the push both happen in the *host's* daemon — the step's CLI is 
 registry address must resolve and be trusted **from the docker host**, not from this process. The
 step image supplies the docker CLI; the platform supplies the socket and the two coordinates.
 
+**A registry that wants a login gets one, and the step's script says nothing about it.** An
+in-network registry answers an anonymous push; one behind the edge answers it with a docker Bearer
+challenge, and the CLI then exchanges a *stored* username/password for a short-lived token at the
+realm the challenge names — by itself, with no `docker login` in the pipeline. So a deployment sets
+`qits.ci.registry-auth.client-id` / `…client-secret` (a qits-idp client with push rights) and every
+step that declared `docker: true` is handed `$DOCKER_CONFIG` pointing at a directory holding the
+`config.json` the CLI reads. **Both keys or neither**, and a step without the socket is handed
+nothing — it cannot push, so it has no use for a credential. Set neither and a step container's
+environment is exactly what it always was, which is the case a deployment on an anonymous registry
+stays in. The file lives under `/tmp`, never in the checkout, so it can never reach a
+`docker build` context.
+
 **Publishing an npm package needs none of that.** `$QITS_NPM_REGISTRY_URL` (hosted — where `@qits/*`
 is published) and `$QITS_NPM_PROXY_URL` (the pull-through cache of npmjs every install resolves
 through) are injected into every step container alongside the two above, and the caveat on them is
 the **opposite** one: they are dialled by the *step container itself* over the shared network, so an
 npm publish is an ordinary HTTP step with no socket, no `docker: true` and no root-equivalence. The
 consequence for a deployment is that the value which is right for these is the in-network alias — a
-host-published mapping substituted for `$QITS_REGISTRY` (the local stack's `localhost:8081`) must
-**not** be substituted for these, because a step container has no such address.
+host-published mapping substituted for `$QITS_REGISTRY` (the local stack's
+`registry.dev.localhost:8080`) must **not** be substituted for these, because a step container has
+no such address.
 
 A step writes its own `~/.npmrc` from the two, so no repository ever spells a registry address:
 
@@ -571,8 +584,8 @@ triggering surface is unchanged — a tag push is not a CI trigger and deliberat
 - **`name`** is the **exact package name**, non-blank. A scoped npm name has to be quoted — `@` is
   a reserved YAML indicator, so `name: "@qits/ui-components"`. A docker name is **unqualified**
   (`qits/qits-stt`, no registry host): the registry is `qits-artifacts:8080` inside a step container
-  and `localhost:8081` to qits-ci and qits-cd, so no qualified reference is portable and the
-  consumer is the one that knows which address it stands at.
+  and `registry.dev.localhost:8080` to qits-ci and qits-cd, so no qualified reference is portable
+  and the consumer is the one that knows which address it stands at.
   A Maven name is an unqualified `groupId:artifactId` GAV prefix; the event's `version` supplies
   the third coordinate and the consumer supplies the repository URL.
 - Everything about it is strict, the way the rest of this file is: an empty list, an unknown type, a
@@ -1011,6 +1024,15 @@ a repository's own listing will show.
   registry speaks plain HTTP the daemon also needs it in `insecure-registries`. Same class of fact as
   the socket mount, and now the same socket serves both. qits-cd ships the same two keys and derives
   its pull references from them, so the two services must agree.
+- **Set `qits.ci.registry-auth.client-id` / `…client-secret` only if that registry refuses an
+  anonymous push.** They are a qits-idp client id and secret with push rights, and when **both** are
+  set every step declaring `docker: true` gets `$DOCKER_CONFIG` and a `config.json` holding
+  `{"auths":{"<qits.artifacts.registry-host>":{"auth":"<base64 id:secret>"}}}` — which is all the
+  docker CLI needs to answer the edge's Bearer challenge on its own. Either one unset ships the
+  behaviour that shipped before: no file, no variable, an anonymous push. Reads stay anonymous
+  either way, so a deployment pulling from that registry configures nothing. The credential is
+  readable by the step's own script, which runs repo-authored code — scope the client to pushing and
+  nothing else.
 - Leave `qits.artifacts.npm.hosted-url` / `qits.artifacts.npm.proxy-url` and
   `qits.artifacts.maven.registry-url` alone on a deployment where
   qits-artifacts answers to its usual alias: they are reached **from a step container**, on

@@ -24,8 +24,8 @@ import java.util.UUID;
  * field it would have to invent is worse than a field a consumer looks up. No {@code branch} — a
  * release is a tag, and the branch it was cut from is the SCM event's business. No registry host on
  * a docker {@code packageName}: the registry is {@code qits-artifacts:8080} inside a step container
- * and {@code localhost:8081} to qits-ci and qits-cd, so no qualified reference is portable and the
- * name travels unqualified ({@code qits/qits-stt}) for the consumer to qualify.
+ * and {@code registry.dev.localhost:8080} to qits-ci and qits-cd, so no qualified reference is
+ * portable and the name travels unqualified ({@code qits/qits-stt}) for the consumer to qualify.
  *
  * <p><b>{@code packageType} is a plain String and its values are {@code npm}, {@code maven}, {@code
  * docker} and {@code daemon}</b> — the last being a platform daemon binary such as {@code

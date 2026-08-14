@@ -13,9 +13,11 @@ import eu.wohlben.qits.containers.client.ContainersWire.Security;
 import eu.wohlben.qits.containers.client.ContainersWire.Spec;
 import eu.wohlben.qits.ci.daemonhost.CiDaemonLauncher.LaunchSpec;
 import eu.wohlben.qits.ci.error.BadRequestException;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -64,6 +66,18 @@ public class CiDaemonLauncherTest {
     launcher.artifactsMavenRegistryUrl = "http://qits-artifacts:8080/artifacts/maven/maven";
     launcher.artifactsDocsUrl = "http://qits-artifacts:8080/artifacts/docs/docs";
     launcher.workspacesUrl = "http://qits-workspaces:8080";
+    // The shipped state of the push credential: two keys nobody set. Written out rather than left
+    // null, because "unset" is the case half of this file is about.
+    launcher.registryAuthClientId = Optional.empty();
+    launcher.registryAuthClientSecret = Optional.empty();
+    return launcher;
+  }
+
+  /** The same launcher on a deployment that configured a registry push credential. */
+  private CiDaemonLauncher launcherWithRegistryAuth() {
+    CiDaemonLauncher launcher = launcher();
+    launcher.registryAuthClientId = Optional.of("dev-qits-ci");
+    launcher.registryAuthClientSecret = Optional.of("push-s3cr3t");
     return launcher;
   }
 
@@ -348,6 +362,92 @@ public class CiDaemonLauncherTest {
     }
   }
 
+  /** The one document a configured deployment hands a publishing step, written out. */
+  private static String expectedAuthConfig() {
+    String auth =
+        Base64.getEncoder()
+            .encodeToString("dev-qits-ci:push-s3cr3t".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    return "{\"auths\":{\"qits-artifacts:8080\":{\"auth\":\"" + auth + "\"}}}";
+  }
+
+  @Test
+  public void aConfiguredCredentialReachesAPublishingStepAsAFileTheBootstrapWrites() {
+    Map<String, String> env = launcherWithRegistryAuth().buildWorkloadSpec(publishing()).spec().env();
+
+    // The directory, which is what DOCKER_CONFIG means to the docker CLI — it reads config.json
+    // inside it — and which is under /tmp rather than in the checkout, so a `docker build` from
+    // /workspace can never carry the credential into a published image.
+    assertEquals("/tmp/qits-ci-registry-auth", env.get("DOCKER_CONFIG"));
+    assertTrue(env.get("DOCKER_CONFIG").startsWith("/tmp/"), env.get("DOCKER_CONFIG"));
+
+    // And the document, byte for byte: the registry it names is the same address the step reads as
+    // $QITS_REGISTRY, and the credential is the CLI's own base64 of id:secret.
+    assertEquals(expectedAuthConfig(), env.get("QITS_CI_REGISTRY_AUTH_CONFIG"));
+    assertEquals(env.get("QITS_REGISTRY"), "qits-artifacts:8080");
+
+    // The bootstrap is what turns the value into the file, from the two variables and nothing else.
+    String bootstrap = CiDaemonLauncher.BOOTSTRAP;
+    assertTrue(bootstrap.contains("\"$DOCKER_CONFIG/config.json\""), bootstrap);
+    assertTrue(bootstrap.contains("$QITS_CI_REGISTRY_AUTH_CONFIG"), bootstrap);
+    // Written before the daemon becomes PID 1, or the step would run before the file existed.
+    assertTrue(
+        bootstrap.indexOf("config.json") < bootstrap.indexOf("exec /tmp/qits-ci-daemon"), bootstrap);
+  }
+
+  @Test
+  public void aStepWithoutTheSocketNeverSeesTheCredential() {
+    // Scoped to the one step that can push. A step with no socket cannot use a login, and a secret
+    // in the environment of a container running repo-authored code is a secret that repo can read —
+    // so the narrow scope is the whole of what keeps this credential where it is needed.
+    Map<String, String> env = launcherWithRegistryAuth().buildWorkloadSpec(spec).spec().env();
+    assertEquals(contractEnv(), env);
+    assertFalse(env.containsKey("DOCKER_CONFIG"));
+    assertFalse(env.containsKey("QITS_CI_REGISTRY_AUTH_CONFIG"));
+  }
+
+  @Test
+  public void anUnconfiguredDeploymentSendsExactlyWhatItAlwaysSent() {
+    // The byte-identical case: a registry that answers an anonymous push is the shape this platform
+    // shipped with, and a deployment on it must not gain a variable, a file or a directory.
+    for (LaunchSpec each : List.of(spec, publishing())) {
+      Map<String, String> env = launcher().buildWorkloadSpec(each).spec().env();
+      assertEquals(contractEnv(), env);
+      assertFalse(env.containsKey("DOCKER_CONFIG"));
+      assertFalse(env.containsKey("QITS_CI_REGISTRY_AUTH_CONFIG"));
+    }
+  }
+
+  @Test
+  public void halfACredentialIsNoCredential() {
+    // A config mistake must read as "nothing was configured" rather than as an authentication
+    // failure deep inside somebody's build, so either half missing writes nothing.
+    for (String[] half :
+        new String[][] {{"dev-qits-ci", ""}, {"", "push-s3cr3t"}, {"dev-qits-ci", "   "}}) {
+      CiDaemonLauncher launcher = launcher();
+      launcher.registryAuthClientId = Optional.of(half[0]);
+      launcher.registryAuthClientSecret = Optional.of(half[1]);
+      Map<String, String> env = launcher.buildWorkloadSpec(publishing()).spec().env();
+      assertEquals(contractEnv(), env, "half a credential must send none: " + List.of(half));
+    }
+  }
+
+  @Test
+  public void theSecretIsNeverASubstringOfAnythingSent() {
+    // It leaves this process base64-encoded inside one JSON value and in no other form — not in the
+    // bootstrap, not in an argv, not in a label, not in a second environment variable. The launcher
+    // logs no environment map at all, which is why there is nothing here to mask.
+    EnsureRequest request = launcherWithRegistryAuth().buildWorkloadSpec(publishing());
+    for (Map.Entry<String, String> entry : request.spec().env().entrySet()) {
+      assertFalse(
+          entry.getValue().contains("push-s3cr3t"),
+          "the raw secret must not appear in the environment: " + entry.getKey());
+    }
+    assertFalse(String.valueOf(request.spec().args()).contains("push-s3cr3t"));
+    assertFalse(String.valueOf(request.spec().entrypoint()).contains("push-s3cr3t"));
+    assertFalse(String.valueOf(request.spec().extraLabels()).contains("push-s3cr3t"));
+    assertFalse(CiDaemonLauncher.BOOTSTRAP.contains("push-s3cr3t"));
+  }
+
   /**
    * <b>The run's own extras are written last and the platform's contract first.</b> Today the map is
    * the four {@code QITS_EVENT_*} of an event-triggered run and empty on every push, and none of it
@@ -457,6 +557,10 @@ public class CiDaemonLauncherTest {
     assertEquals(List.of("/bin/sh"), launcher().buildWorkloadSpec(spec).spec().entrypoint());
     // ...and the invariant the whole feature rests on: no repo-controlled code in a host argv.
     assertFalse(bootstrap.contains("bash -c"), bootstrap);
+    // No docker vocabulary either — this text runs no program of that name and never has. It does
+    // now write the push credential to $DOCKER_CONFIG, which is an environment variable the shell
+    // expands rather than a command, and the assertion below still says so because the variable is
+    // upper case and the program would not be.
     assertFalse(bootstrap.contains("docker"), bootstrap);
   }
 

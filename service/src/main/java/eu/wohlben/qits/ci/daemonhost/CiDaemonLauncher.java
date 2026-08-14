@@ -18,11 +18,14 @@ import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.TreeMap;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
@@ -144,6 +147,14 @@ public class CiDaemonLauncher {
    * fetch instead of letting a bare non-zero exit stand: by the time the host notices, the only
    * thing it can ask for is the tail {@link #destroyWithLogs} brings back.
    *
+   * <p><b>It is also where the registry push credential becomes a file.</b> The last block writes
+   * {@code $DOCKER_CONFIG/config.json} from {@code $QITS_CI_REGISTRY_AUTH_CONFIG} when both are set,
+   * which is how a step gets a small file that is <em>not</em> in the clone and therefore not in any
+   * build context — see {@link #REGISTRY_AUTH_DIR}. Both variables are absent unless the deployment
+   * configured the credential, so the block does nothing on a deployment that did not, and it stays
+   * zero-interpolation like the rest of this text: the credential is a value the shell reads from
+   * its own environment, never a word in this string.
+   *
    * <p>{@code exec} rather than a plain call, so the daemon is PID 1 and the removal signals the
    * process that owns the step rather than a shell wrapping it.
    *
@@ -166,8 +177,27 @@ public class CiDaemonLauncher {
         exit 127
       fi
       chmod +x /tmp/qits-ci-daemon
+      if [ -n "$QITS_CI_REGISTRY_AUTH_CONFIG" ] && [ -n "$DOCKER_CONFIG" ]; then
+        mkdir -p "$DOCKER_CONFIG"
+        printf '%s' "$QITS_CI_REGISTRY_AUTH_CONFIG" > "$DOCKER_CONFIG/config.json"
+      fi
       exec /tmp/qits-ci-daemon
       """;
+
+  /**
+   * Where the registry push credential lands inside a step container, and the whole reason it can
+   * land anywhere at all.
+   *
+   * <p><b>Outside the clone, on purpose.</b> The daemon checks the repository out at {@code
+   * /workspace} and a publishing step runs {@code docker build} from there, so a credential written
+   * into the checkout would be inside the build context — one {@code COPY . .} away from being
+   * baked into a published image, and one {@code git status} away from confusing the step's own
+   * script. {@code /tmp} is neither, and it is gone with the container.
+   *
+   * <p>It is a directory rather than a file because {@code DOCKER_CONFIG} names a directory: the
+   * docker CLI reads {@code config.json} inside it.
+   */
+  static final String REGISTRY_AUTH_DIR = "/tmp/qits-ci-registry-auth";
 
   /**
    * The one client, produced by {@code containers/ContainersClientProducer}. Every call it makes is
@@ -261,6 +291,27 @@ public class CiDaemonLauncher {
 
   @ConfigProperty(name = "qits.artifacts.image-repository")
   String artifactsImageRepository;
+
+  /**
+   * The credential a step pushes an image with, when the registry asks for one. Two halves of one
+   * fact — a qits-idp client id and its secret — and <b>either one missing means no credential at
+   * all</b>: half a login is a config mistake, and writing a file from it would turn a readable
+   * "nothing was configured" into an authentication failure inside somebody's build.
+   *
+   * <p>Optional because it is optional in fact: a registry that answers an anonymous push is the
+   * shape this platform shipped with, and a deployment on it must stay byte-identical. Set both and
+   * every socket-holding step gets {@code $DOCKER_CONFIG} and the file behind it; set neither and
+   * the environment gains nothing.
+   *
+   * <p><b>The secret never reaches a log or an argv.</b> Nothing in this class logs an environment
+   * map, and the credential leaves here base64-encoded inside one JSON value — see {@link
+   * #registryAuthConfig}.
+   */
+  @ConfigProperty(name = "qits.ci.registry-auth.client-id")
+  Optional<String> registryAuthClientId;
+
+  @ConfigProperty(name = "qits.ci.registry-auth.client-secret")
+  Optional<String> registryAuthClientSecret;
 
   /**
    * qits-artifacts' npm registry roots — the hosted repository {@code @qits/*} is published to, and
@@ -775,13 +826,24 @@ public class CiDaemonLauncher {
    * container itself</b> — an npm CLI speaking plain HTTP to a service alias on the shared network,
    * needing no socket, no privilege and no {@code docker: true}. So the value that is right here is
    * the in-network one, and a host-published mapping substituted for {@code QITS_REGISTRY} (the
-   * local stack's {@code localhost:8081}) must <b>not</b> be substituted for these: a step container
-   * has no such address. Two variables, two opposite readings of "reachable from where" — which is
-   * why both are commented where they are shipped.
+   * local stack's {@code registry.dev.localhost:8080}) must <b>not</b> be substituted for these: a
+   * step container has no such address. Two variables, two opposite readings of "reachable from
+   * where" — which is why both are commented where they are shipped.
    *
    * <p><b>{@code QITS_WORKSPACES_URL} joins them on the same reading.</b> It is the door a step
    * knocks on to release its own repository after green tests — the release train's maintenance leg
    * — and it is an ordinary HTTP call from the container over qits-net.
+   *
+   * <p><b>The registry push credential is the one value that is NOT unconditional, and the scope is
+   * the point.</b> A registry behind the edge answers an unauthenticated push with a docker Bearer
+   * challenge, so the step's CLI needs a stored login to exchange for a token; reads stay anonymous
+   * and need nothing. Only a step that declared {@code docker: true} can push at all, so only that
+   * step gets {@code DOCKER_CONFIG} and the document behind it, and only when the deployment set
+   * both halves of {@code qits.ci.registry-auth.*}. Every other step, and every step on a
+   * deployment that configured no credential, gets the environment it always got — see {@link
+   * #registryAuthConfig}. The document reaches the container as an environment value and becomes a
+   * file in {@link #REGISTRY_AUTH_DIR} there, which is what keeps it out of the checkout and out of
+   * any build context.
    */
   EnsureRequest buildWorkloadSpec(LaunchSpec spec) {
     Map<String, String> env = new LinkedHashMap<>();
@@ -814,6 +876,14 @@ public class CiDaemonLauncher {
     // And where a step asks for its own repository to be released — same network, same reading of
     // "reachable from where" as the npm pair.
     env.put("QITS_WORKSPACES_URL", value(workspacesUrl));
+    // And, for a socket-holding step on a deployment that configured one, the push credential — the
+    // document, and the directory the bootstrap writes it into. Both keys or neither, so a step on
+    // an anonymous registry sees exactly the environment it always saw.
+    String registryAuth = registryAuthConfig(spec);
+    if (registryAuth != null) {
+      env.put("DOCKER_CONFIG", REGISTRY_AUTH_DIR);
+      env.put("QITS_CI_REGISTRY_AUTH_CONFIG", registryAuth);
+    }
     // Run-scoped extras, LAST and in sorted key order. Today these are the four QITS_EVENT_* of an
     // event-triggered run and the map is empty on every push; none of them is ever repo-authored.
     // Last is the construction the argv had, where a repeated --env meant the later one won, so a
@@ -863,6 +933,62 @@ public class CiDaemonLauncher {
 
   private static String value(String text) {
     return text == null ? "" : text;
+  }
+
+  /**
+   * The docker {@code config.json} a publishing step logs in with, or {@code null} when there is
+   * none to give.
+   *
+   * <p><b>Three conditions, and each is a decision.</b> The step must have declared {@code docker:
+   * true}: the credential exists for a push over the mounted socket, and a step without the socket
+   * has nothing to push with — so the narrow scope costs nothing and keeps the secret out of every
+   * container that cannot use it. Both config keys must be set, because half a login is a mistake
+   * rather than a partial feature. And the registry it names is {@code
+   * qits.artifacts.registry-host}, the same value the step reads as {@code $QITS_REGISTRY}: a
+   * credential for an address a pipeline does not push to would be a login nothing performs.
+   *
+   * <p><b>Hand-written JSON, and it stays that way.</b> The document is four fixed keys around one
+   * base64 value, and base64 has no character JSON escapes — so the only value that could need
+   * quoting is the registry host, a deployment fact, escaped here anyway rather than trusted. A
+   * Jackson mapper for eight tokens would be one more graph the native-image builder has to be told
+   * about, which is the rule the whole {@code githost} package already follows.
+   *
+   * <p>The base64 is the docker CLI's own encoding of {@code id:secret}, the same bytes {@code
+   * docker login} would store — <b>not</b> encryption, and no better protected than an environment
+   * variable, which is what it travels as. What it does buy is that the raw secret is not a
+   * substring of anything this process assembles.
+   */
+  private String registryAuthConfig(LaunchSpec spec) {
+    if (!spec.docker()) {
+      return null;
+    }
+    String id = configured(registryAuthClientId);
+    String secret = configured(registryAuthClientSecret);
+    if (id.isEmpty() || secret.isEmpty()) {
+      return null;
+    }
+    String auth =
+        Base64.getEncoder()
+            .encodeToString((id + ":" + secret).getBytes(StandardCharsets.UTF_8));
+    String host = value(artifactsRegistryHost).replace("\\", "\\\\").replace("\"", "\\\"");
+    return "{\"auths\":{\"" + host + "\":{\"auth\":\"" + auth + "\"}}}";
+  }
+
+  /**
+   * One half of the credential, or blank. Blank and absent are one answer, and so is a value that
+   * is only whitespace — a deployment that set the variable to nothing set nothing.
+   *
+   * <p>The null tolerance is {@link #value}'s, for the same reason: the hand-wired launchers in the
+   * ITs set the fields a case needs and leave the rest, so an unset field is a test's silence
+   * rather than a wiring failure.
+   *
+   * <p>{@code orElse} rather than {@code get}, and that is not style: {@code
+   * CiDaemonRegistryTimeoutTest} greps this package for a no-argument {@code get()} because an
+   * untimed {@code Future.get()} on the run worker wedges all of CI, and a guard that has to be
+   * read before it fires is worth less than one nothing in the package can trip.
+   */
+  private static String configured(Optional<String> half) {
+    return half == null ? "" : value(half.orElse("")).trim();
   }
 
   /**

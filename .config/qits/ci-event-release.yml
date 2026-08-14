@@ -19,8 +19,9 @@
 # packageName}` on the strength of these two lines. Keep them true.
 #
 # THE NAME IS UNQUALIFIED ON PURPOSE. No registry-qualified docker reference is portable here — the
-# registry is `qits-platform-artifacts:8080` inside a step container and `localhost:8081` to qits-ci and
-# qits-deployments — and an OCI reference cannot carry a path prefix. So the declaration carries
+# registry is `qits-platform-artifacts:8080` inside a step container and
+# `registry.dev.localhost:8080` to qits-ci and qits-deployments — and an OCI reference cannot carry
+# a path prefix. So the declaration carries
 # `qits/<application>` and the reader supplies its own host, exactly as the push below composes one
 # from environment.
 #

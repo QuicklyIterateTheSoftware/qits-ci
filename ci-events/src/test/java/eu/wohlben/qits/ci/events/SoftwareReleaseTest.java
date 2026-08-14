@@ -72,8 +72,9 @@ class SoftwareReleaseTest {
   @Test
   void aDockerArtifactCarriesAnUnqualifiedName() {
     // No registry-qualified reference is portable: the registry is qits-artifacts:8080 inside a step
-    // container and localhost:8081 to qits-ci and qits-cd, and an OCI reference cannot carry a path
-    // prefix. The consumer qualifies it with the address that is right where it stands.
+    // container and registry.dev.localhost:8080 to qits-ci and qits-cd, and an OCI reference
+    // cannot carry a path prefix. The consumer qualifies it with the address that is right where
+    // it stands.
     SoftwareRelease image =
         new SoftwareRelease("qits-stt", "2026.8.1", "docker", "qits/qits-stt", PUBLISHED);
 
