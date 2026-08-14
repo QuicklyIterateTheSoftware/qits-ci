@@ -826,9 +826,9 @@ public class CiDaemonLauncher {
    * container itself</b> — an npm CLI speaking plain HTTP to a service alias on the shared network,
    * needing no socket, no privilege and no {@code docker: true}. So the value that is right here is
    * the in-network one, and a host-published mapping substituted for {@code QITS_REGISTRY} (the
-   * local stack's {@code localhost:8081}) must <b>not</b> be substituted for these: a step container
-   * has no such address. Two variables, two opposite readings of "reachable from where" — which is
-   * why both are commented where they are shipped.
+   * local stack's {@code registry.dev.localhost:8080}) must <b>not</b> be substituted for these: a
+   * step container has no such address. Two variables, two opposite readings of "reachable from
+   * where" — which is why both are commented where they are shipped.
    *
    * <p><b>{@code QITS_WORKSPACES_URL} joins them on the same reading.</b> It is the door a step
    * knocks on to release its own repository after green tests — the release train's maintenance leg

@@ -396,8 +396,9 @@ through) are injected into every step container alongside the two above, and the
 the **opposite** one: they are dialled by the *step container itself* over the shared network, so an
 npm publish is an ordinary HTTP step with no socket, no `docker: true` and no root-equivalence. The
 consequence for a deployment is that the value which is right for these is the in-network alias — a
-host-published mapping substituted for `$QITS_REGISTRY` (the local stack's `localhost:8081`) must
-**not** be substituted for these, because a step container has no such address.
+host-published mapping substituted for `$QITS_REGISTRY` (the local stack's
+`registry.dev.localhost:8080`) must **not** be substituted for these, because a step container has
+no such address.
 
 A step writes its own `~/.npmrc` from the two, so no repository ever spells a registry address:
 
@@ -583,8 +584,8 @@ triggering surface is unchanged — a tag push is not a CI trigger and deliberat
 - **`name`** is the **exact package name**, non-blank. A scoped npm name has to be quoted — `@` is
   a reserved YAML indicator, so `name: "@qits/ui-components"`. A docker name is **unqualified**
   (`qits/qits-stt`, no registry host): the registry is `qits-artifacts:8080` inside a step container
-  and `localhost:8081` to qits-ci and qits-cd, so no qualified reference is portable and the
-  consumer is the one that knows which address it stands at.
+  and `registry.dev.localhost:8080` to qits-ci and qits-cd, so no qualified reference is portable
+  and the consumer is the one that knows which address it stands at.
   A Maven name is an unqualified `groupId:artifactId` GAV prefix; the event's `version` supplies
   the third coordinate and the consumer supplies the repository URL.
 - Everything about it is strict, the way the rest of this file is: an empty list, an unknown type, a
