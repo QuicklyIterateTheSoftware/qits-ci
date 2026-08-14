@@ -100,8 +100,6 @@ public class CiDaemonLauncherContainersTest {
     launcher.artifactsMavenRegistryUrl = "http://qits-artifacts:8080/artifacts/maven/maven";
     launcher.artifactsDocsUrl = "http://qits-artifacts:8080/artifacts/docs/docs";
     launcher.workspacesUrl = "http://qits-workspaces:8080";
-    launcher.registryAuthClientId = Optional.empty();
-    launcher.registryAuthClientSecret = Optional.empty();
     // Deadlines a test can afford. The shipped ones are minutes, and they are about an image pull.
     launcher.containers =
         new ContainersClient(url, Duration.ofSeconds(2), Duration.ofSeconds(5), tokens);

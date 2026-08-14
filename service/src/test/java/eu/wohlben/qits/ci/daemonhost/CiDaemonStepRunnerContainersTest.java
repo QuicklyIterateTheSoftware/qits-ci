@@ -12,7 +12,6 @@ import eu.wohlben.qits.ci.control.CiStepRunner.StepSpec;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -89,8 +88,6 @@ public class CiDaemonStepRunnerContainersTest {
     launcher.artifactsMavenRegistryUrl = "http://qits-artifacts:8080/artifacts/maven/maven";
     launcher.artifactsDocsUrl = "http://qits-artifacts:8080/artifacts/docs/docs";
     launcher.workspacesUrl = "http://qits-workspaces:8080";
-    launcher.registryAuthClientId = Optional.empty();
-    launcher.registryAuthClientSecret = Optional.empty();
     launcher.containers =
         new ContainersClient(url, Duration.ofSeconds(2), Duration.ofSeconds(5), TokenSource.none());
     launcher.bootReapPatience = Duration.ZERO;

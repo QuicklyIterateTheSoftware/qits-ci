@@ -2,6 +2,7 @@ package eu.wohlben.qits.ci.daemonhost;
 
 import eu.wohlben.qits.ci.control.CiIdentifiers;
 import eu.wohlben.qits.ci.control.CiStepRunner;
+import eu.wohlben.qits.ci.idp.RunCommissions;
 import eu.wohlben.qits.cidaemon.protocol.InitFailed;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -49,6 +50,9 @@ public class CiDaemonStepRunner implements CiStepRunner {
   @Inject CiDaemonLauncher launcher;
 
   @Inject CiStepRelay relay;
+
+  /** This run's commissioned push credential, released in {@link #runClosed}. */
+  @Inject RunCommissions commissions;
 
   @ConfigProperty(name = "qits.ci.daemon-register-timeout-seconds")
   long registerTimeoutSeconds;
@@ -220,10 +224,23 @@ public class CiDaemonStepRunner implements CiStepRunner {
     launcher.reap(current.containerName());
   }
 
+  /**
+   * Everything one run holds outside its own rows, given back — the relay's buffer, the in-flight
+   * record, and the credential qits-idp commissioned for it.
+   *
+   * <p><b>Best effort on the credential, and never a failure of the close.</b> A DELETE that did not
+   * land leaves one live client at qits-idp, which {@code CommissionReconciler} reaps; a throw here
+   * would cost the run its close for the sake of a credential that is already covered.
+   */
   @Override
   public void runClosed(String runId) {
     relay.drop(runId);
     inFlight.remove(runId);
+    // Null only in the hand-wired runners of the suites, which set the fields a case needs — the
+    // same tolerance the launcher's own collaborators carry.
+    if (commissions != null) {
+      commissions.release(runId);
+    }
   }
 
   /**

@@ -12,6 +12,8 @@ import eu.wohlben.qits.containers.client.ContainersWire.Security;
 import eu.wohlben.qits.containers.client.ContainersWire.Spec;
 import eu.wohlben.qits.ci.control.CiDaemonPins;
 import eu.wohlben.qits.ci.control.CiIdentifiers;
+import eu.wohlben.qits.ci.idp.IdpCommissioner;
+import eu.wohlben.qits.ci.idp.RunCommissions;
 import io.quarkus.runtime.LaunchMode;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.Priority;
@@ -25,7 +27,6 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.TreeMap;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
@@ -150,10 +151,10 @@ public class CiDaemonLauncher {
    * <p><b>It is also where the registry push credential becomes a file.</b> The last block writes
    * {@code $DOCKER_CONFIG/config.json} from {@code $QITS_CI_REGISTRY_AUTH_CONFIG} when both are set,
    * which is how a step gets a small file that is <em>not</em> in the clone and therefore not in any
-   * build context — see {@link #REGISTRY_AUTH_DIR}. Both variables are absent unless the deployment
-   * configured the credential, so the block does nothing on a deployment that did not, and it stays
-   * zero-interpolation like the rest of this text: the credential is a value the shell reads from
-   * its own environment, never a word in this string.
+   * build context — see {@link #REGISTRY_AUTH_DIR}. Both variables are absent unless this run
+   * commissioned a credential, so the block does nothing on a deployment with no oidc client, and it
+   * stays zero-interpolation like the rest of this text: the credential is a value the shell reads
+   * from its own environment, never a word in this string.
    *
    * <p>{@code exec} rather than a plain call, so the daemon is PID 1 and the removal signals the
    * process that owns the step rather than a shell wrapping it.
@@ -293,25 +294,26 @@ public class CiDaemonLauncher {
   String artifactsImageRepository;
 
   /**
-   * The credential a step pushes an image with, when the registry asks for one. Two halves of one
-   * fact — a qits-idp client id and its secret — and <b>either one missing means no credential at
-   * all</b>: half a login is a config mistake, and writing a file from it would turn a readable
-   * "nothing was configured" into an authentication failure inside somebody's build.
+   * The credential a step pushes an image with: <b>this run's own</b>, commissioned at qits-idp when
+   * the run reaches its first docker step and deleted when the run closes.
    *
-   * <p>Optional because it is optional in fact: a registry that answers an anonymous push is the
-   * shape this platform shipped with, and a deployment on it must stay byte-identical. Set both and
-   * every socket-holding step gets {@code $DOCKER_CONFIG} and the file behind it; set neither and
-   * the environment gains nothing.
+   * <p><b>It replaced a static pair wholesale.</b> {@code qits.ci.registry-auth.client-id}/{@code
+   * …client-secret} were one deployment-lived credential shared by every run of every repository,
+   * readable by every publishing step's own repo-authored script. A per-run one is readable by
+   * exactly the same code and is worth one pipeline, which is the whole of the difference and the
+   * whole of the point.
    *
-   * <p><b>The secret never reaches a log or an argv.</b> Nothing in this class logs an environment
-   * map, and the credential leaves here base64-encoded inside one JSON value — see {@link
-   * #registryAuthConfig}.
+   * <p><b>The fallback arm is byte-identical to the old unset-keys behaviour.</b> With {@code
+   * quarkus.oidc-client.client-enabled} off there is nothing to commission with, so nothing is
+   * commissioned and nothing is injected — see {@link IdpCommissioner#enabled()}.
+   *
+   * <p><b>The secret does reach the environment now, under one name.</b> The document behind {@code
+   * $DOCKER_CONFIG} carries it base64-encoded as it always did, and {@code
+   * $QITS_COMMISSIONED_CLIENT_SECRET} carries it raw beside it, because a BuildKit secret mount
+   * ({@code --secret id=…,env=QITS_COMMISSIONED_CLIENT_SECRET}) is what keeps it out of an image
+   * layer. Nothing in this class logs an environment map, and it reaches no argv and no label.
    */
-  @ConfigProperty(name = "qits.ci.registry-auth.client-id")
-  Optional<String> registryAuthClientId;
-
-  @ConfigProperty(name = "qits.ci.registry-auth.client-secret")
-  Optional<String> registryAuthClientSecret;
+  @Inject RunCommissions commissions;
 
   /**
    * qits-artifacts' npm registry roots — the hosted repository {@code @qits/*} is published to, and
@@ -532,8 +534,18 @@ public class CiDaemonLauncher {
 
     String name = containerName(spec.runId(), spec.stepIndex());
     // Assembled once: every attempt asks for the same place under the same spec, which is what makes
-    // the PUT idempotent rather than a second workload.
-    EnsureRequest request = buildWorkloadSpec(spec);
+    // the PUT idempotent rather than a second workload. Assembling it is also where a docker step's
+    // credential is commissioned, and a commission that could not be made fails the STEP rather than
+    // launching it credential-less — an idp blip must not become a push 401 minutes later, inside a
+    // build, with nothing in the record naming the cause.
+    EnsureRequest request;
+    try {
+      request = buildWorkloadSpec(spec);
+    } catch (IdpCommissioner.CommissionFailedException notCommissioned) {
+      LOG.warnf(
+          "Not launching step container %s: %s", name, notCommissioned.getMessage());
+      return new Launched(false, name, notCommissioned.getMessage());
+    }
     Instant giveUpAt = Instant.now().plus(launchPatience);
     // Never pause past the window itself: a pause longer than the patience would make a short
     // patience mean one attempt while looking like a window, which is the shape a test cannot see.
@@ -834,16 +846,15 @@ public class CiDaemonLauncher {
    * knocks on to release its own repository after green tests — the release train's maintenance leg
    * — and it is an ordinary HTTP call from the container over qits-net.
    *
-   * <p><b>The registry push credential is the one value that is NOT unconditional, and the scope is
-   * the point.</b> A registry behind the edge answers an unauthenticated push with a docker Bearer
-   * challenge, so the step's CLI needs a stored login to exchange for a token; reads stay anonymous
-   * and need nothing. Only a step that declared {@code docker: true} can push at all, so only that
-   * step gets {@code DOCKER_CONFIG} and the document behind it, and only when the deployment set
-   * both halves of {@code qits.ci.registry-auth.*}. Every other step, and every step on a
-   * deployment that configured no credential, gets the environment it always got — see {@link
-   * #registryAuthConfig}. The document reaches the container as an environment value and becomes a
-   * file in {@link #REGISTRY_AUTH_DIR} there, which is what keeps it out of the checkout and out of
-   * any build context.
+   * <p><b>The docker block is the one part that is NOT unconditional, and the scope is the point.</b>
+   * A registry behind the edge answers an unauthenticated push with a docker Bearer challenge, so
+   * the step's CLI needs a stored login to exchange for a token; reads stay anonymous and need
+   * nothing. Only a step that declared {@code docker: true} can push at all, so only that step is
+   * handed anything here: the two BuildKit variables, and — once the run has commissioned one — this
+   * run's own credential as {@code DOCKER_CONFIG} plus the document behind it and the pair itself.
+   * Every other step gets the environment it always got. The document reaches the container as an
+   * environment value and becomes a file in {@link #REGISTRY_AUTH_DIR} there, which is what keeps it
+   * out of the checkout and out of any build context.
    */
   EnsureRequest buildWorkloadSpec(LaunchSpec spec) {
     Map<String, String> env = new LinkedHashMap<>();
@@ -876,13 +887,27 @@ public class CiDaemonLauncher {
     // And where a step asks for its own repository to be released — same network, same reading of
     // "reachable from where" as the npm pair.
     env.put("QITS_WORKSPACES_URL", value(workspacesUrl));
-    // And, for a socket-holding step on a deployment that configured one, the push credential — the
-    // document, and the directory the bootstrap writes it into. Both keys or neither, so a step on
-    // an anonymous registry sees exactly the environment it always saw.
-    String registryAuth = registryAuthConfig(spec);
-    if (registryAuth != null) {
-      env.put("DOCKER_CONFIG", REGISTRY_AUTH_DIR);
-      env.put("QITS_CI_REGISTRY_AUTH_CONFIG", registryAuth);
+    if (spec.docker()) {
+      // BuildKit, demanded rather than preferred. Every step image ships buildx as of qits-oci
+      // 2026.814.110556, so a legacy build here is a silent fallback rather than an image that has
+      // no choice — and a silent fallback is what quietly loses a --secret mount or a cache export.
+      // DOCKER_BUILDKIT=1 turns that into a loud error instead. The second flag keeps a push a
+      // single manifest: buildx attaches provenance and SBOM attestations by default, which makes
+      // the push an index the platform registry does not expect.
+      env.put("DOCKER_BUILDKIT", "1");
+      env.put("BUILDX_NO_DEFAULT_ATTESTATIONS", "1");
+      // And this run's own push credential — the document, the directory the bootstrap writes it
+      // into, and the pair itself for a BuildKit secret mount. Commissioned on the first docker step
+      // and reused by every later one; absent whole on a deployment with no oidc client, where a
+      // step container's environment is exactly what it always was.
+      IdpCommissioner.Commission commission =
+          commissions == null ? null : commissions.forRun(spec.runId());
+      if (commission != null) {
+        env.put("DOCKER_CONFIG", REGISTRY_AUTH_DIR);
+        env.put("QITS_CI_REGISTRY_AUTH_CONFIG", registryAuthConfig(commission));
+        env.put("QITS_COMMISSIONED_CLIENT_ID", value(commission.clientId()));
+        env.put("QITS_COMMISSIONED_CLIENT_SECRET", value(commission.secret()));
+      }
     }
     // Run-scoped extras, LAST and in sorted key order. Today these are the four QITS_EVENT_* of an
     // event-triggered run and the map is empty on every push; none of them is ever repo-authored.
@@ -936,14 +961,13 @@ public class CiDaemonLauncher {
   }
 
   /**
-   * The docker {@code config.json} a publishing step logs in with, or {@code null} when there is
-   * none to give.
+   * The docker {@code config.json} a publishing step logs in with, built from this run's own
+   * commissioned pair.
    *
-   * <p><b>Three conditions, and each is a decision.</b> The step must have declared {@code docker:
-   * true}: the credential exists for a push over the mounted socket, and a step without the socket
-   * has nothing to push with — so the narrow scope costs nothing and keeps the secret out of every
-   * container that cannot use it. Both config keys must be set, because half a login is a mistake
-   * rather than a partial feature. And the registry it names is {@code
+   * <p><b>The scope is the decision that survived the cutover.</b> Only a step that declared {@code
+   * docker: true} is handed this: the credential exists for a push over the mounted socket, and a
+   * step without the socket has nothing to push with — so the narrow scope costs nothing and keeps
+   * the secret out of every container that cannot use it. The registry it names is {@code
    * qits.artifacts.registry-host}, the same value the step reads as {@code $QITS_REGISTRY}: a
    * credential for an address a pipeline does not push to would be a login nothing performs.
    *
@@ -955,40 +979,16 @@ public class CiDaemonLauncher {
    *
    * <p>The base64 is the docker CLI's own encoding of {@code id:secret}, the same bytes {@code
    * docker login} would store — <b>not</b> encryption, and no better protected than an environment
-   * variable, which is what it travels as. What it does buy is that the raw secret is not a
-   * substring of anything this process assembles.
+   * variable, which is what it travels as.
    */
-  private String registryAuthConfig(LaunchSpec spec) {
-    if (!spec.docker()) {
-      return null;
-    }
-    String id = configured(registryAuthClientId);
-    String secret = configured(registryAuthClientSecret);
-    if (id.isEmpty() || secret.isEmpty()) {
-      return null;
-    }
+  private String registryAuthConfig(IdpCommissioner.Commission commission) {
     String auth =
         Base64.getEncoder()
-            .encodeToString((id + ":" + secret).getBytes(StandardCharsets.UTF_8));
+            .encodeToString(
+                (commission.clientId() + ":" + commission.secret())
+                    .getBytes(StandardCharsets.UTF_8));
     String host = value(artifactsRegistryHost).replace("\\", "\\\\").replace("\"", "\\\"");
     return "{\"auths\":{\"" + host + "\":{\"auth\":\"" + auth + "\"}}}";
-  }
-
-  /**
-   * One half of the credential, or blank. Blank and absent are one answer, and so is a value that
-   * is only whitespace — a deployment that set the variable to nothing set nothing.
-   *
-   * <p>The null tolerance is {@link #value}'s, for the same reason: the hand-wired launchers in the
-   * ITs set the fields a case needs and leave the rest, so an unset field is a test's silence
-   * rather than a wiring failure.
-   *
-   * <p>{@code orElse} rather than {@code get}, and that is not style: {@code
-   * CiDaemonRegistryTimeoutTest} greps this package for a no-argument {@code get()} because an
-   * untimed {@code Future.get()} on the run worker wedges all of CI, and a guard that has to be
-   * read before it fires is worth less than one nothing in the package can trip.
-   */
-  private static String configured(Optional<String> half) {
-    return half == null ? "" : value(half.orElse("")).trim();
   }
 
   /**
