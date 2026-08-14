@@ -147,6 +147,19 @@ zero interpolation, and it now travels as its own JSON list element (`entrypoint
 `args` `["-c", BOOTSTRAP]`), so that property holds by construction rather than by inspection of an
 argv.
 
+**The bootstrap is also the only way to hand a step a FILE, and the registry push credential is the
+one that uses it.** The wire has no file field — a spec carries images, environment, mounts and
+lifetimes — and qits-ci shares no volume with a step container, so a small file can only be a value
+the container writes for itself. `BOOTSTRAP`'s last block writes `$DOCKER_CONFIG/config.json` from
+`$QITS_CI_REGISTRY_AUTH_CONFIG` when both are set, which keeps zero interpolation intact (the
+credential is a variable the shell reads, never a word in the text) and puts the file at
+`CiDaemonLauncher.REGISTRY_AUTH_DIR` under `/tmp` — **outside `/workspace`**, so it is in neither
+the clone nor any `docker build` context a step runs from it. The two variables exist only when
+`qits.ci.registry-auth.client-id` and `…client-secret` are both set **and** the step declared
+`docker: true`; anything else sends the environment that always shipped. Note `CiDaemonLauncherTest`
+asserts `BOOTSTRAP` contains no `docker` — the variable is upper case and a program would not be, so
+that assertion still means what it meant.
+
 Four things bite:
 
 - **`@WebSocket(path = "/ci/daemon")` is a literal that does not follow `quarkus.rest.path`**, so it
