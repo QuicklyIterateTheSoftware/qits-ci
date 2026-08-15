@@ -48,6 +48,7 @@ import org.jboss.logging.Logger;
  * from a container took the socket with it.
  */
 @WebSocket(path = "/ci/daemon")
+@jakarta.annotation.security.RolesAllowed("qits:system")
 public class CiDaemonSocket {
 
   private static final Logger LOG = Logger.getLogger(CiDaemonSocket.class);

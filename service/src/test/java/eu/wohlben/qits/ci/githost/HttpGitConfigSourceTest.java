@@ -45,6 +45,7 @@ public class HttpGitConfigSourceTest {
     source = new HttpGitConfigSource();
     source.gitHostUrl = host.gitHostUrl();
     source.objectMapper = new ObjectMapper();
+    source.gitHostBearer = () -> java.util.Optional.of("machine-token");
   }
 
   @AfterEach
@@ -183,9 +184,10 @@ public class HttpGitConfigSourceTest {
             }
             return super.blobUrl(repo, rev, path);
           }
-        };
+    };
     pinned.gitHostUrl = host.gitHostUrl();
     pinned.objectMapper = new ObjectMapper();
+    pinned.gitHostBearer = () -> java.util.Optional.of("machine-token");
 
     EventTriggerLookup lookup = pinned.readEventTriggers(repoId, BRANCH);
     assertEquals(head, lookup.headSha());

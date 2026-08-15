@@ -17,7 +17,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Fix 3: {@code GET /ci/api/daemon} is public and unguarded, so it must never launch a probe either
+ * Fix 3: {@code GET /ci/api/daemon} is machine-only, so it must never launch a probe either
  * -- the same requirement {@link CiDaemonReadinessCheckTest} proves for the healthcheck. Each test
  * seeds a still-undecided adopted candidate straight through the repository, hits the endpoint, and
  * asserts the fake probe recorded nothing.

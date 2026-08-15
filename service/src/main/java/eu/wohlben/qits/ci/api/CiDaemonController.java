@@ -65,6 +65,7 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  */
 @Path("/daemon")
 @Produces(MediaType.APPLICATION_JSON)
+@jakarta.annotation.security.RolesAllowed("qits:system")
 public class CiDaemonController {
 
   @Inject CiDaemonPins pins;

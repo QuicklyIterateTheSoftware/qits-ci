@@ -9,11 +9,11 @@ import org.jboss.logging.Logger;
 /**
  * One commissioned credential per run, for as long as the run lasts.
  *
- * <p><b>Commissioned lazily, at the first step that could use it.</b> Only a step declaring {@code
- * docker: true} holds the socket, so only that step can push and only that step is handed the pair —
- * which means a pipeline of plain test steps asks qits-idp for nothing at all. Every later docker
- * step of the same run reuses what the first one minted: the credential belongs to the run rather
- * than to the step, and one commission per step would be N clients to leak instead of one.
+ * <p><b>Commissioned lazily, at the first step.</b> Every step first clones its repository from the
+ * authenticated git host, so every step needs the pair. The Git credential helper exchanges it for
+ * a short-lived githost bearer rather than ever putting the pair on the wire. Every later step of
+ * the same run reuses it: the credential belongs to the run rather than to the step, and one
+ * commission per step would be N clients to leak instead of one.
  *
  * <p><b>Given back at {@code runClosed}.</b> {@code CiDaemonStepRunner.runClosed} is called from a
  * {@code finally} on both run bodies, which is what makes the release unconditional. The paths that
@@ -33,7 +33,7 @@ public class RunCommissions {
 
   @Inject IdpCommissioner idp;
 
-  /** One entry per run that has reached a docker step, removed when the run closes. */
+  /** One entry per run that has reached its first step, removed when the run closes. */
   private final Map<String, IdpCommissioner.Commission> byRun = new ConcurrentHashMap<>();
 
   /**

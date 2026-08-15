@@ -57,6 +57,7 @@ import org.jboss.logging.Logger;
 @Path("/events")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
+@jakarta.annotation.security.RolesAllowed("qits:system")
 public class CiEventController {
 
   private static final Logger LOG = Logger.getLogger(CiEventController.class);

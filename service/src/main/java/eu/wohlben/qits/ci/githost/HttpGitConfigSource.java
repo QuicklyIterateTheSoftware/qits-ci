@@ -103,6 +103,7 @@ public class HttpGitConfigSource implements CiConfigSource {
   String gitHostUrl;
 
   @Inject ObjectMapper objectMapper;
+  @Inject GitHostBearer gitHostBearer;
 
   /** One answered request: the status, the body, and the commit the host resolved. */
   private record Answer(int status, byte[] body, String commitSha) {
@@ -274,8 +275,18 @@ public class HttpGitConfigSource implements CiConfigSource {
   /** One GET. Never throws: a transport failure is {@link Answer#FAILED}, which is not a 404. */
   private Answer get(String url) {
     try {
+      String token =
+          gitHostBearer
+              .token()
+              .filter(value -> !value.isBlank())
+              .orElseThrow(
+                  () -> new IllegalStateException("No machine bearer is available for qits-githost"));
       HttpRequest request =
-          HttpRequest.newBuilder(URI.create(url)).timeout(REQUEST_TIMEOUT).GET().build();
+          HttpRequest.newBuilder(URI.create(url))
+              .timeout(REQUEST_TIMEOUT)
+              .header("Authorization", "Bearer " + token)
+              .GET()
+              .build();
       HttpResponse<byte[]> response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
       return new Answer(
           response.statusCode(),

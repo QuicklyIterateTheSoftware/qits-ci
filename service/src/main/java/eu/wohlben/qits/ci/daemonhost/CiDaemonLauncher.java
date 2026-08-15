@@ -20,6 +20,7 @@ import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -183,6 +184,34 @@ public class CiDaemonLauncher {
         mkdir -p "$DOCKER_CONFIG"
         printf '%s' "$QITS_CI_REGISTRY_AUTH_CONFIG" > "$DOCKER_CONFIG/config.json"
       fi
+      if [ -n "$QITS_COMMISSIONED_CLIENT_ID" ] && [ -n "$QITS_COMMISSIONED_CLIENT_SECRET" ]; then
+        cat > /tmp/qits-git-credential <<'EOF'
+      #!/bin/sh
+      # This helper deliberately answers only qits-githost. Git may invoke it for any remote in a
+      # repository (including a repository-authored submodule), and handing its machine credential
+      # to an arbitrary host would be an exfiltration vulnerability.
+      [ "$1" = get ] || exit 0
+      host=
+      protocol=
+      while IFS= read -r line && [ -n "$line" ]; do
+        case "$line" in host=*) host=${line#host=};; protocol=*) protocol=${line#protocol=};; esac
+      done
+      [ "$host" = "$QITS_GIT_AUTH_HOST" ] || exit 0
+      case "$protocol" in http|https) ;; *) exit 0;; esac
+      if command -v curl >/dev/null 2>&1; then
+        response=$(curl -fsS --connect-timeout 2 --max-time 10 -u "$QITS_COMMISSIONED_CLIENT_ID:$QITS_COMMISSIONED_CLIENT_SECRET" \\
+          -H 'Content-Type: application/x-www-form-urlencoded' --data "grant_type=client_credentials&audience=$QITS_GIT_AUTH_AUDIENCE" "$QITS_GIT_AUTH_TOKEN_URL") || exit 0
+      else
+        response=$(wget -qO- --timeout=10 --user="$QITS_COMMISSIONED_CLIENT_ID" --password="$QITS_COMMISSIONED_CLIENT_SECRET" \\
+          --post-data="grant_type=client_credentials&audience=$QITS_GIT_AUTH_AUDIENCE" "$QITS_GIT_AUTH_TOKEN_URL") || exit 0
+      fi
+      token=$(printf '%s' "$response" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
+      [ -n "$token" ] || exit 0
+      printf 'username=oauth2\\npassword=%s\\n\\n' "$token"
+      EOF
+        chmod 0700 /tmp/qits-git-credential
+        printf '[credential]\n\thelper = /tmp/qits-git-credential\n' > "$GIT_CONFIG_GLOBAL"
+      fi
       exec /tmp/qits-ci-daemon
       """;
 
@@ -225,6 +254,14 @@ public class CiDaemonLauncher {
 
   @ConfigProperty(name = "qits.ci.container-git-url")
   String containerGitUrl;
+
+  /** The only token endpoint a step's Git credential helper may call. */
+  @ConfigProperty(name = "quarkus.oidc-client.auth-server-url")
+  String idpUrl;
+
+  /** The git host's environment-qualified machine audience. */
+  @ConfigProperty(name = "qits.ci.container-git-audience", defaultValue = "qits-githost")
+  String containerGitAudience;
 
   @ConfigProperty(name = "qits.ci.container-daemon-url")
   String containerDaemonUrl;
@@ -905,6 +942,19 @@ public class CiDaemonLauncher {
     // And where a step asks for its own repository to be released — same network, same reading of
     // "reachable from where" as the npm pair.
     env.put("QITS_WORKSPACES_URL", value(workspacesUrl));
+    // Git never receives the commissioned client secret as an HTTP credential.  Its helper exchanges
+    // that pair for a short-lived, audience-bound bearer when (and only when) Git asks for the
+    // configured qits-githost authority.  The helper is installed by BOOTSTRAP below, outside the
+    // checkout, so neither its configuration nor a token can enter a build context.
+    IdpCommissioner.Commission commission = commissions == null ? null : commissions.forRun(spec.runId());
+    if (commission != null) {
+      env.put("QITS_COMMISSIONED_CLIENT_ID", value(commission.clientId()));
+      env.put("QITS_COMMISSIONED_CLIENT_SECRET", value(commission.secret()));
+      env.put("QITS_GIT_AUTH_TOKEN_URL", tokenUrl(idpUrl));
+      env.put("QITS_GIT_AUTH_HOST", gitAuthority(containerGitUrl));
+      env.put("QITS_GIT_AUTH_AUDIENCE", value(containerGitAudience));
+      env.put("GIT_CONFIG_GLOBAL", "/tmp/qits-gitconfig");
+    }
     if (spec.docker()) {
       // BuildKit, demanded rather than preferred. Every step image ships buildx as of qits-oci
       // 2026.814.110556, so a legacy build here is a silent fallback rather than an image that has
@@ -918,8 +968,6 @@ public class CiDaemonLauncher {
       // into, and the pair itself for a BuildKit secret mount. Commissioned on the first docker step
       // and reused by every later one; absent whole on a deployment with no oidc client, where a
       // step container's environment is exactly what it always was.
-      IdpCommissioner.Commission commission =
-          commissions == null ? null : commissions.forRun(spec.runId());
       if (commission != null) {
         env.put("DOCKER_CONFIG", REGISTRY_AUTH_DIR);
         env.put("QITS_CI_REGISTRY_AUTH_CONFIG", registryAuthConfig(commission));
@@ -972,6 +1020,22 @@ public class CiDaemonLauncher {
     // EPHEMERAL: a step container runs once and exits, so a recreate under a changed spec is a
     // refusal rather than a restart — which is right for a place named after one step of one run.
     return EnsureRequest.of(workload, Policy.ephemeral(maxAgeSeconds(spec)));
+  }
+
+  private static String tokenUrl(String idpBase) {
+    return value(idpBase).replaceAll("/+$", "") + "/token";
+  }
+
+  private static String gitAuthority(String gitBase) {
+    try {
+      URI uri = URI.create(gitBase);
+      if (uri.getScheme() == null || uri.getRawAuthority() == null || uri.getUserInfo() != null) {
+        throw new IllegalArgumentException("not an absolute git host URL");
+      }
+      return uri.getRawAuthority();
+    } catch (RuntimeException badUrl) {
+      throw new IllegalStateException("qits.ci.container-git-url must be an absolute URL", badUrl);
+    }
   }
 
   private static String value(String text) {

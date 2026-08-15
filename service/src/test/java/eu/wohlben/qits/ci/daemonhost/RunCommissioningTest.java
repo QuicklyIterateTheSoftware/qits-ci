@@ -55,6 +55,8 @@ public class RunCommissioningTest {
     launcher.owner = "dev-qits-ci";
     launcher.network = "qits-net";
     launcher.containerGitUrl = "http://qits-githost:8080/";
+    launcher.idpUrl = idp.authServerUrl();
+    launcher.containerGitAudience = "dev-qits-githost";
     launcher.containerDaemonUrl = "ws://qits-ci:8080/ci/daemon";
     launcher.daemonBinaryUrlTemplate = "http://qits-artifacts:8080/artifacts/daemons/{version}";
     launcher.registerTimeoutSeconds = 60;
@@ -99,10 +101,10 @@ public class RunCommissioningTest {
   }
 
   @Test
-  public void oneRunCommissionsOnceAndEveryLaterDockerStepReusesIt() {
+  public void oneRunCommissionsOnceAndEveryLaterStepReusesIt() {
     CiDaemonLauncher launcher = launcher(idp.runCommissions(PATIENCE));
 
-    Map<String, String> first = launcher.buildWorkloadSpec(step(RUN, 1, true)).spec().env();
+    Map<String, String> first = launcher.buildWorkloadSpec(step(RUN, 1, false)).spec().env();
     Map<String, String> second = launcher.buildWorkloadSpec(step(RUN, 2, true)).spec().env();
 
     // The credential belongs to the RUN, not to the step: one commission, and the second step is
@@ -112,20 +114,24 @@ public class RunCommissioningTest {
     assertEquals(first.get("QITS_COMMISSIONED_CLIENT_ID"), second.get("QITS_COMMISSIONED_CLIENT_ID"));
     assertEquals(
         first.get("QITS_COMMISSIONED_CLIENT_SECRET"), second.get("QITS_COMMISSIONED_CLIENT_SECRET"));
+    assertEquals(idp.authServerUrl() + "/token", first.get("QITS_GIT_AUTH_TOKEN_URL"));
+    assertEquals("qits-githost:8080", first.get("QITS_GIT_AUTH_HOST"));
+    assertEquals("dev-qits-githost", first.get("QITS_GIT_AUTH_AUDIENCE"));
+    assertEquals("/tmp/qits-gitconfig", first.get("GIT_CONFIG_GLOBAL"));
   }
 
   @Test
-  public void aPlainStepCommissionsNothingAtAll() {
+  public void aPlainStepGetsTheSameShortLivedGitCredentialPath() {
     CiDaemonLauncher launcher = launcher(idp.runCommissions(PATIENCE));
 
     Map<String, String> env = launcher.buildWorkloadSpec(step(RUN, 0, false)).spec().env();
 
-    // Scoped exactly as the static credential was: only a step holding the socket can push, so only
-    // that step is worth a credential — and a pipeline of plain test steps asks qits-idp for
-    // nothing.
-    assertEquals(List.of(), idp.posted);
-    assertFalse(env.containsKey("QITS_COMMISSIONED_CLIENT_ID"));
-    assertFalse(env.containsKey("QITS_COMMISSIONED_CLIENT_SECRET"));
+    // Every step clones before it can run its script; with githost gated that clone needs the
+    // run-scoped client too. The helper exchanges it only for a short-lived githost bearer.
+    assertEquals(1, idp.posted.size());
+    assertEquals("run-client-1", env.get("QITS_COMMISSIONED_CLIENT_ID"));
+    assertEquals("run-s3cr3t-1", env.get("QITS_COMMISSIONED_CLIENT_SECRET"));
+    assertEquals("/tmp/qits-gitconfig", env.get("GIT_CONFIG_GLOBAL"));
     assertFalse(env.containsKey("DOCKER_CONFIG"));
     assertFalse(env.containsKey("QITS_CI_REGISTRY_AUTH_CONFIG"));
   }
@@ -282,7 +288,7 @@ public class RunCommissioningTest {
   }
 
   @Test
-  public void closingARunThatNeverPublishedDeletesNothing() {
+  public void closingARunThatOnlyClonedStillDeletesItsCredential() {
     RunCommissions commissions = idp.runCommissions(PATIENCE);
     launcher(commissions).buildWorkloadSpec(step(RUN, 0, false));
 
@@ -294,7 +300,7 @@ public class RunCommissioningTest {
 
     runner.runClosed(RUN);
 
-    assertEquals(List.of(), idp.deleted);
+    assertEquals(List.of("run-client-1"), idp.deleted);
   }
 
   @Test

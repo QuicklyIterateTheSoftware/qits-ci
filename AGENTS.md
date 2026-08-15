@@ -1287,13 +1287,12 @@ migration to point at. `baseline-on-migrate` is gone with the H2 file it existed
 `qits-auth-core` jar (`integrations/qits-integrations-quarkus/`), and `service/pom.xml` says so in a
 comment beside the dependency. There is no `security` package here any more, and no filter.
 
-**Users** are a header. `ForwardAuthMechanism` reads `X-Qits-User` into a `SecurityIdentity`; this
-service authenticates no person. `qits-gateway` does that (OIDC, with the variant fixed at **build**
-time via `-Dqits.variant`, so no runtime setting reopens a gateway built as `oauth`) and asserts the
-result as headers. `X-Qits-*` is its reserved namespace and is stripped from every inbound request
-unconditionally, which is the entire reason a header can be trusted as an identity here. There is no
-auth variant to select and no authorization policy over users, and roles are deliberately not
-resolved — the single role check the system has (`qits.auth.required-role`) is the gateway's.
+**Users** are headers. `ForwardAuthMechanism` reads `X-Qits-User` and `X-Qits-Roles` into a
+`SecurityIdentity`; this service authenticates no person. The platform edge establishes the
+session, and `qits-gateway` strips and re-asserts its reserved `X-Qits-*` namespace. That hygiene is
+the entire reason the headers can be trusted here. There is no auth variant to select in this
+service: the human-facing controllers require `qits:admin`; machine controllers retain their
+separate `MachineAuth` audience/scope checks pending endpoint-scoped machine roles.
 
 **`identity.isAnonymous()` is not a security state** — it means "no name for the audit row". A check
 of the form `if (identity.isAnonymous()) deny` would look like a security control and be worth
