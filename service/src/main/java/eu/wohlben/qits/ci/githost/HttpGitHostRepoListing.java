@@ -109,7 +109,12 @@ public class HttpGitHostRepoListing implements GitHostRepoListing {
   private Set<String> read(String url) {
     try {
       HttpRequest request =
-          HttpRequest.newBuilder(URI.create(url)).timeout(REQUEST_TIMEOUT).GET().build();
+          HttpRequest.newBuilder(URI.create(url))
+              .timeout(REQUEST_TIMEOUT)
+              .header("X-Qits-User", "qits-ci")
+              .header("X-Qits-Roles", "qits:system")
+              .GET()
+              .build();
       HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
       if (response.statusCode() != 200) {
         LOG.warnf(
