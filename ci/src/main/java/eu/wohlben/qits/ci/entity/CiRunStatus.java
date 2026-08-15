@@ -12,15 +12,15 @@ package eu.wohlben.qits.ci.entity;
  * operators used to replay a post-receive around. A {@code QUEUED} row is durable, so a restart
  * re-enqueues it instead of losing it.
  *
- * <p>The two <b>active</b> states are {@code QUEUED} and {@code RUNNING}; the three terminal ones
- * are {@code SUCCESS}, {@code FAILED} and {@code CONFIG_ERROR}. That split is what {@code GET
- * /ci/api/runs/active} answers with, and there is deliberately no separate "cancelled" state: a
- * cancelled run is {@code FAILED}, exactly as it was before a queue was visible.
+ * <p>The two <b>active</b> states are {@code QUEUED} and {@code RUNNING}; the terminal ones are
+ * {@code SUCCESS}, {@code FAILED}, {@code CANCELLED} and {@code CONFIG_ERROR}. A cancellation is a
+ * user decision rather than a failed pipeline verdict, so it has its own terminal state.
  */
 public enum CiRunStatus {
   QUEUED,
   RUNNING,
   SUCCESS,
   FAILED,
+  CANCELLED,
   CONFIG_ERROR
 }

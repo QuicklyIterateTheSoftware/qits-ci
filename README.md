@@ -927,9 +927,10 @@ the record.
 
 `POST /ci/api/runs/{runId}/cancel` answers 202 and asks the in-flight container to stop. Its optional
 JSON body is `{ "reason": "…" }`; absent or blank records `USER_CANCELLED`. The step it
-was on is recorded `FAILED` with "cancelled" in its output and the rest `SKIPPED`. A run still
+was on is recorded `FAILED` with "cancelled" in its output and the rest `SKIPPED`; the run itself
+finishes as `CANCELLED`, not as a failed pipeline verdict. A run still
 `QUEUED` can be cancelled too, and it is the cheap case: there is no container to ask, so the run is
-recorded `FAILED` with no steps and the worker never picks it up. Cancelling a run that has already
+recorded `CANCELLED` with no steps and the worker never picks it up. Cancelling a run that has already
 finished is a 409. Like every other operation this service serves, it is in `docs/openapi.yml`;
 nothing is hidden there any more, since the one hidden operation was the machine-only push intake.
 A queued push is also cancelled automatically when a

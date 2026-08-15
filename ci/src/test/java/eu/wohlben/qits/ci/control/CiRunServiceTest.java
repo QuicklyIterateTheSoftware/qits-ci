@@ -557,7 +557,7 @@ public class CiRunServiceTest extends CiTestSupport {
   }
 
   @Test
-  public void aCancellationMidStepFailsThatStepAndSkipsTheRest() throws Exception {
+  public void aCancellationMidStepCancelsTheRunFailsThatStepAndSkipsTheRest() throws Exception {
     // Staged the way it really happens: the run is on the worker, step 0 is executing, and the
     // cancellation arrives from another thread — the HTTP one. The fake holds step 0 open until the
     // POST has landed, so there is no sleep and no race about when "mid-step" is.
@@ -589,7 +589,8 @@ public class CiRunServiceTest extends CiTestSupport {
     // RUNNING; without this the assertions below would read that copy back rather than the worker's.
     forgetLoadedEntities();
     CiRun run = soleRun();
-    assertEquals(CiRunStatus.FAILED, run.status);
+    assertEquals(CiRunStatus.CANCELLED, run.status);
+    assertNotNull(run.startedAt);
     assertEquals(CiRunService.USER_CANCELLED, run.cancellationReason);
     List<CiStep> recorded = service.stepsFor(run.id);
     assertEquals(CiStepStatus.FAILED, recorded.get(0).status);

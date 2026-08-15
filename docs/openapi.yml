@@ -32,6 +32,8 @@ components:
           $ref: "#/components/schemas/CiRunStatus"
         createdAt:
           $ref: "#/components/schemas/Instant"
+        startedAt:
+          $ref: "#/components/schemas/Instant"
         finishedAt:
           $ref: "#/components/schemas/Instant"
         cancellationReason:
@@ -61,6 +63,7 @@ components:
       - RUNNING
       - SUCCESS
       - FAILED
+      - CANCELLED
       - CONFIG_ERROR
     CiStepDto:
       type: object
@@ -357,4 +360,4 @@ paths:
       - Ci Run Controller
 info:
   title: qits-ci API
-  version: 2026.814.74449
+  version: 2026.814.123830

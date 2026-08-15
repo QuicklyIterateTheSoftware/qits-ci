@@ -76,7 +76,8 @@ public class CiRunRepository implements PanacheRepositoryBase<CiRun, String> {
    * across all repositories, newest-first. The read behind {@code GET /ci/api/runs/finished}.
    *
    * <p><b>The predicate is the complement of {@link #listActiveNewestFirst}'s, and that is the
-   * point.</b> Naming the terminal statuses instead ({@code in (SUCCESS, FAILED, CONFIG_ERROR)})
+   * point.</b> Naming the terminal statuses instead ({@code in (SUCCESS, FAILED, CANCELLED,
+   * CONFIG_ERROR)})
    * would read the same today and rot silently: a sixth status added to {@code ck_ci_run_status}
    * would be finished in fact and invisible here, so a run would leave the active list and never
    * arrive in this one. Written as a complement, the two lists partition the table by construction
@@ -86,11 +87,12 @@ public class CiRunRepository implements PanacheRepositoryBase<CiRun, String> {
    * <p>Unscoped by repository, like the active list and unlike everything else here, because "what
    * did CI last finish" has no repository to scope to. Unlike the active list it <b>needs</b> its
    * bound: what is active is bounded by what one worker has accepted, while what is finished grows
-   * with the life of the instance.
+   * with the life of the instance. Ordering is by {@code finishedAt}, not acceptance time: a slow
+   * older pipeline that finishes now belongs ahead of a newer pipeline that completed earlier.
    */
   public List<CiRun> listFinishedNewestFirst(int limit) {
     return find(
-            "status not in (?1, ?2) order by createdAt desc, id desc",
+            "status not in (?1, ?2) order by finishedAt desc, id desc",
             CiRunStatus.QUEUED,
             CiRunStatus.RUNNING)
         .range(0, limit - 1)

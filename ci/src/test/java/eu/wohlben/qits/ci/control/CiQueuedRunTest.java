@@ -223,7 +223,7 @@ public class CiQueuedRunTest extends CiTestSupport {
   // --- the cancellation that arrives before the run starts ---
 
   @Test
-  public void aRunCancelledWhileQueuedIsFailedAndNeverPickedUp() throws Exception {
+  public void aRunCancelledWhileQueuedIsCancelledAndNeverPickedUp() throws Exception {
     occupyTheWorker();
     String repoId = seedRepo();
     announcePush(repoId, shaOf(repoId));
@@ -235,7 +235,8 @@ public class CiQueuedRunTest extends CiTestSupport {
     // Terminal immediately: there is no container to ask and no step to stop, so the row is the
     // whole of the cancellation.
     CiRun cancelled = soleRun(repoId);
-    assertEquals(CiRunStatus.FAILED, cancelled.status);
+    assertEquals(CiRunStatus.CANCELLED, cancelled.status);
+    assertNull(cancelled.startedAt, "a run cancelled in the queue never started");
     assertNotNull(cancelled.finishedAt);
     assertEquals(0, service.stepsFor(queuedId).size(), "a run that never started has no steps");
     // Nothing was asked to die, because nothing was launched — unlike a mid-step cancellation.
@@ -246,7 +247,7 @@ public class CiQueuedRunTest extends CiTestSupport {
 
     // And the worker really did skip it rather than running it anyway and overwriting the row.
     CiRun afterTheQueueDrained = soleRun(repoId);
-    assertEquals(CiRunStatus.FAILED, afterTheQueueDrained.status);
+    assertEquals(CiRunStatus.CANCELLED, afterTheQueueDrained.status);
     assertEquals(cancelled.finishedAt, afterTheQueueDrained.finishedAt, "the row was not rewritten");
     assertEquals(
         launchedBefore, fakeRunner.executed().size(), "the cancelled run must launch no container");

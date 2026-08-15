@@ -137,8 +137,8 @@ import org.jboss.logging.Logger;
  *   <li>config present but broken ⇒ {@link CiRunStatus#CONFIG_ERROR}, so the broken gate is
  *       visible;
  *   <li>config present with no steps ⇒ a trivially green run;
- *   <li>cancelled while still {@code QUEUED} ⇒ {@code FAILED}, with no steps — a cancelled run has
- *       always been {@code FAILED} and a queue does not need a sixth status to say so.
+ *   <li>cancelled while still {@code QUEUED} ⇒ {@code CANCELLED}, with no steps — cancellation is a
+ *       user decision rather than a failed pipeline verdict.
  * </ul>
  *
  * <h2>What a restart costs now</h2>
@@ -556,7 +556,8 @@ public class CiRunService {
     } catch (RuntimeException e) {
       LOG.errorf(e, "CI run %s failed unexpectedly", run.id);
       QuarkusTransaction.requiringNew().run(() -> failIncompleteSteps(run.id));
-      finishRun(run.id, CiRunStatus.FAILED);
+      finishRun(
+          run.id, cancelled.contains(run.id) ? CiRunStatus.CANCELLED : CiRunStatus.FAILED);
     } finally {
       cancelled.remove(run.id);
       runner.runClosed(run.id);
@@ -663,6 +664,10 @@ public class CiRunService {
     String sha = run.commitSha;
 
     ConfigLookup lookup = readConfigPatiently(run);
+    if (cancelled.contains(run.id)) {
+      finishRun(run.id, CiRunStatus.CANCELLED);
+      return;
+    }
     switch (lookup.status()) {
       case ABSENT -> {
         // Opt-in: the repository declares no pipeline for this push, so it gets no row. The row
@@ -718,7 +723,8 @@ public class CiRunService {
     } catch (RuntimeException e) {
       LOG.errorf(e, "CI run %s failed unexpectedly", run.id);
       QuarkusTransaction.requiringNew().run(() -> failIncompleteSteps(run.id));
-      finishRun(run.id, CiRunStatus.FAILED);
+      finishRun(
+          run.id, cancelled.contains(run.id) ? CiRunStatus.CANCELLED : CiRunStatus.FAILED);
     } finally {
       runner.runClosed(run.id);
     }
@@ -874,9 +880,12 @@ public class CiRunService {
           null,
           null);
     }
-    boolean red = failed || cancelled.contains(run.id);
-    Instant finishedAt = finishRun(run.id, red ? CiRunStatus.FAILED : CiRunStatus.SUCCESS);
-    if (!red) {
+    boolean wasCancelled = cancelled.contains(run.id);
+    boolean red = failed || wasCancelled;
+    CiRunStatus outcome =
+        wasCancelled ? CiRunStatus.CANCELLED : red ? CiRunStatus.FAILED : CiRunStatus.SUCCESS;
+    Instant finishedAt = finishRun(run.id, outcome);
+    if (outcome == CiRunStatus.SUCCESS) {
       announceRun(run, finishedAt);
       announceRelease(run, finishedAt, release);
     }
@@ -1115,6 +1124,7 @@ public class CiRunService {
                 return null;
               }
               run.status = CiRunStatus.RUNNING;
+              run.startedAt = Instant.now();
               return run;
             });
   }
@@ -1420,7 +1430,7 @@ public class CiRunService {
    * container is asked to die; this returns as soon as both are done, which is well before the run
    * is actually finished — the caller answers 202.
    *
-   * <p>A {@code QUEUED} one is <b>finished here</b>, {@code FAILED}, without the worker ever picking
+   * <p>A {@code QUEUED} one is <b>finished here</b>, {@code CANCELLED}, without the worker ever picking
    * it up. There is no container to ask and no step to stop, so the row is the whole of the
    * cancellation; the worker's own {@link #startQueued} then finds a row that is no longer queued
    * and drops it. That is the queue-visible form of what this class did before, when a cancellation
@@ -1457,7 +1467,7 @@ public class CiRunService {
               if (current == null || current.status != CiRunStatus.QUEUED) {
                 return false;
               }
-              current.status = CiRunStatus.FAILED;
+              current.status = CiRunStatus.CANCELLED;
               current.finishedAt = Instant.now();
               current.cancellationReason = reason;
               current.supersededByRunId = null;

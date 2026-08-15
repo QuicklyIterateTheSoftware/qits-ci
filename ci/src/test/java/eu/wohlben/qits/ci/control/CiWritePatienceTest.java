@@ -167,7 +167,7 @@ public class CiWritePatienceTest extends CiTestSupport {
     assertTrue(flaky.flushes() > 1, "the severed cancellation was not retried at all");
     forgetLoadedEntities();
     CiRun cancelled = runService.requireRun(runId);
-    assertEquals(CiRunStatus.FAILED, cancelled.status);
+    assertEquals(CiRunStatus.CANCELLED, cancelled.status);
     assertEquals("stopping it", cancelled.cancellationReason);
   }
 

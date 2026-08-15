@@ -71,21 +71,40 @@ public class CiFinishedRunsTest extends CiTestSupport {
   }
 
   @Test
+  public void newestMeansFinishedLastNotAcceptedLast() {
+    String slowOlder = insert("repo-slow", CiRunStatus.SUCCESS, EPOCH);
+    String quickNewer = insert("repo-quick", CiRunStatus.SUCCESS, EPOCH.plusSeconds(60));
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              runs.findById(slowOlder).finishedAt = EPOCH.plusSeconds(300);
+              runs.findById(quickNewer).finishedAt = EPOCH.plusSeconds(120);
+            });
+
+    assertEquals(
+        List.of(slowOlder, quickNewer),
+        service.finishedRuns(2).stream().map(run -> run.id).toList(),
+        "the pipeline that actually finished last belongs at the head");
+  }
+
+  @Test
   public void everyTerminalStatusCountsAsFinishedAndNothingInFlightDoes() {
     // CONFIG_ERROR is the one that gets forgotten when a predicate names the terminal statuses
     // instead of excluding the non-terminal ones — a broken gate is finished, and it is exactly the
     // outcome an operator most wants to see in a "what just happened" list.
     String green = insert("repo-a", CiRunStatus.SUCCESS, EPOCH);
     String red = insert("repo-a", CiRunStatus.FAILED, EPOCH.plusSeconds(60));
-    String broken = insert("repo-b", CiRunStatus.CONFIG_ERROR, EPOCH.plusSeconds(120));
+    String cancelled = insert("repo-b", CiRunStatus.CANCELLED, EPOCH.plusSeconds(120));
+    String broken = insert("repo-b", CiRunStatus.CONFIG_ERROR, EPOCH.plusSeconds(180));
     // Both non-terminal statuses, and both NEWER than everything above — so a listing that leaked
     // them would leak them at the head, where the client reads first.
-    String queued = insert("repo-c", CiRunStatus.QUEUED, EPOCH.plusSeconds(180));
-    String running = insert("repo-c", CiRunStatus.RUNNING, EPOCH.plusSeconds(240));
+    String queued = insert("repo-c", CiRunStatus.QUEUED, EPOCH.plusSeconds(240));
+    String running = insert("repo-c", CiRunStatus.RUNNING, EPOCH.plusSeconds(300));
 
     List<String> ids = service.finishedRuns(10).stream().map(run -> run.id).toList();
 
-    assertEquals(List.of(broken, red, green), ids, "every terminal status, newest first");
+    assertEquals(List.of(broken, cancelled, red, green), ids, "every terminal status, newest first");
+    assertTrue(ids.contains(cancelled), "a CANCELLED run has finished without being failed");
     assertTrue(ids.contains(broken), "a CONFIG_ERROR run has finished");
     assertFalse(ids.contains(queued), "a queued run has not finished");
     assertFalse(ids.contains(running), "a running run has not finished");

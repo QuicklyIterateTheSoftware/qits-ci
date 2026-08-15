@@ -69,6 +69,10 @@ public class CiRun extends PanacheEntityBase implements CausedRow {
   @Column(name = "created_at", nullable = false)
   public Instant createdAt;
 
+  /** When the worker claimed this queued run and pipeline execution actually began. */
+  @Column(name = "started_at")
+  public Instant startedAt;
+
   @Column(name = "finished_at")
   public Instant finishedAt;
 

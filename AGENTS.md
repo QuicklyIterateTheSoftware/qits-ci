@@ -347,7 +347,7 @@ Two more things live in this package and belong to it rather than to `ci/`:
   same await at once.
 
   **Cancelling a run that has not started at all never reaches this package**, and that is the shape
-  a `QUEUED` row bought. `CiRunService.cancel` finds the row still queued, writes it `FAILED` in its
+  a `QUEUED` row bought. `CiRunService.cancel` finds the row still queued, writes it `CANCELLED` in its
   own transaction, and the worker's claim then sees a row that is no longer `QUEUED` and drops it —
   no container, no `Cancel` frame, no launch to tear down. The flag is still raised, and that is not
   belt-and-braces for its own sake: cancel runs on the request thread and the claim runs on the run
@@ -461,7 +461,7 @@ covers them.
 
 **The two run listings are complements, and the predicate is written that way on purpose.**
 `/active` is `status in (QUEUED, RUNNING)` and `/finished` is `status NOT in (QUEUED, RUNNING)` —
-not `in (SUCCESS, FAILED, CONFIG_ERROR)`, which reads the same today and rots silently: a sixth
+not `in (SUCCESS, FAILED, CANCELLED, CONFIG_ERROR)`, which reads the same today and rots silently: a new
 value added to `ck_ci_run_status` would be finished in fact and invisible to both lists, so a run
 would leave one and never arrive in the other. Written as a complement they partition the table by
 construction. `/finished` carries `?limit=` where `/active` does not, and the asymmetry is the whole

@@ -56,7 +56,7 @@ create table ci_run (
     repo_id varchar(255) not null,
     branch varchar(255) not null,
     commit_sha varchar(64) not null,
-    -- QUEUED, RUNNING, SUCCESS, FAILED or CONFIG_ERROR. Not checked here; see the header.
+    -- QUEUED, RUNNING, SUCCESS, FAILED, CANCELLED or CONFIG_ERROR. Not checked here; see the header.
     status varchar(32) not null,
     created_at timestamp(6) with time zone not null,
     finished_at timestamp(6) with time zone,

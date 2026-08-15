@@ -30,6 +30,7 @@ public interface CiRunMapper {
         bare.commitSha(),
         bare.status(),
         bare.createdAt(),
+        bare.startedAt(),
         bare.finishedAt(),
         bare.cancellationReason(),
         bare.supersededByRunId(),
