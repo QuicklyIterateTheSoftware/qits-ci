@@ -998,7 +998,7 @@ a repository's own listing will show.
   environment sharing capacity are not a supported shape — size a single instance with
   `qits.ci.concurrent-builds` instead.
 - Set `qits.ci.concurrent-builds` to the maximum number of pipelines this qits-ci instance may run
-  at once (default **2**, minimum **1**). Steps remain sequential within one pipeline. Size this
+  at once (default **4**, minimum **1**). Steps remain sequential within one pipeline. Size this
   together with the host's CPU and memory and the per-container `qits.ci.cpus`/`memory-limit` caps.
 - Set `qits.ci.git-host-url` / `qits.ci.container-git-url` to the git host as reachable from the ci
   host and from a step container respectively. **Both end at the service, not at `/git`** — ci
