@@ -47,7 +47,7 @@
     </modules>
 
     <properties>
-        <qits.eventstream.version>2026.811.155429</qits.eventstream.version>
+        <qits.eventstream.version>2026.815.121800</qits.eventstream.version>
         <!-- qits-githost's event vocabulary: the SCM records a push announces. qits-ci consumes
              SCMPublishCommit and nothing else, but the jar is the whole vocabulary — it is a data
              module with one dependency (qits-eventstream) and no container.
@@ -83,8 +83,8 @@
              assertion that this service configured it. They move together, because the rule names
              the driver as a STRING: a driver that moved without the rule would pass a build it
              should fail. -->
-        <qits.db-core.version>2026.811.165001</qits.db-core.version>
-        <qits.arch-rules.version>2026.811.165001</qits.arch-rules.version>
+        <qits.db-core.version>2026.815.141521</qits.db-core.version>
+        <qits.arch-rules.version>2026.815.141521</qits.arch-rules.version>
         <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
