@@ -11,6 +11,9 @@
 # whichever tier listens to the built branch.
 deployment_target: environment
 
+routes: /ci
+navigation: CI:1
+
 # TWO DATABASES, because this deployable joins two jars that each own a store, and each one maps the
 # generic contract in its own shipped defaults. qits-platform-deployments creates a role and a
 # database per entry on the tier's postgres before the successor container starts, and injects
