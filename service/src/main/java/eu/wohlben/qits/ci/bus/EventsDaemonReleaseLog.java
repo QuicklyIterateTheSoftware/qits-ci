@@ -57,6 +57,8 @@ public class EventsDaemonReleaseLog implements DaemonReleaseLog {
       HttpRequest request =
           HttpRequest.newBuilder(URI.create(listUrl(limit)))
               .timeout(Duration.ofSeconds(10))
+              .header("X-Qits-User", "qits-ci")
+              .header("X-Qits-Roles", "qits:system")
               .GET()
               .build();
       HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
