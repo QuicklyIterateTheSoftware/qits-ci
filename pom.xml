@@ -75,7 +75,7 @@
              A pin that only a warm cache and a developer's ~/.m2 can satisfy is a red release
              waiting for whoever next edits a file. Pin released calver, or the pin is a guess. -->
         <qits.containers-client.version>2026.814.73521</qits.containers-client.version>
-        <qits.auth-core.version>2026.815.141521</qits.auth-core.version>
+        <qits.auth-core.version>2026.817.175344</qits.auth-core.version>
         <!-- The platform's datasource resilience, released out of libs/qits-integrations-quarkus
              together with the two above, which is why the strings match: qits-db-core carries
              PatientPgDriver — the pool opens its connections through it, and a request is HELD
@@ -83,8 +83,8 @@
              assertion that this service configured it. They move together, because the rule names
              the driver as a STRING: a driver that moved without the rule would pass a build it
              should fail. -->
-        <qits.db-core.version>2026.815.141521</qits.db-core.version>
-        <qits.arch-rules.version>2026.815.141521</qits.arch-rules.version>
+        <qits.db-core.version>2026.817.175344</qits.db-core.version>
+        <qits.arch-rules.version>2026.817.175344</qits.arch-rules.version>
         <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
