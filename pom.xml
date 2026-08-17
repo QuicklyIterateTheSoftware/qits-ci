@@ -75,7 +75,7 @@
              A pin that only a warm cache and a developer's ~/.m2 can satisfy is a red release
              waiting for whoever next edits a file. Pin released calver, or the pin is a guess. -->
         <qits.containers-client.version>2026.814.73521</qits.containers-client.version>
-        <qits.auth-core.version>2026.815.141521</qits.auth-core.version>
+        <qits.auth-core.version>2026.817.175344</qits.auth-core.version>
         <!-- The platform's datasource resilience, released out of libs/qits-integrations-quarkus
              together with the two above, which is why the strings match: qits-db-core carries
              PatientPgDriver — the pool opens its connections through it, and a request is HELD
