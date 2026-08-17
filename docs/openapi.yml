@@ -195,8 +195,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DaemonPinDto"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       tags:
       - Ci Daemon Controller
+      security:
+      - SecurityScheme:
+        - qits:system
   /ci/api/events/trigger:
     post:
       summary: Run every event pipeline that selects a caller-supplied domain event
@@ -223,8 +230,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TriggerEventResult"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       tags:
       - Ci Event Controller
+      security:
+      - SecurityScheme:
+        - qits:system
   /ci/api/repositories:
     get:
       summary: The repository ids qits-ci has recorded runs for
@@ -235,8 +249,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ListRepositoryIdsResponse"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       tags:
       - Ci Repository Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /ci/api/repositories/summary:
     get:
       summary: Each repository with its newest run and its newest run on main
@@ -247,8 +268,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ListRepositorySummariesResponse"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       tags:
       - Ci Repository Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /ci/api/runs:
     get:
       summary: "List a repository's CI runs, newest first"
@@ -275,8 +303,15 @@ paths:
         "400":
           description: "The repository id is missing or invalid, or the limit is not\
             \ a positive integer"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       tags:
       - Ci Run Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /ci/api/runs/active:
     get:
       summary: "Every queued or running CI run, all repositories, newest first"
@@ -287,8 +322,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ListRunsResponse"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       tags:
       - Ci Run Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /ci/api/runs/finished:
     get:
       summary: "The newest finished CI runs, all repositories, newest first"
@@ -309,8 +351,15 @@ paths:
                 $ref: "#/components/schemas/ListRunsResponse"
         "400":
           description: The limit is not a positive integer
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       tags:
       - Ci Run Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /ci/api/runs/{runId}:
     get:
       summary: "One CI run with its steps, output and — while it runs — its live step"
@@ -329,8 +378,15 @@ paths:
                 $ref: "#/components/schemas/CiRunDto"
         "404":
           description: No such run
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       tags:
       - Ci Run Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /ci/api/runs/{runId}/cancel:
     post:
       summary: Cancel a queued or running CI run
@@ -354,10 +410,17 @@ paths:
           description: No such run
         "409":
           description: "The run has already finished, so there is nothing to stop"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
         "400":
           description: Bad Request
       tags:
       - Ci Run Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
 info:
   title: qits-ci API
   version: 2026.814.123830

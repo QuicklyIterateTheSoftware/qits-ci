@@ -33,6 +33,15 @@ import org.junit.jupiter.api.Test;
  * purpose. What is under test is this service's decision about a token's claims; whether a signature
  * or an expiry is checked is quarkus-oidc's contract, tested where it lives. A test issuer here
  * would only re-assert the extension.
+ *
+ * <p><b>The reads are no longer open, and three doors now shut in order.</b> No token at all is a
+ * 401. A token granted no roles is a 403 at {@code @RolesAllowed} — qits-platform-idp copies a
+ * client's {@code roles} into the token's {@code groups} claim and quarkus-oidc reads that claim as
+ * roles with no configuration at all, so a token minted without it authenticates and covers
+ * nothing. Only then is {@code MachineAuth} asked, and a wrong audience or an uncovered project is
+ * its own 403. Which caller each read serves is spelled out per case: the daemon pin takes the two
+ * system roles a machine peer holds, and the repository listing takes {@code qits:admin}, which
+ * only a forwarded {@code X-Qits-Roles} carries.
  */
 @QuarkusTest
 @TestProfile(MachineGuardTest.GateOn.class)
@@ -73,6 +82,25 @@ class MachineGuardTest {
     }
   }
 
+  /**
+   * The machine roles qits-platform-idp grants a platform service client, copied into the token's
+   * {@code groups} claim from {@code qits.idp.client.<id>.roles}. quarkus-oidc reads that claim as
+   * the identity's roles with no configuration at all, which is what lets a machine caller satisfy
+   * the {@code @RolesAllowed("qits:system")} the guarded controllers carry.
+   *
+   * <p><b>{@code @TestSecurity} replaces the identity wholesale rather than adding to it</b>, so a
+   * case that names only the user installs a caller granted nothing: it authenticates and is then
+   * refused 403, which is the shape {@link #aTokenGrantedNoRolesIs403} asserts on purpose. An
+   * annotation takes only constant expressions, so the pair below is spelled out at every use.
+   */
+  private static final String SYSTEM = "qits:system";
+
+  /** The platform-wide half of the same grant, held by the same clients. */
+  private static final String PLATFORM_SYSTEM = "qits-platform:system";
+
+  /** A person's role, which the edge forwards in {@code X-Qits-Roles} and no machine token holds. */
+  private static final String ADMIN = "qits:admin";
+
   /** Absolute, like every address here: it is what catches a prefix or a rename regression. */
   private static final String TRIGGER = "/ci/api/events/trigger";
 
@@ -95,7 +123,7 @@ class MachineGuardTest {
   }
 
   @Test
-  @TestSecurity(user = ARTIFACTS)
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
   @OidcSecurity(
       claims = {
         @Claim(key = "aud", value = OWN_AUDIENCE),
@@ -117,7 +145,7 @@ class MachineGuardTest {
   }
 
   @Test
-  @TestSecurity(user = ARTIFACTS)
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
   @OidcSecurity(
       claims = {
         @Claim(key = "aud", value = FOREIGN_AUDIENCE),
@@ -137,7 +165,7 @@ class MachineGuardTest {
   }
 
   @Test
-  @TestSecurity(user = ARTIFACTS)
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
   @OidcSecurity(claims = {@Claim(key = "aud", value = OWN_AUDIENCE)})
   void aTokenGrantedNoProjectClaimIs403() {
     // An absent claim is a mismatch, never a wildcard.
@@ -151,7 +179,7 @@ class MachineGuardTest {
   }
 
   @Test
-  @TestSecurity(user = ARTIFACTS)
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
   @OidcSecurity(
       claims = {
         @Claim(key = "aud", value = OWN_AUDIENCE),
@@ -176,9 +204,60 @@ class MachineGuardTest {
         @Claim(key = "aud", value = OWN_AUDIENCE),
         @Claim(key = QitsClaims.PROJECT, value = "*")
       })
-  void readsAreNotGuarded() {
-    given().when().get("/ci/api/repositories").then().statusCode(200);
-    // Including the daemon pin, which the artifacts GC reads from qits-net holding no intake token.
+  void aTokenGrantedNoRolesIs403() {
+    // A client id qits-platform-idp knows with no `.roles` line beside it mints exactly this:
+    // correctly signed, addressed here, granted every project, and carrying an empty `groups`
+    // claim. It authenticates and covers nothing, because @RolesAllowed shuts before MachineAuth is
+    // ever asked. A 403 rather than the 401 an absent token gets, which is what tells a missing idp
+    // grant from a missing sender.
+    given()
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(TRIGGER_BODY)
+        .when()
+        .post(TRIGGER)
+        .then()
+        .statusCode(403);
+  }
+
+  @Test
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = OWN_AUDIENCE),
+        @Claim(key = QitsClaims.PROJECT, value = "*")
+      })
+  void theDaemonPinIsAMachinePeersReadRatherThanAnOpenOne() {
+    // qits-platform-artifacts' collector reads the pin before it deletes a daemon binary. It holds
+    // this service's audience and the two system roles, so the read answers it — and the endpoint
+    // is closed to everyone else, which is the contract rather than an oversight.
     given().when().get("/ci/api/daemon").then().statusCode(200);
+  }
+
+  @Test
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = OWN_AUDIENCE),
+        @Claim(key = QitsClaims.PROJECT, value = "*")
+      })
+  void theRepositoryListingIsAPersonsReadAndRefusesAMachine() {
+    // qits-spa-ci draws this listing, so it takes qits:admin — a role only a forwarded
+    // X-Qits-Roles carries. An impeccable machine token is refused 403 here: the reads used to be
+    // open and are not, and which caller each one serves is the whole of what this case says.
+    given().when().get("/ci/api/repositories").then().statusCode(403);
+  }
+
+  @Test
+  void aForwardedAdminSessionReadsTheRepositoryListing() {
+    // The other side of the same route, and the reason no @TestSecurity is here: the headers ARE
+    // the contract. The edge establishes the session and qits-gateway asserts the pair, which is
+    // what this profile's blanked dev user makes visible.
+    given()
+        .header("X-Qits-User", "alice")
+        .header("X-Qits-Roles", ADMIN)
+        .when()
+        .get("/ci/api/repositories")
+        .then()
+        .statusCode(200);
   }
 }
