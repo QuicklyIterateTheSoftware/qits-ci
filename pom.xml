@@ -47,7 +47,7 @@
     </modules>
 
     <properties>
-        <qits.eventstream.version>2026.815.121800</qits.eventstream.version>
+        <qits.eventstream.version>2026.817.202549</qits.eventstream.version>
         <!-- qits-githost's event vocabulary: the SCM records a push announces. qits-ci consumes
              SCMPublishCommit and nothing else, but the jar is the whole vocabulary — it is a data
              module with one dependency (qits-eventstream) and no container.
