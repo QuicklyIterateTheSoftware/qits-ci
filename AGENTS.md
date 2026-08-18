@@ -390,6 +390,15 @@ The host's side of the contract, including the 8 MiB blob cap and why a slashy b
 `feature%2Fx`, is qits-artifacts' `README.md` under "Reading one file without cloning". **qits-ci
 spawns no `git`**, and the image no longer carries one.
 
+**Both reads carry `IdpGitHostBearer`'s token, and a missing one costs the HEADER rather than the
+call.** The bearer is its own named oidc client (`quarkus.oidc-client.githost`) because qits-githost
+validates a different audience from qits-containers'. When it has nothing to give — the client is
+disabled, or the idp did not answer — the request goes out bare and the git host refuses it, which
+is a 401 this class reports like any other status. It used to throw instead, and that was worse in
+both directions: with the client shipped `false` every config read of every run failed before a
+socket was opened, and the refusal it stood in for is one the host makes anyway. Same rule, and the
+same reasoning, as qits-containers' client.
+
 ## The run queue, and what a run row means
 
 **A run is a row from the moment it is accepted.** `CiRunService.onPostReceive` and
@@ -484,10 +493,21 @@ evaluates before it answers and has no git host to ask in that profile. Either w
 out 401 and 403, which is the whole of what a guard test can say.
 **The push intake used to be the second guarded write and is not a write at all any more**: a push
 arrives as `SCMPublishCommit` off the bus, where a bearer would mean nothing, so the cases that
-asked "may this token push to this repository" have no endpoint left. It also asserts the reads answer
-200 unguarded, so "guarded" stays a statement about which endpoints rather than about the service.
+asked "may this token push to this repository" have no endpoint left.
 Add a write endpoint, add its case there, and keep every address in that test absolute: a moved
 prefix then shows up as a 404 rather than as a pass.
+
+**The reads are not open, and `@RolesAllowed` shuts before the guard call is reached.** Every
+controller carries a class-level role: `qits:admin` on `CiRunController` and `CiRepositoryController`,
+which is what qits-spa-ci's session holds, and `qits:system` on `CiEventController`,
+`CiDaemonController` and `CiDaemonSocket`, which is what a machine peer holds. So three doors shut in
+order, and `MachineGuardTest` pins which: no token is 401, a token granted no roles is 403 at
+`@RolesAllowed`, a wrong audience or an uncovered project is `MachineAuth`'s own 403. **A machine
+token carries its roles in the `groups` claim** — qits-platform-idp copies them there from
+`qits.idp.client.<id>.roles` and quarkus-oidc reads that claim as roles with no configuration at
+all — so a fixture that mints a token without `groups` authenticates perfectly and is then refused
+403, which is a stale fixture rather than a regression. A method-level role list **replaces** the
+class-level one rather than adding to it; a route both a person and a machine read must name both.
 
 ## The Angular client
 

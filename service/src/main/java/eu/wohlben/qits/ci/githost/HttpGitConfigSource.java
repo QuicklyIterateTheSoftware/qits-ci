@@ -272,21 +272,25 @@ public class HttpGitConfigSource implements CiConfigSource {
     }
   }
 
-  /** One GET. Never throws: a transport failure is {@link Answer#FAILED}, which is not a 404. */
+  /**
+   * One GET. Never throws: a transport failure is {@link Answer#FAILED}, which is not a 404.
+   *
+   * <p><b>A missing token costs the header and never the call.</b> qits-githost guards its own
+   * content routes, so a bare request comes back 401 — a status this method reports like any other,
+   * naming the repository and the url. Refusing here instead put an exception on the run worker for
+   * a refusal the host makes anyway, and it guarded nothing the host does not already guard: with
+   * {@code quarkus.oidc-client.githost.client-enabled} shipped false, every config read of every run
+   * failed before a socket was opened. Same rule as qits-containers' client.
+   */
   private Answer get(String url) {
     try {
-      String token =
-          gitHostBearer
-              .token()
-              .filter(value -> !value.isBlank())
-              .orElseThrow(
-                  () -> new IllegalStateException("No machine bearer is available for qits-githost"));
-      HttpRequest request =
-          HttpRequest.newBuilder(URI.create(url))
-              .timeout(REQUEST_TIMEOUT)
-              .header("Authorization", "Bearer " + token)
-              .GET()
-              .build();
+      HttpRequest.Builder building =
+          HttpRequest.newBuilder(URI.create(url)).timeout(REQUEST_TIMEOUT).GET();
+      gitHostBearer
+          .token()
+          .filter(value -> !value.isBlank())
+          .ifPresent(token -> building.header("Authorization", "Bearer " + token));
+      HttpRequest request = building.build();
       HttpResponse<byte[]> response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
       return new Answer(
           response.statusCode(),

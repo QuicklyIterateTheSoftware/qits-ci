@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 /**
@@ -62,11 +63,22 @@ public class StubGitHost implements QuarkusTestResourceLifecycleManager {
 
   private static Server shared;
 
-  /** One running stub: the port it took, and the base a caller configures. */
-  public record Server(HttpServer http, int port) {
+  /** One running stub: the port it took, the base a caller configures, and what it last read. */
+  public record Server(HttpServer http, int port, AtomicReference<String> seenAuthorization) {
 
     public String gitHostUrl() {
       return "http://127.0.0.1:" + port;
+    }
+
+    /**
+     * The {@code Authorization} header of the last request, or null when it carried none.
+     *
+     * <p>The real host guards its content routes on a bearer, and this stub answers everyone — so
+     * without this the suite could not tell a read that carries the credential from one that has
+     * quietly stopped carrying it.
+     */
+    public String lastAuthorization() {
+      return seenAuthorization.get();
     }
 
     public void stop() {
@@ -77,10 +89,16 @@ public class StubGitHost implements QuarkusTestResourceLifecycleManager {
   /** Starts a stub serving the bares under {@code <root>/git/}, on a free port. */
   public static Server start(Path root) throws Exception {
     Files.createDirectories(root.resolve("git"));
+    AtomicReference<String> seen = new AtomicReference<>();
     HttpServer http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-    http.createContext(BASE, exchange -> answer(root, exchange));
+    http.createContext(
+        BASE,
+        exchange -> {
+          seen.set(exchange.getRequestHeaders().getFirst("Authorization"));
+          answer(root, exchange);
+        });
     http.start();
-    return new Server(http, http.getAddress().getPort());
+    return new Server(http, http.getAddress().getPort(), seen);
   }
 
   @Override

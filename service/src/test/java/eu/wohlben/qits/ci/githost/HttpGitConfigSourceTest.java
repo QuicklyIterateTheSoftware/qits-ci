@@ -2,6 +2,7 @@ package eu.wohlben.qits.ci.githost;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -107,6 +108,23 @@ public class HttpGitConfigSourceTest {
     String sha = seed(repoId, "steps: []\n");
     host.stop();
     assertEquals(ConfigLookup.Status.UNREACHABLE, source.read(repoId, BRANCH, sha).status());
+  }
+
+  @Test
+  public void aReadCarriesTheBearerAndAMissingOneCostsTheHeaderRatherThanTheCall() throws Exception {
+    // Both halves of the credential contract, because the suite runs with the oidc client off and
+    // would otherwise say nothing about either. With a token the header is on the wire; without
+    // one the request still goes out bare and the git host is left to refuse it — which is what it
+    // does, and a 401 read is reportable where an exception on the run worker was not.
+    String repoId = "repo-authenticated";
+    String sha = seed(repoId, "steps: []\n");
+
+    assertEquals(ConfigLookup.Status.FOUND, source.read(repoId, BRANCH, sha).status());
+    assertEquals("Bearer machine-token", host.lastAuthorization());
+
+    source.gitHostBearer = java.util.Optional::empty;
+    assertEquals(ConfigLookup.Status.FOUND, source.read(repoId, BRANCH, sha).status());
+    assertNull(host.lastAuthorization(), "a bearerless read must send no header at all");
   }
 
   @Test
