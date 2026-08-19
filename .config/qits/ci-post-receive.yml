@@ -144,13 +144,74 @@ steps:
         *) echo "not a maintenance branch: $QITS_CI_BRANCH"; exit 1 ;;
       esac
       summary=$(git log -1 --format=%s)
+
+      # AUTHORIZATION, and why this step grew one. The release door is machine-authenticated —
+      # qits-workspaces runs with QITS_AUTH_MACHINE_REQUIRED=true — so the POST below with no
+      # Authorization header is answered 401, and the step goes red with `release refused: HTTP
+      # 401`. It did exactly that on every maintenance bump from the day machine auth was switched
+      # on: this step predates the switch, nothing about the bump train changed, and because the
+      # only leg that fails is the last one, each bump landed on its branch and quietly stayed
+      # there — green build, no release, no announcement, nobody told.
+      #
+      # THE CREDENTIAL IS THIS RUN'S OWN, never a secret written down here. qits-ci commissions an
+      # idp client per run and injects it as $QITS_COMMISSIONED_CLIENT_ID and
+      # $QITS_COMMISSIONED_CLIENT_SECRET — the same pair an image step hands buildx as a --secret
+      # mount, and the same pair qits-git-credential exchanges before a push over HTTP. It is
+      # short-lived and revoked at teardown, which is what makes it the only credential a step
+      # authored in a repository is allowed to hold.
+      #
+      # $QITS_GIT_AUTH_TOKEN_URL is the idp's token endpoint. The name says "git" because git's
+      # helper was its first caller; the value is the plain token URL, and it is the only idp
+      # address a step is given.
+      #
+      # THE AUDIENCE IS DERIVED, not spelled. A token is cut FOR one service and qits-workspaces
+      # refuses one cut for anyone else, so the mint below has to name it — and the name is the
+      # host of $QITS_WORKSPACES_URL, which is the service alias, which is what qits-workspaces
+      # checks as QITS_AUTH_MACHINE_AUDIENCE. Deriving keeps this deployment out of this file, the
+      # same rule $QITS_WORKSPACES_URL itself follows. $QITS_WORKSPACES_AUDIENCE is read first, so
+      # a later launcher can state the audience outright without editing every repository carrying
+      # this step.
+      #
+      # NO PAIR, NO HEADER. A deployment that commissions nothing has no pair to exchange and has
+      # machine auth off as well, so there the call goes out unauthenticated exactly as it always
+      # did, rather than the step dying on a mint it was never going to be able to make. A pair
+      # that IS present and cannot be exchanged is the opposite case — a broken platform rather
+      # than an unconfigured one — and that is red.
       node -e '
         const [url, branch, summary] = process.argv.slice(1);
-        fetch(url, {
+        const env = process.env;
+
+        // The bearer the door now demands. With no commissioned pair this resolves to no header at
+        // all, which is precisely the call this step used to make.
+        const authorize = async () => {
+          const id = env.QITS_COMMISSIONED_CLIENT_ID;
+          const secret = env.QITS_COMMISSIONED_CLIENT_SECRET;
+          const tokenUrl = env.QITS_GIT_AUTH_TOKEN_URL;
+          if (!id || !secret || !tokenUrl) return {};
+          const audience = env.QITS_WORKSPACES_AUDIENCE || new URL(url).hostname;
+          const basic = Buffer.from(id + ":" + secret).toString("base64");
+          const res = await fetch(tokenUrl, {
+            method: "POST",
+            headers: {
+              "content-type": "application/x-www-form-urlencoded",
+              authorization: `Basic ${basic}`,
+            },
+            body: new URLSearchParams({ grant_type: "client_credentials", audience }),
+          });
+          const text = await res.text();
+          if (!res.ok) {
+            throw new Error(`idp refused the commissioned client for ${audience}: HTTP ${res.status} ${text}`);
+          }
+          const token = JSON.parse(text).access_token;
+          if (!token) throw new Error(`idp returned no access_token for ${audience}`);
+          return { authorization: `Bearer ${token}` };
+        };
+
+        authorize().then((auth) => fetch(url, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", ...auth },
           body: JSON.stringify({ branch, summary }),
-        }).then(async (res) => {
+        })).then(async (res) => {
           const text = await res.text();
           let body = {};
           try { body = JSON.parse(text); } catch {}

@@ -461,6 +461,20 @@ the caller's to spell, and the address is never a literal in a pipeline. Like th
 unlike `$QITS_REGISTRY`, it is dialled by the step container itself over the shared network, so the
 in-network alias is the value that is right for it.
 
+**That POST must carry a bearer.** qits-workspaces runs with `QITS_AUTH_MACHINE_REQUIRED=true`, so
+an unauthenticated call is answered 401 — and because the release is the *last* leg of the
+maintenance bump train, a step that omits the header builds green and then strands its bump on its
+branch, silently. The credential is the run's own commissioned client, the same pair the docker
+block hands buildx and the same pair `qits-git-credential` exchanges: `POST
+$QITS_GIT_AUTH_TOKEN_URL` with `grant_type=client_credentials`, HTTP Basic
+`$QITS_COMMISSIONED_CLIENT_ID:$QITS_COMMISSIONED_CLIENT_SECRET`, and an `audience` naming
+qits-workspaces. `$QITS_GIT_AUTH_TOKEN_URL` is the idp's plain token endpoint despite its name —
+git's helper was merely its first caller, and it is the only idp address a step is given. The
+audience is not injected today; a step derives it from the host of `$QITS_WORKSPACES_URL`, which is
+the service alias qits-workspaces checks as its `QITS_AUTH_MACHINE_AUDIENCE`. A step that finds no
+commissioned pair should send no header rather than fail — a deployment that commissions nothing
+has machine auth off too.
+
 ## The other file a repository commits: `.config/qits/ci-event-*.yml`
 
 A push is not the only thing that can run a pipeline. A repository may also commit **event
