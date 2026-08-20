@@ -244,6 +244,35 @@ public class CiRunService {
   Duration dbRetryDeadline;
 
   /**
+   * qits-platform-artifacts' coordinates, for resolving a step image a recipe named without a
+   * registry — see {@link CiStepImage} for the rule and for what it is worth. The same two keys the
+   * publish scripts compose as {@code $QITS_REGISTRY} and {@code $QITS_IMAGE_REPOSITORY}, read here
+   * so a recipe keeps naming no deployment fact of its own. RECEIVER-NAMED, like every other reader
+   * of this pair.
+   */
+  @ConfigProperty(name = "qits.artifacts.registry-host")
+  String artifactsRegistryHost;
+
+  @ConfigProperty(name = "qits.artifacts.image-repository")
+  String artifactsImageRepository;
+
+  /**
+   * The kill switch for that resolution, and it exists because of what it costs to be wrong.
+   *
+   * <p>Resolving points every step at the registry, so a registry that does not hold these images
+   * yet breaks <b>every build in every repository at once</b> — and the pipeline that would publish
+   * them runs on one of them, so there is no run left that could fix it. That is not a hypothetical:
+   * on 2026-08-20 all five were absent from the registry <i>and</i> from the host, and an artifacts
+   * store has been re-seeded without them before. Off, a deployment falls back to the local store
+   * exactly as it always behaved, without rebuilding or redeploying this service.
+   *
+   * <p>Shipped ON, because the recoverable state is the one worth defaulting to and the failure is
+   * loud, immediate and reversible by one variable.
+   */
+  @ConfigProperty(name = "qits.ci.resolve-platform-step-images", defaultValue = "true")
+  boolean resolvePlatformStepImages;
+
+  /**
    * Runs a user asked to stop. In memory and deliberately so: a cancellation is only meaningful
    * while the run it addresses is executing in <em>this</em> process, and a restart fails every
    * in-flight run anyway.
@@ -743,6 +772,19 @@ public class CiRunService {
   }
 
   /**
+   * Where a declared step's image is really pulled from — see {@link CiStepImage}.
+   *
+   * <p><b>The resolved reference is what gets RECORDED as well as what gets started</b>, and the two
+   * being one value is the point: a launch that fails on the image says which reference it could not
+   * pull, rather than showing the recipe's shorthand and leaving the registry to be inferred.
+   */
+  private String stepImage(CiPipeline.CiStepDecl decl) {
+    return resolvePlatformStepImages
+        ? CiStepImage.resolve(decl.image(), artifactsRegistryHost, artifactsImageRepository)
+        : decl.image();
+  }
+
+  /**
    * The sequential loop. Each iteration blocks on one container's whole lifetime and then writes
    * exactly one terminal row; whatever the loop did not reach is written {@code SKIPPED} at the end.
    *
@@ -779,7 +821,7 @@ public class CiRunService {
           insertStep(
               run.id,
               index,
-              decl.image(),
+              stepImage(decl),
               CiStepStatus.SKIPPED,
               null,
               notBoundNote(run.branch),
@@ -797,7 +839,7 @@ public class CiRunService {
                     run.repoId,
                     run.branch,
                     run.commitSha,
-                    decl.image(),
+                    stepImage(decl),
                     decl.script(),
                     pin.binaryUrl(),
                     decl.timeoutSeconds() == null ? stepTimeoutSeconds : decl.timeoutSeconds(),
@@ -840,7 +882,7 @@ public class CiRunService {
         insertStep(
             run.id,
             index,
-            decl.image(),
+            stepImage(decl),
             ok ? CiStepStatus.SUCCESS : CiStepStatus.FAILED,
             result.exitCode(),
             annotate(result, wasCancelled),
@@ -858,7 +900,7 @@ public class CiRunService {
         insertStep(
             run.id,
             index,
-            declared.get(index).image(),
+            stepImage(declared.get(index)),
             CiStepStatus.FAILED,
             null,
             "[the step could not be executed: " + e + "]",
@@ -873,7 +915,7 @@ public class CiRunService {
       insertStep(
           run.id,
           skipped,
-          declared.get(skipped).image(),
+          stepImage(declared.get(skipped)),
           CiStepStatus.SKIPPED,
           null,
           null,
