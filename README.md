@@ -104,6 +104,7 @@ rest of qits it reaches over a URL it is configured with:
 | out | where the git host answers: ci reads a commit's pipeline config off its content routes — `<base>/git/<projectId>/<repoName>/blob/<rev>/<path>` and `…/tree/<rev>[/<path>]` for a run whose push carried the public pair, `<base>/git/<repoId>/…` for one that did not — and, with no `qits.ci.projects-url` set, its candidate listing off `GET <base>/git` → `{"repositories": [...]}` | `qits.ci.git-host-url` |
 | out | `GET <base>/projects/api/repositories` → `{"repositories": [{id, projectId, name, mainBranch}]}` — the candidate list an arriving event is evaluated against, and the only place the public `(projectId, name)` pair can be read. **Unset by default**: with no value ci falls back to the git host's storage listing, which is what a pre-cutover platform and a clone-alone build need | `qits.ci.projects-url` |
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
+| out | the same content routes again, at one repository's `main`, for the **platform** trigger files `.config/qits/ci-platform-event-*.yml` — one listing per arriving event; **blank turns it off and reads nothing** | `qits.ci.platform-pipelines-repository` (default `qits-qits`) |
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + the pin ladder's answer (`qits.ci.daemon-version` is the ladder's bottom rung, never demoted) |
 | out | `PUT /events/api/events/{uuid}` — one `BuildSuccessful` per **green** run, idempotent (the `RunAnnouncer` seam), and the **only** thing a green run announces | `qits.events.url`, `qits.eventstream.enabled` |
 | out | the same route — one `SoftwareRelease` per artifact a green **release pipeline** declared (the `ReleaseAnnouncer` seam), and **only once an `SCMRelease` for the same (repository, version) has been seen** — see "The release join" | the same two keys |
@@ -740,6 +741,44 @@ no content route to read its trigger files from.
 
 The candidate unit is `(repoId, projectId, name)`, and the pair is what the trigger read is addressed
 by. A candidate qits-ci knows only from its own run rows carries no pair and is read id-addressed.
+
+### The third file: `.config/qits/ci-platform-event-*.yml`
+
+One repository carries pipelines for **every** repository. `qits.ci.platform-pipelines-repository`
+names it — `qits-qits`, the wrapper, by default — and its
+`.config/qits/ci-platform-event-*.yml` files are read at its `main` head and evaluated against every
+arriving event, on top of each candidate's own trigger files.
+
+The file format is the ordinary trigger format: same `event:`, same `when:`, same `steps:`, same
+strictness, same `CONFIG_ERROR` handling. **What differs is which repository the run is about.** A
+platform pipeline records its run against — and its steps clone — the repository the event's
+**payload** names in a `repository` field. So one file bumps the whole catalogue instead of one file
+per repository per dependency.
+
+```yaml
+# in qits-qits, at .config/qits/ci-platform-event-maintenance-bump.yml
+event: MaintenanceBump
+steps:
+  - image: qits/build-images/maven-base:latest
+    script: |
+      repository=$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -er .repository)
+      ...
+```
+
+Three ways it records nothing, each one WARN naming the event and the repository: the payload carries
+no `repository`, it names one the catalogue does not hold, or that repository could not be read for
+this evaluation so there is no head to record a run at. A read failure is not a run.
+
+**Both kinds of file fire.** A repository with a local `ci-event-*.yml` and a platform
+`ci-platform-event-*.yml` selecting the same event gets **two runs** — two files, two declared
+pipelines — because the dedupe is per `(event, repository, config path)` and the paths differ. The
+run row records which file declared it, and the `ci-platform-event-` prefix is what tells the two
+apart wherever a run is read back. The platform repository's own `ci-event-*.yml` files are
+unaffected and still build that repository.
+
+The cost is **one** listing of that one repository per arriving event and nothing per candidate: the
+head a platform run is recorded at is the one the candidate pass already resolved. A blank
+`qits.ci.platform-pipelines-repository` turns the feature off and reads nothing at all.
 
 ### Exactly one run per (event, trigger file)
 

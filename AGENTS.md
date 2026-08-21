@@ -1142,6 +1142,41 @@ follows is what biting it feels like.
   fifth member of the family this file names. Check that reasoning again if the engine ever gains a
   Jackson `readValue`.
 
+## Platform pipelines
+
+A second source of trigger files, and the whole of what is new about it is *which repository the run
+is about*.
+
+- **One repository, one prefix.** `qits.ci.platform-pipelines-repository` (default `qits-qits`) names
+  it; its `.config/qits/ci-platform-event-*.yml` files are read at `main` through the same two
+  content routes `HttpGitConfigSource` already uses, and parsed by the same
+  `CiEventTriggerParser`. `CiTriggerScope` is the one type that knows which prefix belongs to which
+  kind, and the two prefixes are disjoint — `ci-platform-event-` does not start with `ci-event-` — so
+  one listing of `.config/qits/` sorts them and nothing needs a second read to decide.
+- **The payload names the repository, and it must be in the catalogue.** The run is recorded against,
+  and its steps clone, the repository `payload.repository` names, resolved against the same candidate
+  list the evaluation already has (name first, storage id second — the pre-cutover arm). No field, no
+  such repository, or a repository that could not be read this evaluation: one WARN naming the event
+  and the repository, and no run. **A read failure is not a run**, the same rule the rest of this
+  engine states.
+- **The head comes from the candidate pass, not from a second read.** `evaluate` keeps the head each
+  candidate answered with and the platform pass looks the target's up in it. So a platform pipeline
+  costs **one** extra listing per arriving event and nothing per candidate — and a target the
+  evaluation could not read has no head, which is exactly the case that must not become a run.
+- **Two files are two runs, deliberately.** A repository carrying both a local and a platform trigger
+  for one event gets two rows: the dedupe is `(trigger_event_id, repo_id, config_path)` and the paths
+  differ. That is also how a run says which kind it was — `config_path` already travels to the API,
+  and the prefix is the answer. Nothing was added to the schema for this.
+- **Blank is off and reads nothing.** The key is injected as `Optional<String>`, because a property
+  spelled as the empty string arrives as *absent* and a bare `String` injection point fails the whole
+  deployment on the one value that means "off". The suites turn it off in their
+  `application.properties` and arm it per test through the package-private setter — a method, not a
+  field write, because this bean is normal-scoped.
+- **Nothing about the thread discipline moved.** The platform pass runs inside the same
+  `evaluate`, on `ci-trigger-worker` or on the manual trigger's own request thread, inside the same
+  try/catch that keeps one failure from costing the others theirs, and never throws out of the
+  evaluation.
+
 ## Adding a dependency on another context
 
 Don't. Things arrive as an event off the bus, or as a URL in config, or not at all. There is
