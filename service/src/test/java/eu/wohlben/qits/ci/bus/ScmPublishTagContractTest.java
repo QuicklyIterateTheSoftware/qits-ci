@@ -37,6 +37,8 @@ public class ScmPublishTagContractTest {
   private static SCMPublishTag tag(String tagName) {
     return new SCMPublishTag(
         "qits-ci",
+        null,
+        null,
         tagName,
         "a".repeat(40),
         "b".repeat(40),

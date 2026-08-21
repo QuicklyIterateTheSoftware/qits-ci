@@ -1,7 +1,5 @@
 package eu.wohlben.qits.ci.bus;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import eu.wohlben.qits.eventstream.control.CanonicalJson;
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import eu.wohlben.qits.githost.events.SCMPublishCommit;
@@ -32,24 +30,43 @@ public final class ScmPushFrames {
 
   /** An ordinary push: the branch moved, and CI is meant to build it. */
   public static EventFrame push(String repoId, String branch, String oldSha, String sha) {
-    return frame(commit(repoId, branch, oldSha, sha, false));
+    return frame(commit(repoId, null, null, branch, oldSha, sha, false));
   }
 
   /** The same push made with {@code -o qits.no-ci}: announced, and not to be built. */
   public static EventFrame suppressed(String repoId, String branch, String oldSha, String sha) {
-    return frame(commit(repoId, branch, oldSha, sha, true));
+    return frame(commit(repoId, null, null, branch, oldSha, sha, true));
+  }
+
+  /**
+   * A push that arrived on the <b>name-addressed</b> route: the same payload, with the {@code
+   * projectId}/{@code repoName} the git host fills in from the address set on the record, so the
+   * canonical payload carries them exactly as a real name-addressed push does.
+   */
+  public static EventFrame named(
+      String repoId, String projectId, String repoName, String branch, String oldSha, String sha) {
+    return frame(commit(repoId, projectId, repoName, branch, oldSha, sha, false));
   }
 
   /**
    * The record itself, with the head-commit metadata the HTTP event never carried filled in as a
    * real push would fill it. None of it reaches a run row today; it is here because a payload that
-   * omitted it would not be the payload under test.
+   * omitted it would not be the payload under test. {@code projectId}/{@code repoName} are null for
+   * an id-addressed push and set for a name-addressed one.
    */
   public static SCMPublishCommit commit(
-      String repoId, String branch, String oldSha, String sha, boolean suppressCi) {
+      String repoId,
+      String projectId,
+      String repoName,
+      String branch,
+      String oldSha,
+      String sha,
+      boolean suppressCi) {
     Instant receivedAt = Instant.parse("2026-08-10T09:00:00Z");
     return new SCMPublishCommit(
         repoId,
+        projectId,
+        repoName,
         branch,
         oldSha,
         sha,
@@ -61,36 +78,6 @@ public final class ScmPushFrames {
         "a commit",
         suppressCi,
         receivedAt);
-  }
-
-  /**
-   * A push that arrived on the <b>name-addressed</b> route: the same payload, plus the {@code
-   * projectId}/{@code repoName} the git host fills in from the address.
-   *
-   * <p><b>The two fields are spliced into the JSON rather than set on the record</b>, and that is the
-   * situation rather than a shortcut: this repository pins a {@code qits-githost-events} that
-   * predates them, and qits-ci reads them off the payload tree for exactly that reason. A frame built
-   * this way is byte-shaped like the one the current git host publishes, and it is what proves the
-   * listener does not need the jar bumped to record a name.
-   */
-  public static EventFrame named(
-      String repoId, String projectId, String repoName, String branch, String oldSha, String sha) {
-    EventFrame plain = frame(commit(repoId, branch, oldSha, sha, false));
-    try {
-      ObjectMapper mapper = new ObjectMapper();
-      ObjectNode payload = (ObjectNode) mapper.readTree(plain.payload());
-      payload.put("projectId", projectId);
-      payload.put("repoName", repoName);
-      return new EventFrame(
-          plain.id(),
-          plain.name(),
-          plain.occurredAt(),
-          mapper.writeValueAsString(payload),
-          plain.description(),
-          plain.parentId());
-    } catch (Exception e) {
-      throw new IllegalStateException("could not build a name-addressed push frame", e);
-    }
   }
 
   /** The envelope a publisher would have written, wrapped as the frame a consumer is handed. */
