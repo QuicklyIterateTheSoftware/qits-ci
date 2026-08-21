@@ -6,12 +6,16 @@ import com.fasterxml.jackson.databind.JsonNode;
 import eu.wohlben.qits.ci.control.CiConfigParser.CiConfigException;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerFile;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerLookup;
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -68,6 +72,18 @@ import org.jboss.logging.Logger;
  * statement about bus traffic only; a manual call fans out beside the worker. That is the right way
  * round — the budget exists to keep a burst of machine events from storming the git host, and a
  * manual trigger is one request from one person, already bounded by the HTTP worker pool.
+ *
+ * <h2>Platform pipelines</h2>
+ *
+ * <p>There is a <b>second source of trigger files</b>: {@code .config/qits/ci-platform-event-*.yml}
+ * in the one repository {@code qits.ci.platform-pipelines-repository} names, at its {@code main}
+ * head. Such a file is parsed and selected exactly like a repository's own — same grammar, same
+ * schema, same per-file containment — but the run it records is about the repository the
+ * <b>payload</b> names, so one file serves the whole catalogue. See {@link #evaluatePlatform}.
+ *
+ * <p>It costs <b>one</b> extra listing per arriving event and no extra read per candidate: the head
+ * a platform run is recorded at is the one the candidate loop already resolved for that repository.
+ * A blank config key means the feature is off and nothing is read at all.
  */
 @ApplicationScoped
 public class CiEventTriggerService {
@@ -83,6 +99,13 @@ public class CiEventTriggerService {
   /** Deep enough that reaching it means something is wrong rather than something is busy. */
   static final int QUEUE_CAPACITY = 256;
 
+  /**
+   * The payload field a platform pipeline's run is about. A platform trigger file names no
+   * repository — it is one file for the catalogue — so the event has to, and this is the one word
+   * that contract is spelled in.
+   */
+  static final String PAYLOAD_REPOSITORY_FIELD = "repository";
+
   @Inject CiConfigSource configSource;
   @Inject CiEventTriggerParser triggerParser;
   @Inject CiCandidateRepos candidateRepos;
@@ -96,6 +119,44 @@ public class CiEventTriggerService {
    */
   @ConfigProperty(name = "qits.ci.trigger-deadline-seconds")
   int triggerDeadlineSeconds;
+
+  /**
+   * The repository whose {@code ci-platform-event-*.yml} files are platform pipelines — the wrapper
+   * repository by default, because that is the one repository the whole catalogue is described in.
+   *
+   * <p><b>Blank turns the feature off and reads nothing.</b> A deployment that declares no platform
+   * repository must not pay a listing per event for a file it has decided not to have.
+   */
+  @ConfigProperty(name = "qits.ci.platform-pipelines-repository")
+  Optional<String> configuredPlatformPipelinesRepository;
+
+  /**
+   * The repository this instance reads platform pipelines from — the config's value, normalised
+   * once, and whatever a test armed after that.
+   *
+   * <p>{@code Optional} above and a plain string here for one reason: a property spelled as the
+   * empty string reaches this process as <b>absent</b>, not as {@code ""}, so an unwrapped
+   * {@code String} injection point fails the whole deployment on the very value that means "off".
+   */
+  private String platformPipelinesRepository = "";
+
+  @PostConstruct
+  void readPlatformPipelinesRepository() {
+    platformPipelinesRepository = normalise(configuredPlatformPipelinesRepository.orElse(""));
+  }
+
+  /**
+   * Arms the platform-pipelines repository for one test. A method rather than a field write for
+   * {@code CiRunService.unreachableRetryDelays}' reason: this bean is normal-scoped, so a test holds
+   * a client proxy and a field write would land on the proxy and change nothing.
+   */
+  void platformPipelinesRepository(String repository) {
+    platformPipelinesRepository = normalise(repository);
+  }
+
+  private static String normalise(String repository) {
+    return repository == null ? "" : repository.trim();
+  }
 
   /**
    * One arriving event, in this module's own vocabulary: plain strings, no bus types. {@code
@@ -224,6 +285,10 @@ public class CiEventTriggerService {
     }
     List<String> runIds = new ArrayList<>();
     List<String> skipped = new ArrayList<>();
+    // The head each candidate answered with, kept for the platform pass: a platform run is recorded
+    // against the repository the payload names, at the commit that repository's main was on for THIS
+    // evaluation. Reading it again would be a second read of a branch that may have moved.
+    Map<String, String> heads = new HashMap<>();
     for (CiRepoRef repo : candidates) {
       if (deadlineNanos != null && System.nanoTime() - deadlineNanos >= 0) {
         // Out of time rather than out of answers, and the two must not look alike to the caller —
@@ -232,7 +297,7 @@ public class CiEventTriggerService {
         continue;
       }
       try {
-        if (!evaluateRepo(repo, arrival, payload, runIds)) {
+        if (!evaluateRepo(repo, arrival, payload, runIds, heads)) {
           skipped.add(repo.repoId());
         }
       } catch (RuntimeException e) {
@@ -241,6 +306,13 @@ public class CiEventTriggerService {
         LOG.warnf(e, "Could not evaluate event triggers for %s", repo.display());
         skipped.add(repo.repoId());
       }
+    }
+    try {
+      evaluatePlatform(arrival, payload, candidates, heads, runIds);
+    } catch (RuntimeException e) {
+      // Never out of the evaluation: the candidates' own runs are already recorded and a platform
+      // pipeline's failure is not theirs.
+      LOG.warnf(e, "Could not evaluate platform triggers for event %s", arrival.eventId());
     }
     if (!skipped.isEmpty() && skipped.size() == candidates.size()) {
       // Every candidate silent means the answer is about the git host, not about the event. WARN
@@ -259,15 +331,21 @@ public class CiEventTriggerService {
    * candidate carries a public coordinate, and id-addressed when it does not.
    */
   private boolean evaluateRepo(
-      CiRepoRef repo, Arrival arrival, JsonNode payload, List<String> runIds) {
+      CiRepoRef repo,
+      Arrival arrival,
+      JsonNode payload,
+      List<String> runIds,
+      Map<String, String> heads) {
     String repoId = repo.display();
-    EventTriggerLookup lookup = configSource.readEventTriggers(repo, TRIGGER_BRANCH);
+    EventTriggerLookup lookup =
+        configSource.readEventTriggers(repo, TRIGGER_BRANCH, CiTriggerScope.REPOSITORY);
     if (lookup.status() != EventTriggerLookup.Status.FOUND) {
       // DEBUG rather than WARN: the candidate list is "every repository ci has ever heard of", so a
       // deleted repository or one with no main would otherwise warn once per repo per event forever.
       LOG.debugf("Could not read %s@%s for triggers", repoId, TRIGGER_BRANCH);
       return false;
     }
+    heads.put(repo.repoId(), lookup.headSha());
     for (EventTriggerFile file : lookup.files()) {
       CiEventTrigger trigger;
       try {
@@ -307,6 +385,152 @@ public class CiEventTriggerService {
       }
     }
     return true;
+  }
+
+  /**
+   * The platform pass: the files one configured repository declares for the whole catalogue.
+   *
+   * <p>Read at that repository's {@code main} head, parsed by the same parser and selected by the
+   * same grammar as a repository's own trigger — but the run is recorded against, and cloned from,
+   * the repository the <b>payload</b> names. That is the whole of the difference, and it is what
+   * lets one file bump every repository instead of 71 files bumping one dependency each.
+   *
+   * <p><b>Three ways it records nothing, and each is one WARN naming the event and the
+   * repository.</b> The payload carries no {@code repository}; it names one the catalogue does not
+   * hold; or that repository could not be read for this evaluation, so there is no head to record a
+   * run at. None of them is a run and none of them is silent: a platform pipeline that matched and
+   * then did nothing is exactly the failure a maintenance service cannot see from the outside.
+   *
+   * <p><b>A repository with both a local and a platform trigger for one event gets two runs.</b>
+   * Two files, two declared pipelines, two rows — the dedupe is on {@code (event, repository, config
+   * path)} and the two paths differ, so nothing here collapses them. That is by design.
+   */
+  private void evaluatePlatform(
+      Arrival arrival,
+      JsonNode payload,
+      List<CiRepoRef> candidates,
+      Map<String, String> heads,
+      List<String> runIds) {
+    String configured = platformPipelinesRepository;
+    if (configured.isEmpty()) {
+      // Off, and off means no read at all.
+      return;
+    }
+    CiRepoRef platformRepo = find(candidates, configured);
+    if (platformRepo == null) {
+      // WARN rather than DEBUG, unlike the per-candidate reads: this repository is named in this
+      // deployment's own config, so a missing one is a misconfiguration that silently disables every
+      // platform pipeline, and it can be acted on.
+      LOG.warnf(
+          "The platform-pipelines repository %s is not in the catalogue — no platform pipeline was"
+              + " evaluated for event %s",
+          configured, arrival.eventId());
+      return;
+    }
+    EventTriggerLookup lookup =
+        configSource.readEventTriggers(platformRepo, TRIGGER_BRANCH, CiTriggerScope.PLATFORM);
+    if (lookup.status() != EventTriggerLookup.Status.FOUND) {
+      LOG.warnf(
+          "Could not read %s@%s for platform triggers — no platform pipeline was evaluated for"
+              + " event %s",
+          configured, TRIGGER_BRANCH, arrival.eventId());
+      return;
+    }
+    for (EventTriggerFile file : lookup.files()) {
+      CiEventTrigger trigger;
+      try {
+        trigger = triggerParser.parse(file.path(), file.content());
+      } catch (CiConfigException e) {
+        // Per file, exactly as a repository's own: one broken platform pipeline never disables the
+        // ones beside it.
+        LOG.warnf(
+            "%s: %s is not a usable platform event trigger: %s",
+            configured, file.path(), e.getMessage());
+        continue;
+      }
+      if (!trigger.eventName().equals(arrival.eventName())) {
+        continue;
+      }
+      if (!CiEventSelectionEvaluator.matches(trigger.selection(), payload)) {
+        LOG.debugf(
+            "%s: %s declares %s but its selection did not match event %s",
+            configured, file.path(), trigger.eventName(), arrival.eventId());
+        continue;
+      }
+      String named = payloadRepository(payload);
+      CiRepoRef target = named == null ? null : find(candidates, named);
+      if (target == null) {
+        LOG.warnf(
+            "Event %s (%s) matched %s in %s, but the repository it names (%s) is not one this"
+                + " platform holds — no run",
+            arrival.eventId(),
+            arrival.eventName(),
+            file.path(),
+            configured,
+            named == null ? "none" : named);
+        continue;
+      }
+      String head = heads.get(target.repoId());
+      if (head == null) {
+        LOG.warnf(
+            "Event %s (%s) matched %s in %s, but %s@%s could not be read — no run",
+            arrival.eventId(),
+            arrival.eventName(),
+            file.path(),
+            configured,
+            target.display(),
+            TRIGGER_BRANCH);
+        continue;
+      }
+      LOG.infof(
+          "Event %s (%s) matched platform pipeline %s — enqueuing a run for %s at %s",
+          arrival.eventId(), arrival.eventName(), file.path(), target.display(), head);
+      String runId =
+          runService.onEventTrigger(
+              new CiRunService.EventRun(
+                  target,
+                  TRIGGER_BRANCH,
+                  head,
+                  trigger,
+                  arrival.eventId(),
+                  arrival.eventName(),
+                  arrival.occurredAt(),
+                  arrival.payload(),
+                  file.content()));
+      if (runId != null) {
+        runIds.add(runId);
+      }
+    }
+  }
+
+  /** The payload's {@code repository}, or null when it carries none or carries a non-string. */
+  private static String payloadRepository(JsonNode payload) {
+    JsonNode value = payload == null ? null : payload.get(PAYLOAD_REPOSITORY_FIELD);
+    if (value == null || !value.isTextual() || value.asText().isBlank()) {
+      return null;
+    }
+    return value.asText();
+  }
+
+  /**
+   * The candidate a name refers to, or null when the catalogue holds none.
+   *
+   * <p><b>The public name wins over the storage id</b>, and the id arm is the pre-cutover
+   * compatibility half: before the identity campaign the two are the same string, after it only the
+   * name is something a config key or an event payload could hold.
+   */
+  private static CiRepoRef find(List<CiRepoRef> candidates, String name) {
+    for (CiRepoRef repo : candidates) {
+      if (name.equals(repo.name())) {
+        return repo;
+      }
+    }
+    for (CiRepoRef repo : candidates) {
+      if (name.equals(repo.repoId())) {
+        return repo;
+      }
+    }
+    return null;
   }
 
   /** Test hook: waits for the evaluation queued at this moment to drain. */
