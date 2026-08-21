@@ -1,5 +1,7 @@
 package eu.wohlben.qits.ci.bus;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import eu.wohlben.qits.eventstream.control.CanonicalJson;
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import eu.wohlben.qits.githost.events.SCMPublishCommit;
@@ -59,6 +61,36 @@ public final class ScmPushFrames {
         "a commit",
         suppressCi,
         receivedAt);
+  }
+
+  /**
+   * A push that arrived on the <b>name-addressed</b> route: the same payload, plus the {@code
+   * projectId}/{@code repoName} the git host fills in from the address.
+   *
+   * <p><b>The two fields are spliced into the JSON rather than set on the record</b>, and that is the
+   * situation rather than a shortcut: this repository pins a {@code qits-githost-events} that
+   * predates them, and qits-ci reads them off the payload tree for exactly that reason. A frame built
+   * this way is byte-shaped like the one the current git host publishes, and it is what proves the
+   * listener does not need the jar bumped to record a name.
+   */
+  public static EventFrame named(
+      String repoId, String projectId, String repoName, String branch, String oldSha, String sha) {
+    EventFrame plain = frame(commit(repoId, branch, oldSha, sha, false));
+    try {
+      ObjectMapper mapper = new ObjectMapper();
+      ObjectNode payload = (ObjectNode) mapper.readTree(plain.payload());
+      payload.put("projectId", projectId);
+      payload.put("repoName", repoName);
+      return new EventFrame(
+          plain.id(),
+          plain.name(),
+          plain.occurredAt(),
+          mapper.writeValueAsString(payload),
+          plain.description(),
+          plain.parentId());
+    } catch (Exception e) {
+      throw new IllegalStateException("could not build a name-addressed push frame", e);
+    }
   }
 
   /** The envelope a publisher would have written, wrapped as the frame a consumer is handed. */

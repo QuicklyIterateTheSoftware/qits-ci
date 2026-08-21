@@ -110,10 +110,17 @@ public class ReleaseJoin {
    *
    * <p>{@code triggerEventName} is here rather than a boolean, because deciding what counts as a
    * release is this class's job and not its caller's.
+   *
+   * <p>{@code repoName} is the run's own public name, null on a run whose push was id-addressed. It
+   * is the <b>preferred</b> half of the join key: after the identity cutover a run's {@code repoId}
+   * is an opaque storage UUID while {@code SCMRelease} speaks the platform's public name, so a join
+   * that only compared ids would silently never close. The id arm stays as the fallback, and it is
+   * what a pre-cutover platform — where the two agree — closes on.
    */
   public record Published(
       String runId,
       String repoId,
+      String repoName,
       String version,
       String triggerEventName,
       String triggerEventId,
@@ -155,7 +162,7 @@ public class ReleaseJoin {
       return true;
     }
     return QuarkusTransaction.requiringNew()
-        .call(() -> releases.released(run.repoId(), run.version()));
+        .call(() -> releases.released(run.repoId(), run.repoName(), run.version()));
   }
 
   /**

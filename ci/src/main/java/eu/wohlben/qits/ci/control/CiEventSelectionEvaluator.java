@@ -64,9 +64,31 @@ public final class CiEventSelectionEvaluator {
     return false;
   }
 
+  /**
+   * The path a trigger file writes when it means "this repository", and the field the platform
+   * answers it with now.
+   *
+   * <p><b>{@code repoId} names the repository's ADDRESSABLE NAME, and the id is the legacy arm.</b>
+   * After the identity cutover an {@code SCM*} event's {@code repoId} is an opaque storage UUID —
+   * nothing a repository could write in a file, and nothing that stays the same across a
+   * re-bootstrap — while the same event carries {@code repoName} filled from the address the push
+   * arrived on. So a condition on {@code repoId} is evaluated against {@code repoName} whenever the
+   * payload has one, and against {@code repoId} when it does not. The nine estate trigger files that
+   * say {@code repoId: {exact: qits-blobstore}} therefore keep matching on both sides of the
+   * cutover, unedited: before it, id and name agree and the id arm answers; after it, the name
+   * field is there and answers instead.
+   *
+   * <p>It is an <b>alias at evaluation</b> rather than a rewrite at parse, because whether the
+   * fallback applies is a property of the arriving event and not of the file. A payload carrying no
+   * {@code repoName} — every non-SCM event on this bus — is unaffected in every direction.
+   */
+  static final String REPO_ID_PATH = "repoId";
+
+  static final String REPO_NAME_PATH = "repoName";
+
   private static boolean groupMatches(Group group, JsonNode payload) {
     for (PathCondition condition : group.conditions()) {
-      JsonNode at = resolve(payload, condition.path());
+      JsonNode at = resolveAddressable(payload, condition.path());
       for (Matcher matcher : condition.matchers()) {
         if (!matcherMatches(matcher, at)) {
           return false;
@@ -102,6 +124,23 @@ public final class CiEventSelectionEvaluator {
       case EXACT -> value.equals(matcher.value());
       case PREFIX -> value.startsWith(matcher.value());
     };
+  }
+
+  /**
+   * {@link #resolve}, with the one alias this platform's identity split needs: {@link #REPO_ID_PATH}
+   * reads {@link #REPO_NAME_PATH} when the payload carries it. Everything else resolves literally.
+   *
+   * <p>Only the exact top-level path is aliased — never a prefix, never a nested {@code
+   * something.repoId} — so an event that means a different thing by the word cannot be caught by it.
+   */
+  static JsonNode resolveAddressable(JsonNode root, String path) {
+    if (REPO_ID_PATH.equals(path)) {
+      JsonNode name = resolve(root, REPO_NAME_PATH);
+      if (name != null) {
+        return name;
+      }
+    }
+    return resolve(root, path);
   }
 
   /**

@@ -1,5 +1,6 @@
 package eu.wohlben.qits.ci.daemonhost;
 
+import eu.wohlben.qits.ci.control.CiRepoRef;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -125,7 +126,7 @@ public class CiDaemonHandshakeIT {
                   new LaunchSpec(
                       runId,
                       0,
-                      REPO_ID,
+                      CiRepoRef.of(REPO_ID),
                       "main",
                       sha,
                       IMAGE,
@@ -188,7 +189,7 @@ public class CiDaemonHandshakeIT {
                   new LaunchSpec(
                       runId,
                       0,
-                      REPO_ID,
+                      CiRepoRef.of(REPO_ID),
                       "main",
                       sha,
                       IMAGE,
@@ -231,7 +232,7 @@ public class CiDaemonHandshakeIT {
                   new LaunchSpec(
                       runId,
                       0,
-                      REPO_ID,
+                      CiRepoRef.of(REPO_ID),
                       "main",
                       sha,
                       IMAGE,

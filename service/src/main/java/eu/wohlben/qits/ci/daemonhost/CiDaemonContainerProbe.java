@@ -1,5 +1,6 @@
 package eu.wohlben.qits.ci.daemonhost;
 
+import eu.wohlben.qits.ci.control.CiRepoRef;
 import eu.wohlben.qits.ci.control.DaemonProbe;
 import eu.wohlben.qits.cidaemon.protocol.CiDaemonProtocol;
 import io.quarkus.runtime.LaunchMode;
@@ -102,7 +103,9 @@ public class CiDaemonContainerProbe implements DaemonProbe {
               new CiDaemonLauncher.LaunchSpec(
                   runId,
                   0,
-                  PROBE_REPO_ID,
+                  // Id-addressed: the probe clones nothing, so the constant stands in for a
+                  // repository rather than naming one, and there is no project to scope it to.
+                  CiRepoRef.of(PROBE_REPO_ID),
                   PROBE_BRANCH,
                   PROBE_SHA,
                   probeImage,

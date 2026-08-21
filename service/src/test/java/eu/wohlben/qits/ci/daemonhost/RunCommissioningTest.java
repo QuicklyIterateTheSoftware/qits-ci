@@ -1,5 +1,6 @@
 package eu.wohlben.qits.ci.daemonhost;
 
+import eu.wohlben.qits.ci.control.CiRepoRef;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -87,7 +88,7 @@ public class RunCommissioningTest {
     return new LaunchSpec(
         runId,
         index,
-        "repo-1",
+        CiRepoRef.of("repo-1"),
         "main",
         "cafebabe",
         "maven:3.9",

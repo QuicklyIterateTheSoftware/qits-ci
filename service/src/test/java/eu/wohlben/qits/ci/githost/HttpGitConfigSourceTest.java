@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.ci.control.CiConfigParser;
+import eu.wohlben.qits.ci.control.CiRepoRef;
 import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerFile;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerLookup;
@@ -39,6 +40,11 @@ public class HttpGitConfigSourceTest {
   private StubGitHost.Server host;
   private HttpGitConfigSource source;
 
+  /** A repository qits-ci knows by storage id alone — the id-addressed arm. */
+  private static CiRepoRef id(String repoId) {
+    return CiRepoRef.of(repoId);
+  }
+
   @BeforeEach
   void startHost() throws Exception {
     root = Files.createTempDirectory("ci-config-host");
@@ -62,7 +68,7 @@ public class HttpGitConfigSourceTest {
     String repoId = "repo-with-config";
     String sha = seed(repoId, "steps:\n  - image: alpine:3\n    script: 'true'\n");
 
-    ConfigLookup lookup = source.read(repoId, BRANCH, sha);
+    ConfigLookup lookup = source.read(id(repoId), BRANCH, sha);
     assertEquals(ConfigLookup.Status.FOUND, lookup.status());
     assertEquals("steps:\n  - image: alpine:3\n    script: 'true'\n", lookup.content());
   }
@@ -73,7 +79,7 @@ public class HttpGitConfigSourceTest {
     // declares no pipeline must read as ABSENT, which discards the row, never as a failure.
     String repoId = "repo-without-config";
     String sha = seed(repoId, null);
-    assertEquals(ConfigLookup.Status.ABSENT, source.read(repoId, BRANCH, sha).status());
+    assertEquals(ConfigLookup.Status.ABSENT, source.read(id(repoId), BRANCH, sha).status());
   }
 
   @Test
@@ -84,7 +90,7 @@ public class HttpGitConfigSourceTest {
     seed(repoId, "steps: []\n");
     assertEquals(
         ConfigLookup.Status.GONE,
-        source.read(repoId, BRANCH, "0123456789012345678901234567890123456789").status());
+        source.read(id(repoId), BRANCH, "0123456789012345678901234567890123456789").status());
   }
 
   @Test
@@ -95,7 +101,7 @@ public class HttpGitConfigSourceTest {
     String first = seed(repoId, "steps: []\n");
     advance(repoId);
 
-    ConfigLookup lookup = source.read(repoId, BRANCH, first);
+    ConfigLookup lookup = source.read(id(repoId), BRANCH, first);
     assertEquals(ConfigLookup.Status.FOUND, lookup.status());
     assertEquals("steps: []\n", lookup.content());
   }
@@ -107,7 +113,7 @@ public class HttpGitConfigSourceTest {
     String repoId = "repo-unreachable";
     String sha = seed(repoId, "steps: []\n");
     host.stop();
-    assertEquals(ConfigLookup.Status.UNREACHABLE, source.read(repoId, BRANCH, sha).status());
+    assertEquals(ConfigLookup.Status.UNREACHABLE, source.read(id(repoId), BRANCH, sha).status());
   }
 
   @Test
@@ -119,31 +125,84 @@ public class HttpGitConfigSourceTest {
     String repoId = "repo-authenticated";
     String sha = seed(repoId, "steps: []\n");
 
-    assertEquals(ConfigLookup.Status.FOUND, source.read(repoId, BRANCH, sha).status());
+    assertEquals(ConfigLookup.Status.FOUND, source.read(id(repoId), BRANCH, sha).status());
     assertEquals("Bearer machine-token", host.lastAuthorization());
 
     source.gitHostBearer = java.util.Optional::empty;
-    assertEquals(ConfigLookup.Status.FOUND, source.read(repoId, BRANCH, sha).status());
+    assertEquals(ConfigLookup.Status.FOUND, source.read(id(repoId), BRANCH, sha).status());
     assertNull(host.lastAuthorization(), "a bearerless read must send no header at all");
   }
 
   @Test
   public void hostileIdentifiersAreRejectedBeforeTheyReachAUrl() {
-    assertThrows(BadRequestException.class, () -> source.read("../../etc", BRANCH, "cafebabe0000"));
+    assertThrows(BadRequestException.class, () -> source.read(id("../../etc"), BRANCH, "cafebabe0000"));
     assertThrows(
-        BadRequestException.class, () -> source.read("repo-1", "../../etc", "cafebabe0000"));
-    assertThrows(BadRequestException.class, () -> source.read("repo-1", BRANCH, "not-a-sha"));
-    assertThrows(BadRequestException.class, () -> source.readEventTriggers("a/../b", BRANCH));
+        BadRequestException.class, () -> source.read(id("repo-1"), "../../etc", "cafebabe0000"));
+    assertThrows(BadRequestException.class, () -> source.read(id("repo-1"), BRANCH, "not-a-sha"));
+    assertThrows(BadRequestException.class, () -> source.readEventTriggers(id("a/../b"), BRANCH));
+    // The name half, checked only when it is there — the pair reaches the same url.
+    assertThrows(
+        BadRequestException.class,
+        () -> source.read(CiRepoRef.of("repo-1", "../etc", "repo-1"), BRANCH, "cafebabe0000"));
+    assertThrows(
+        BadRequestException.class,
+        () -> source.read(CiRepoRef.of("repo-1", "qits", "a/../b"), BRANCH, "cafebabe0000"));
   }
 
   @Test
   public void aSlashyBranchIsPercentEncodedBecauseARevIsOneSegment() {
     assertTrue(
-        source.treeUrl("repo-1", "feature/x", "").endsWith("/tree/feature%2Fx"),
+        source.treeUrl(id("repo-1"), "feature/x", "").endsWith("/tree/feature%2Fx"),
         "a rev is one path segment, so the slash cannot travel raw");
     assertEquals(
         host.gitHostUrl() + "/git/repo-1/blob/feature%2Fx/.config/qits/ci-post-receive.yml",
-        source.blobUrl("repo-1", "feature/x", CiConfigParser.CONFIG_PATH));
+        source.blobUrl(id("repo-1"), "feature/x", CiConfigParser.CONFIG_PATH));
+  }
+
+  @Test
+  public void aNamedRepositoryIsAddressedByProjectAndName() {
+    // The public address after the identity cutover. Both routes take the pair, and the storage id
+    // does not appear in either.
+    CiRepoRef named = CiRepoRef.of("2f1c9b3e-uuid", "qits", "qits-blobstore");
+    assertEquals(
+        host.gitHostUrl() + "/git/qits/qits-blobstore/tree/main",
+        source.treeUrl(named, "main", ""));
+    assertEquals(
+        host.gitHostUrl()
+            + "/git/qits/qits-blobstore/blob/main/.config/qits/ci-post-receive.yml",
+        source.blobUrl(named, "main", CiConfigParser.CONFIG_PATH));
+  }
+
+  @Test
+  public void aRepositoryWithNoNameKeepsTheIdAddressedUrl() {
+    // The compatibility arm: an id-addressed push announces no pair, and such a run reads exactly
+    // where this service always read.
+    assertEquals(
+        host.gitHostUrl() + "/git/repo-1/tree/main", source.treeUrl(id("repo-1"), "main", ""));
+    assertEquals(
+        host.gitHostUrl() + "/git/repo-1/blob/main/.config/qits/ci-post-receive.yml",
+        source.blobUrl(id("repo-1"), "main", CiConfigParser.CONFIG_PATH));
+  }
+
+  @Test
+  public void aNamedRepositoryIsReadOverTheNameAddressedRoute() throws Exception {
+    // End to end over a real socket: the bare is stored under an opaque id, the host resolves the
+    // public pair to it, and neither read mentions the id.
+    String storageId = "0f9c2a1b4d6e8f0a1b2c3d4e5f607182";
+    String sha = seed(storageId, "steps: []\n", Map.of(".config/qits/ci-event-a.yml", "event: A\n"));
+    StubGitHost.alias("qits", "qits-blobstore", storageId);
+    CiRepoRef named = CiRepoRef.of(storageId, "qits", "qits-blobstore");
+
+    ConfigLookup config = source.read(named, BRANCH, sha);
+    assertEquals(ConfigLookup.Status.FOUND, config.status());
+    assertEquals("steps: []\n", config.content());
+
+    EventTriggerLookup triggers = source.readEventTriggers(named, BRANCH);
+    assertEquals(EventTriggerLookup.Status.FOUND, triggers.status());
+    assertEquals(sha, triggers.headSha());
+    assertEquals(
+        List.of(".config/qits/ci-event-a.yml"),
+        triggers.files().stream().map(EventTriggerFile::path).toList());
   }
 
   @Test
@@ -152,8 +211,8 @@ public class HttpGitConfigSourceTest {
     seed(repoId, "steps: []\n", Map.of(".config/qits/ci-event-a.yml", "event: A\n"));
     String sha = branchOff(repoId, "feature/x");
 
-    assertEquals(ConfigLookup.Status.FOUND, source.read(repoId, "feature/x", sha).status());
-    EventTriggerLookup lookup = source.readEventTriggers(repoId, "feature/x");
+    assertEquals(ConfigLookup.Status.FOUND, source.read(id(repoId), "feature/x", sha).status());
+    EventTriggerLookup lookup = source.readEventTriggers(id(repoId), "feature/x");
     assertEquals(EventTriggerLookup.Status.FOUND, lookup.status());
     assertEquals(sha, lookup.headSha());
   }
@@ -171,7 +230,7 @@ public class HttpGitConfigSourceTest {
                 ".config/qits/ci-event-one.yml", "event: A\n",
                 ".config/qits/ci-event-two.yml", "event: B\n"));
 
-    EventTriggerLookup lookup = source.readEventTriggers(repoId, BRANCH);
+    EventTriggerLookup lookup = source.readEventTriggers(id(repoId), BRANCH);
     assertEquals(EventTriggerLookup.Status.FOUND, lookup.status());
     assertEquals(sha, lookup.headSha(), "the run records the head the trigger was read at");
     assertEquals(
@@ -192,7 +251,7 @@ public class HttpGitConfigSourceTest {
     HttpGitConfigSource pinned =
         new HttpGitConfigSource() {
           @Override
-          String blobUrl(String repo, String rev, String path) {
+          String blobUrl(CiRepoRef repo, String rev, String path) {
             // Between the listing and the reads, a push lands. The reads are addressed by the sha
             // the listing answered, so what they return is unaffected.
             try {
@@ -207,7 +266,7 @@ public class HttpGitConfigSourceTest {
     pinned.objectMapper = new ObjectMapper();
     pinned.gitHostBearer = () -> java.util.Optional.of("machine-token");
 
-    EventTriggerLookup lookup = pinned.readEventTriggers(repoId, BRANCH);
+    EventTriggerLookup lookup = pinned.readEventTriggers(id(repoId), BRANCH);
     assertEquals(head, lookup.headSha());
     assertEquals(
         List.of("event: A\n"), lookup.files().stream().map(EventTriggerFile::content).toList());
@@ -218,7 +277,7 @@ public class HttpGitConfigSourceTest {
   public void aRepositoryWithNoConfigDirectoryListsNothingRatherThanFailing() throws Exception {
     String repoId = "repo-bare";
     String sha = seed(repoId, null);
-    EventTriggerLookup lookup = source.readEventTriggers(repoId, BRANCH);
+    EventTriggerLookup lookup = source.readEventTriggers(id(repoId), BRANCH);
     assertEquals(EventTriggerLookup.Status.FOUND, lookup.status());
     assertEquals(sha, lookup.headSha());
     assertEquals(List.of(), lookup.files());
@@ -237,7 +296,7 @@ public class HttpGitConfigSourceTest {
 
     assertEquals(
         List.of(".config/qits/ci-event-real.yml"),
-        source.readEventTriggers(repoId, BRANCH).files().stream()
+        source.readEventTriggers(id(repoId), BRANCH).files().stream()
             .map(EventTriggerFile::path)
             .toList());
   }
@@ -250,10 +309,10 @@ public class HttpGitConfigSourceTest {
     seed(repoId, "steps: []\n");
     assertEquals(
         EventTriggerLookup.Status.UNREACHABLE,
-        source.readEventTriggers(repoId, "no-such-branch").status());
+        source.readEventTriggers(id(repoId), "no-such-branch").status());
     assertEquals(
         EventTriggerLookup.Status.UNREACHABLE,
-        source.readEventTriggers("no-such-repo", BRANCH).status());
+        source.readEventTriggers(id("no-such-repo"), BRANCH).status());
   }
 
   @Test
@@ -263,7 +322,7 @@ public class HttpGitConfigSourceTest {
     host.stop();
     assertEquals(
         EventTriggerLookup.Status.UNREACHABLE,
-        source.readEventTriggers(repoId, BRANCH).status());
+        source.readEventTriggers(id(repoId), BRANCH).status());
   }
 
   // --- seeding: real bares under <root>/git/<repoId>, exactly as the git host holds them ---

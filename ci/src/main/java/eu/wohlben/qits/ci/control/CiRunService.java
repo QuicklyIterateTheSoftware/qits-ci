@@ -452,14 +452,28 @@ public class CiRunService {
    * answer for a push nobody can name a cause for.
    */
   public void onPostReceive(
-      String repoId, String branch, String oldSha, String newSha, String eventId) {
-    CiIdentifiers.requireRepoId(repoId);
+      CiRepoRef repo, String branch, String oldSha, String newSha, String eventId) {
+    // The name half is checked ONLY when it is there: an id-addressed push announces without it,
+    // and refusing that would refuse every mirror sync and every pre-cutover platform.
+    CiIdentifiers.requireRepo(repo);
     CiIdentifiers.requireBranch(branch);
     CiIdentifiers.requireSha(newSha);
-    CiRun accepted = acceptPostReceive(repoId, branch, newSha, eventId);
+    CiRun accepted = acceptPostReceive(repo, branch, newSha, eventId);
     if (accepted != null) {
       enqueue(accepted.id);
     }
+  }
+
+  /**
+   * How a recorded run addresses its own repository: the storage id always, and the public
+   * {@code (projectId, repoName)} pair when the announcing push carried one.
+   *
+   * <p>A method here rather than on the entity, because {@code ci/entity} is Panache rows and this
+   * is the control layer's vocabulary — and because every reader of a run row wants exactly this
+   * one question answered.
+   */
+  static CiRepoRef repoOf(CiRun run) {
+    return new CiRepoRef(run.repoId, run.projectId, run.repoName);
   }
 
   /** Puts an already-accepted (QUEUED) run on the worker. */
@@ -490,7 +504,7 @@ public class CiRunService {
    * fetch against a branch that may have moved, and the run would then record a sha it did not build.
    */
   public record EventRun(
-      String repoId,
+      CiRepoRef repo,
       String branch,
       String sha,
       CiEventTrigger trigger,
@@ -520,7 +534,7 @@ public class CiRunService {
    *     exist" rather than "something was handed to a queue".
    */
   public String onEventTrigger(EventRun request) {
-    CiIdentifiers.requireRepoId(request.repoId());
+    CiIdentifiers.requireRepo(request.repo());
     CiIdentifiers.requireBranch(request.branch());
     CiIdentifiers.requireSha(request.sha());
     CiRun run = acceptEventRun(request);
@@ -535,7 +549,7 @@ public class CiRunService {
   private EventRun reconstructEventRun(CiRun run) {
     CiEventTrigger trigger = triggerParser.parse(run.configPath, run.triggerConfig);
     return new EventRun(
-        run.repoId,
+        repoOf(run),
         run.branch,
         run.commitSha,
         trigger,
@@ -601,7 +615,7 @@ public class CiRunService {
    * out.
    */
   private ConfigLookup readConfigPatiently(CiRun run) {
-    ConfigLookup lookup = configSource.read(run.repoId, run.branch, run.commitSha);
+    ConfigLookup lookup = configSource.read(repoOf(run), run.branch, run.commitSha);
     for (Duration delay : unreachableRetryDelays) {
       if (lookup.status() != ConfigLookup.Status.UNREACHABLE || cancelled.contains(run.id)) {
         return lookup;
@@ -615,7 +629,7 @@ public class CiRunService {
         Thread.currentThread().interrupt();
         return lookup;
       }
-      lookup = configSource.read(run.repoId, run.branch, run.commitSha);
+      lookup = configSource.read(repoOf(run), run.branch, run.commitSha);
     }
     return lookup;
   }
@@ -660,7 +674,12 @@ public class CiRunService {
    * without the worker's timing. No announcing event, so the run publishes a root.
    */
   void execute(String repoId, String branch, String sha) {
-    runQueued(acceptPostReceive(repoId, branch, sha, null).id);
+    execute(CiRepoRef.of(repoId), branch, sha);
+  }
+
+  /** The same, for a repository that carries its public coordinate. */
+  void execute(CiRepoRef repo, String branch, String sha) {
+    runQueued(acceptPostReceive(repo, branch, sha, null).id);
   }
 
   /**
@@ -836,7 +855,7 @@ public class CiRunService {
                 new CiStepRunner.StepSpec(
                     run.id,
                     index,
-                    run.repoId,
+                    repoOf(run),
                     run.branch,
                     run.commitSha,
                     stepImage(decl),
@@ -861,7 +880,7 @@ public class CiRunService {
         // the re-read is the confirmation, exactly as it was behind the prelude sentinel.
         if (result.outcome() == StepOutcome.SHA_GONE && !wasCancelled) {
           boolean commitGone =
-              configSource.read(run.repoId, run.branch, run.commitSha).status()
+              configSource.read(repoOf(run), run.branch, run.commitSha).status()
                   == ConfigLookup.Status.GONE;
           if (commitGone) {
             LOG.infof(
@@ -1014,6 +1033,7 @@ public class CiRunService {
         new ReleaseJoin.Published(
             run.id,
             run.repoId,
+            run.repoName,
             version,
             run.triggerEventName,
             run.triggerEventId,
@@ -1112,8 +1132,9 @@ public class CiRunService {
    *
    * @return the accepted run, or null when this push had already been recorded
    */
-  private CiRun acceptPostReceive(String repoId, String branch, String sha, String eventId) {
-    CiRun run = newRun(repoId, branch, sha);
+  private CiRun acceptPostReceive(CiRepoRef repo, String branch, String sha, String eventId) {
+    String repoId = repo.repoId();
+    CiRun run = newRun(repo, branch, sha);
     run.triggerType = CiTriggerType.POST_RECEIVE;
     run.configPath = CiConfigParser.CONFIG_PATH;
     run.triggerEventId = eventId;
@@ -1219,13 +1240,13 @@ public class CiRunService {
       }
       LOG.infof(
           "Event %s reached %s in %s twice — the first run stands",
-          request.eventId(), configPath, request.repoId());
+          request.eventId(), configPath, request.repo().display());
       return null;
     }
     if (run == null) {
       LOG.debugf(
           "Event %s already triggered %s in %s — no second run",
-          request.eventId(), configPath, request.repoId());
+          request.eventId(), configPath, request.repo().display());
       return null;
     }
     return run;
@@ -1247,10 +1268,10 @@ public class CiRunService {
    * supersede's updates into the statement phase, where a lost connection is a certain no-commit.
    */
   private CiRun insertEventRun(EventRun request, String configPath) {
-    if (runs.alreadyTriggered(request.eventId(), request.repoId(), configPath)) {
+    if (runs.alreadyTriggered(request.eventId(), request.repo().repoId(), configPath)) {
       return null;
     }
-    CiRun run = newRun(request.repoId(), request.branch(), request.sha());
+    CiRun run = newRun(request.repo(), request.branch(), request.sha());
     run.triggerType = CiTriggerType.EVENT;
     run.configPath = configPath;
     run.triggerEventId = request.eventId();
@@ -1384,10 +1405,14 @@ public class CiRunService {
    * A newly accepted run. Always {@code QUEUED}, never finished, and pinning no daemon: this class
    * writes exactly one kind of row now, and every state after it is a transition the worker makes.
    */
-  private static CiRun newRun(String repoId, String branch, String sha) {
+  private static CiRun newRun(CiRepoRef repo, String branch, String sha) {
     CiRun run = new CiRun();
     run.id = UUID.randomUUID().toString();
-    run.repoId = repoId;
+    run.repoId = repo.repoId();
+    // Null when the announcing push was id-addressed — the row then reads exactly as every row
+    // recorded before this campaign, and every URL built from it is the id-addressed one.
+    run.projectId = repo.projectId();
+    run.repoName = repo.name();
     run.branch = branch;
     run.commitSha = sha;
     run.status = CiRunStatus.QUEUED;
@@ -1622,7 +1647,12 @@ public class CiRunService {
    * One row per repository this instance has recorded a run for, ascending by id: its newest run on
    * any branch, and its newest run on {@code main}.
    *
-   * @param repositoryId the repository, exactly as {@link #repositoryIds} spells it
+   * @param repositoryId the repository, exactly as {@link #repositoryIds} spells it — the storage
+   *     id, which is what the runs are grouped by and what stays stable across a rename
+   * @param projectId the owning project, or null when no run of this repository carries the public
+   *     coordinate. Read off the newest run rather than stored anywhere: qits-ci owns no repository
+   *     row, so what it knows about a name is whatever the last push told it.
+   * @param repoName the repository's public name under the same rule, or null
    * @param lastRun the newest run on any branch — never null, since a repository is only listed
    *     because it has one
    * @param lastMainRun the newest run on {@code main}, or null when every run it has is on another
@@ -1630,7 +1660,8 @@ public class CiRunService {
    *     collapse: a client asking "is main green" and a client asking "what happened last" are
    *     asking two questions that usually have one answer.
    */
-  public record RepositorySummary(String repositoryId, CiRun lastRun, CiRun lastMainRun) {}
+  public record RepositorySummary(
+      String repositoryId, String projectId, String repoName, CiRun lastRun, CiRun lastMainRun) {}
 
   /**
    * The summary behind {@code GET /ci/api/repositories/summary} — {@link #repositoryIds} with the
@@ -1657,11 +1688,15 @@ public class CiRunService {
   private List<RepositorySummary> readSummaries() {
     return sortedRepoIds().stream()
         .map(
-            repoId ->
-                new RepositorySummary(
-                    repoId,
-                    runs.newestFor(repoId).orElse(null),
-                    runs.newestForBranch(repoId, MAIN_BRANCH).orElse(null)))
+            repoId -> {
+              CiRun last = runs.newestFor(repoId).orElse(null);
+              return new RepositorySummary(
+                  repoId,
+                  last == null ? null : last.projectId,
+                  last == null ? null : last.repoName,
+                  last,
+                  runs.newestForBranch(repoId, MAIN_BRANCH).orElse(null));
+            })
         // A repository is listed because it has runs, but the listing and these reads are separate
         // queries: a deletion in between must drop the entry rather than answer with a null lastRun.
         .filter(summary -> summary.lastRun() != null)

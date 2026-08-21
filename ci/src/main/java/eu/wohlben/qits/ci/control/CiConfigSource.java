@@ -97,8 +97,13 @@ public interface CiConfigSource {
    * Reads {@link CiConfigParser#CONFIG_PATH} at {@code sha} itself. {@code branch} is the run's
    * coordinate rather than a place to look: the commit is read directly, so a branch that has moved
    * on since the push changes nothing about what this commit declared.
+   *
+   * <p>The repository arrives as a {@link CiRepoRef} rather than an id because the git host serves
+   * the same content name-addressed, and after the identity cutover the id route is qits-projects'
+   * alone. An implementation reads name-addressed when the reference {@link CiRepoRef#named() is
+   * named} and id-addressed when it is not.
    */
-  ConfigLookup read(String repoId, String branch, String sha);
+  ConfigLookup read(CiRepoRef repo, String branch, String sha);
 
   /**
    * Lists and reads the repository's event-trigger files at {@code branch}'s current head.
@@ -108,5 +113,5 @@ public interface CiConfigSource {
    * while an event names none, so the platform's one tracked branch supplies it (every submodule
    * follows {@code main}) and the head is resolved rather than given.
    */
-  EventTriggerLookup readEventTriggers(String repoId, String branch);
+  EventTriggerLookup readEventTriggers(CiRepoRef repo, String branch);
 }

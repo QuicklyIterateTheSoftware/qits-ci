@@ -1,5 +1,6 @@
 package eu.wohlben.qits.ci.daemonhost;
 
+import eu.wohlben.qits.ci.control.CiRepoRef;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -39,7 +40,7 @@ public class CiDaemonLauncherContainersTest {
       new LaunchSpec(
           RUN_ID,
           2,
-          "repo-1",
+          CiRepoRef.of("repo-1"),
           "main",
           "cafebabe",
           "maven:3.9",

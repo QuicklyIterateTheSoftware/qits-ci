@@ -26,6 +26,8 @@ public interface CiRunMapper {
     return new CiRunDto(
         bare.id(),
         bare.repoId(),
+        bare.projectId(),
+        bare.repoName(),
         bare.branch(),
         bare.commitSha(),
         bare.status(),

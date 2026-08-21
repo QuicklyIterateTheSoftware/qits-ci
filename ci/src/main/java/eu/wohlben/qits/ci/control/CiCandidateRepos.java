@@ -1,6 +1,6 @@
 package eu.wohlben.qits.ci.control;
 
-import java.util.Set;
+import java.util.List;
 
 /**
  * Which repositories the trigger engine asks about when an event arrives. <b>One method</b>, so that
@@ -40,8 +40,13 @@ import java.util.Set;
 public interface CiCandidateRepos {
 
   /**
-   * The repository ids to evaluate against an arriving event. Called once per event on the trigger
-   * worker, so it may do IO, but every id it returns costs a read against the git host.
+   * The repositories to evaluate against an arriving event, ascending by storage id. Called once per
+   * event on the trigger worker, so it may do IO, but every entry it returns costs a read against
+   * the git host.
+   *
+   * <p><b>The unit is a {@link CiRepoRef}, not an id</b>, because the engine reads each candidate's
+   * trigger files off the git host and the public content route is name-addressed. A candidate ci
+   * knows only from its own run rows has no name and is read id-addressed, exactly as before.
    */
-  Set<String> candidates();
+  List<CiRepoRef> candidates();
 }

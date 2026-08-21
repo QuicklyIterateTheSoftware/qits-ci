@@ -244,6 +244,57 @@ public class CiEventSelectionEvaluatorTest {
     assertFalse(CiEventSelectionEvaluator.matches(selection("when:\n  - a: { exact: \"null\" }\n"), withNull));
   }
 
+  // --- repoId names the ADDRESSABLE NAME, with the id as the legacy arm ---
+
+  /**
+   * The estate's nine {@code ci-event-release.yml} files, unedited, against the post-cutover event:
+   * the payload's {@code repoId} is an opaque storage UUID and the file names the repository the way
+   * a person does, so the match has to come off {@code repoName}.
+   */
+  @Test
+  public void repoIdMatchesTheRepoNameWhenTheEventCarriesOne() {
+    JsonNode nameAddressed =
+        CiEventSelectionEvaluator.parsePayload(
+            "{\"repoId\":\"2f1c9b3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f\","
+                + "\"projectId\":\"qits\",\"repoName\":\"qits-blobstore\"}");
+
+    assertTrue(
+        CiEventSelectionEvaluator.matches(
+            selection("when:\n  - repoId: { exact: qits-blobstore }\n"), nameAddressed));
+    assertFalse(
+        CiEventSelectionEvaluator.matches(
+            selection("when:\n  - repoId: { exact: 2f1c9b3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f }\n"),
+            nameAddressed),
+        "the storage id is not something a trigger file may select on once a name is there");
+  }
+
+  /**
+   * The compatibility arm, which is every event published before the cutover and every push on the
+   * internal id-addressed route: no {@code repoName}, so the id is what the matcher reads — which is
+   * why the same nine files keep working on both sides of the cutover.
+   */
+  @Test
+  public void repoIdFallsBackToTheIdWhenTheEventCarriesNoName() {
+    assertTrue(matches("when:\n  - repoId: { exact: qits-spa-ui-components }\n"));
+    assertTrue(matches("when:\n  - repoId: { prefix: qits-spa }\n"));
+    assertTrue(matches("when:\n  - repoId: { exists: true }\n"));
+  }
+
+  /** The alias is that one top-level path and nothing else — never a nested key of the same name. */
+  @Test
+  public void onlyTheTopLevelRepoIdPathIsAliased() {
+    JsonNode nested =
+        CiEventSelectionEvaluator.parsePayload(
+            "{\"repoName\":\"the-name\",\"repository\":{\"repoId\":\"inner\"}}");
+
+    assertTrue(
+        CiEventSelectionEvaluator.matches(
+            selection("when:\n  - repository.repoId: { exact: inner }\n"), nested));
+    assertFalse(
+        CiEventSelectionEvaluator.matches(
+            selection("when:\n  - repository.repoId: { exact: the-name }\n"), nested));
+  }
+
   @Test
   public void aScalarOrArrayDocumentRootResolvesNothing() {
     JsonNode scalar = CiEventSelectionEvaluator.parsePayload("\"just a string\"");

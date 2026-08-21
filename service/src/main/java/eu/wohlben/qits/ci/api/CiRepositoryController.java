@@ -64,12 +64,23 @@ public class CiRepositoryController {
    * lastMainRun} is null when the repository has never run on {@code main}, and is frequently the
    * same run as {@code lastRun}.
    *
+   * <p><b>The union is still by storage id, and the name rides along when it is known.</b> {@code
+   * repositoryId} is what the runs are grouped by — it is stable across a rename and it is what
+   * every existing client binds — while {@code projectId} and {@code repoName} come off the
+   * repository's newest run, which is the only place qits-ci learns them. Both are null for a
+   * repository whose pushes were id-addressed, so a client labels by name when there is one.
+   *
    * <p>Both slots carry the <b>full</b> {@link CiRunDto} rather than a trimmed shape, for the reason
    * the run listing does: it is small, it is the type every client already binds, and a second
    * "run summary" type would drift from it. What it does not carry is {@code steps} and {@code live},
    * because the mapper's list shape omits them — exactly as {@code GET /ci/api/runs} does.
    */
-  public record RepositorySummaryDto(String repositoryId, CiRunDto lastRun, CiRunDto lastMainRun) {}
+  public record RepositorySummaryDto(
+      String repositoryId,
+      String projectId,
+      String repoName,
+      CiRunDto lastRun,
+      CiRunDto lastMainRun) {}
 
   public record ListRepositorySummariesResponse(List<RepositorySummaryDto> repositories) {}
 
@@ -104,6 +115,8 @@ public class CiRepositoryController {
                 summary ->
                     new RepositorySummaryDto(
                         summary.repositoryId(),
+                        summary.projectId(),
+                        summary.repoName(),
                         mapper.toDto(summary.lastRun()),
                         summary.lastMainRun() == null ? null : mapper.toDto(summary.lastMainRun())))
             .toList());

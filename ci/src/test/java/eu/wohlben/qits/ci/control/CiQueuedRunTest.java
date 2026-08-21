@@ -104,7 +104,7 @@ public class CiQueuedRunTest extends CiTestSupport {
    */
   private void announcePush(String repoId, String sha) {
     service.onPostReceive(
-        repoId, "main", "0".repeat(40), sha, UUID.randomUUID().toString());
+        CiRepoRef.of(repoId), "main", "0".repeat(40), sha, UUID.randomUUID().toString());
   }
 
   private CiRun soleRun(String repoId) {
@@ -280,7 +280,7 @@ public class CiQueuedRunTest extends CiTestSupport {
 
   private CiRunService.EventRun eventRun(String repoId, String eventId) {
     return new CiRunService.EventRun(
-        repoId,
+        CiRepoRef.of(repoId),
         "main",
         "c".repeat(40),
         new CiEventTrigger(
@@ -387,7 +387,7 @@ public class CiQueuedRunTest extends CiTestSupport {
     assertEquals(CiRunStatus.SUCCESS, eventRan.status);
     CiStepRunner.StepSpec recoveredEvent =
         fakeRunner.executed().stream()
-            .filter(spec -> spec.repoId().equals(eventRepo))
+            .filter(spec -> spec.repo().repoId().equals(eventRepo))
             .findFirst()
             .orElseThrow();
     assertEquals("{\"version\":\"2026.802.154030\"}", recoveredEvent.env().get("QITS_EVENT_PAYLOAD"));
@@ -400,7 +400,7 @@ public class CiQueuedRunTest extends CiTestSupport {
     assertEquals(
         1,
         fakeRunner.executed().stream()
-            .filter(spec -> spec.repoId().equals(runningEventRepo))
+            .filter(spec -> spec.repo().repoId().equals(runningEventRepo))
             .count(),
         "one startup sweep restarts the interrupted event once");
 
@@ -409,7 +409,7 @@ public class CiQueuedRunTest extends CiTestSupport {
     assertEquals(
         1,
         fakeRunner.executed().stream()
-            .filter(spec -> spec.repoId().equals(runningEventRepo))
+            .filter(spec -> spec.repo().repoId().equals(runningEventRepo))
             .count(),
         "a completed recovered run is idempotent across later startup sweeps");
   }
@@ -430,7 +430,7 @@ public class CiQueuedRunTest extends CiTestSupport {
 
     assertEquals(
         List.of(first, second, third),
-        fakeRunner.executed().stream().map(spec -> spec.repoId()).toList());
+        fakeRunner.executed().stream().map(spec -> spec.repo().repoId()).toList());
   }
 
   // --- rows a previous process would have left behind ---

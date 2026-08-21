@@ -84,7 +84,7 @@ public class CiDaemonStepRunner implements CiStepRunner {
     // these arrive from the unauthenticated intake and the fourth from a file in the repository
     // being tested. The launcher checks them again before it sends, and the orchestrator a third
     // time where a refusal can name the field.
-    CiIdentifiers.requireRepoId(spec.repoId());
+    CiIdentifiers.requireRepo(spec.repo());
     CiIdentifiers.requireBranch(spec.branch());
     CiIdentifiers.requireSha(spec.sha());
     CiIdentifiers.requireImage(spec.image());
@@ -126,7 +126,7 @@ public class CiDaemonStepRunner implements CiStepRunner {
             new CiDaemonLauncher.LaunchSpec(
                 spec.runId(),
                 spec.stepIndex(),
-                spec.repoId(),
+                spec.repo(),
                 spec.branch(),
                 spec.sha(),
                 spec.image(),

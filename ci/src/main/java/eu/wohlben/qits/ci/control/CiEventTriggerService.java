@@ -12,7 +12,6 @@ import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -218,29 +217,29 @@ public class CiEventTriggerService {
 
   private Evaluation evaluate(Arrival arrival, Long deadlineNanos) {
     JsonNode payload = CiEventSelectionEvaluator.parsePayload(arrival.payload());
-    Set<String> candidates = candidateRepos.candidates();
+    List<CiRepoRef> candidates = candidateRepos.candidates();
     if (candidates.isEmpty()) {
       LOG.debugf("No candidate repositories for event %s — nothing to evaluate", arrival.eventName());
       return new Evaluation(List.of(), 0, List.of());
     }
     List<String> runIds = new ArrayList<>();
     List<String> skipped = new ArrayList<>();
-    for (String repoId : candidates) {
+    for (CiRepoRef repo : candidates) {
       if (deadlineNanos != null && System.nanoTime() - deadlineNanos >= 0) {
         // Out of time rather than out of answers, and the two must not look alike to the caller —
         // so the repository goes on the skipped list like any other one that could not be asked.
-        skipped.add(repoId);
+        skipped.add(repo.repoId());
         continue;
       }
       try {
-        if (!evaluateRepo(repoId, arrival, payload, runIds)) {
-          skipped.add(repoId);
+        if (!evaluateRepo(repo, arrival, payload, runIds)) {
+          skipped.add(repo.repoId());
         }
       } catch (RuntimeException e) {
         // One repository's failure never costs the others theirs. Same containment the per-file
         // parse below has, one level up.
-        LOG.warnf(e, "Could not evaluate event triggers for %s", repoId);
-        skipped.add(repoId);
+        LOG.warnf(e, "Could not evaluate event triggers for %s", repo.display());
+        skipped.add(repo.repoId());
       }
     }
     if (!skipped.isEmpty() && skipped.size() == candidates.size()) {
@@ -253,10 +252,16 @@ public class CiEventTriggerService {
     return new Evaluation(runIds, candidates.size() - skipped.size(), skipped);
   }
 
-  /** Evaluates one repository. {@code false} means it could not be read, which is not "no match". */
+  /**
+   * Evaluates one repository. {@code false} means it could not be read, which is not "no match".
+   *
+   * <p>The reference travels rather than an id: the trigger files are read name-addressed when the
+   * candidate carries a public coordinate, and id-addressed when it does not.
+   */
   private boolean evaluateRepo(
-      String repoId, Arrival arrival, JsonNode payload, List<String> runIds) {
-    EventTriggerLookup lookup = configSource.readEventTriggers(repoId, TRIGGER_BRANCH);
+      CiRepoRef repo, Arrival arrival, JsonNode payload, List<String> runIds) {
+    String repoId = repo.display();
+    EventTriggerLookup lookup = configSource.readEventTriggers(repo, TRIGGER_BRANCH);
     if (lookup.status() != EventTriggerLookup.Status.FOUND) {
       // DEBUG rather than WARN: the candidate list is "every repository ci has ever heard of", so a
       // deleted repository or one with no main would otherwise warn once per repo per event forever.
@@ -288,7 +293,7 @@ public class CiEventTriggerService {
       String runId =
           runService.onEventTrigger(
               new CiRunService.EventRun(
-                  repoId,
+                  repo,
                   TRIGGER_BRANCH,
                   lookup.headSha(),
                   trigger,

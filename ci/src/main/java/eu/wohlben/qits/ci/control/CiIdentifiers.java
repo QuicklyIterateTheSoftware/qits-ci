@@ -20,6 +20,16 @@ public final class CiIdentifiers {
   /** Same slug the git host accepts for a repo id — no separators, no leading dash. */
   private static final String REPO_ID = "[A-Za-z0-9][A-Za-z0-9-]{0,63}";
 
+  /**
+   * A project id and a repository name, which are the two halves of the public address {@code
+   * /git/<projectId>/<repoName>}. Both are slugs of exactly the shape a repo id is — the same
+   * charset, the same bound, the same "no leading dash" — because they land in the same place: one
+   * path segment of a URL a step container clones from. Spelled as their own constant rather than
+   * reusing {@link #REPO_ID} so that the storage id and the public name can diverge later without a
+   * silent widening of either.
+   */
+  private static final String NAME_SEGMENT = "[A-Za-z0-9][A-Za-z0-9-]{0,63}";
+
   /** A hex object id (abbreviated ids are accepted; git resolves them). */
   private static final String SHA = "[0-9a-f]{7,64}";
 
@@ -43,6 +53,56 @@ public final class CiIdentifiers {
       throw new BadRequestException("Invalid repository id");
     }
     return repoId;
+  }
+
+  /**
+   * The owning project of a name-addressed repository, when the event or the listing carried one.
+   *
+   * <p><b>Only when present.</b> The name half of a repository's identity is nullable by design —
+   * an id-addressed push announces without it — so absence is the compatibility arm and never a
+   * refusal. What is checked is a value that IS there, because it reaches a clone URL as one path
+   * segment exactly like the repo id does.
+   *
+   * @throws BadRequestException if the project id could escape a path
+   */
+  public static String requireProjectId(String projectId) {
+    if (projectId == null || !projectId.matches(NAME_SEGMENT)) {
+      throw new BadRequestException("Invalid project id");
+    }
+    return projectId;
+  }
+
+  /**
+   * The repository's addressable name within its project — the second segment of {@code
+   * /git/<projectId>/<repoName>}. Present-only, for {@link #requireProjectId}'s reason.
+   *
+   * @throws BadRequestException if the name could escape a path
+   */
+  public static String requireRepoName(String repoName) {
+    if (repoName == null || !repoName.matches(NAME_SEGMENT)) {
+      throw new BadRequestException("Invalid repository name");
+    }
+    return repoName;
+  }
+
+  /**
+   * Validates a whole reference: the storage id always, and the name pair only when it is there.
+   * The one place the "check it when present" rule is written, so no call site has to remember it.
+   *
+   * @throws BadRequestException if any part that is present could escape a path or an argv
+   */
+  public static CiRepoRef requireRepo(CiRepoRef repo) {
+    if (repo == null) {
+      throw new BadRequestException("Invalid repository id");
+    }
+    requireRepoId(repo.repoId());
+    if (repo.projectId() != null) {
+      requireProjectId(repo.projectId());
+    }
+    if (repo.name() != null) {
+      requireRepoName(repo.name());
+    }
+    return repo;
   }
 
   /**

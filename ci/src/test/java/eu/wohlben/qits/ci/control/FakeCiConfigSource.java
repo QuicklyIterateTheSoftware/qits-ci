@@ -41,6 +41,13 @@ public class FakeCiConfigSource implements CiConfigSource {
 
   private final Map<String, Runnable> duringReads = new HashMap<>();
 
+  /**
+   * Every reference this fake was addressed with, in order — how a test says whether a read went out
+   * name-addressed or id-addressed without standing up an HTTP server for it. The url shapes
+   * themselves are {@code HttpGitConfigSourceTest}'s.
+   */
+  private final List<CiRepoRef> addressed = Collections.synchronizedList(new ArrayList<>());
+
   /** Appends a lookup: the first {@code put} answers the first read, the second the next, … */
   public void put(String repoId, String sha, ConfigLookup lookup) {
     byCommit.computeIfAbsent(repoId + "@" + sha, k -> new ArrayDeque<>()).add(lookup);
@@ -75,16 +82,23 @@ public class FakeCiConfigSource implements CiConfigSource {
     return List.copyOf(triggerReads);
   }
 
+  public List<CiRepoRef> addressed() {
+    return List.copyOf(addressed);
+  }
+
   public void reset() {
     byCommit.clear();
     triggersByBranch.clear();
     configReads.clear();
     triggerReads.clear();
+    addressed.clear();
     duringReads.clear();
   }
 
   @Override
-  public ConfigLookup read(String repoId, String branch, String sha) {
+  public ConfigLookup read(CiRepoRef repo, String branch, String sha) {
+    String repoId = repo.repoId();
+    addressed.add(repo);
     configReads.add(repoId + "@" + sha);
     Runnable midRead = duringReads.remove(repoId + "@" + sha);
     if (midRead != null) {
@@ -99,7 +113,9 @@ public class FakeCiConfigSource implements CiConfigSource {
   }
 
   @Override
-  public EventTriggerLookup readEventTriggers(String repoId, String branch) {
+  public EventTriggerLookup readEventTriggers(CiRepoRef repo, String branch) {
+    String repoId = repo.repoId();
+    addressed.add(repo);
     triggerReads.add(repoId + "@" + branch);
     EventTriggerLookup seeded = triggersByBranch.get(repoId + "@" + branch);
     return seeded == null ? EventTriggerLookup.found("0".repeat(40), List.of()) : seeded;

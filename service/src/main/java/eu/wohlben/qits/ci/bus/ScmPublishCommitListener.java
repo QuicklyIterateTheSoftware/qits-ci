@@ -1,5 +1,8 @@
 package eu.wohlben.qits.ci.bus;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import eu.wohlben.qits.ci.control.CiEventSelectionEvaluator;
+import eu.wohlben.qits.ci.control.CiRepoRef;
 import eu.wohlben.qits.ci.control.CiRunService;
 import eu.wohlben.qits.ci.error.BadRequestException;
 import eu.wohlben.qits.eventstream.QitsDurableEventListener;
@@ -23,9 +26,19 @@ import org.jboss.logging.Logger;
  * consumer that was away reads it back off the log.
  *
  * <p><b>The build is unchanged, deliberately.</b> {@link CiRunService#onPostReceive} is called with
- * the same four values and does the same three things: validate, insert a {@code QUEUED} row, and
+ * the same values and does the same three things: validate, insert a {@code QUEUED} row, and
  * supersede any older queued push for the same {@code (repoId, branch)}. The row still carries
  * {@code POST_RECEIVE} as its trigger type.
+ *
+ * <h2>The repository arrives in two coordinate systems now</h2>
+ *
+ * <p>The event carries the git host's storage id and — filled from the address the push arrived on —
+ * the public {@code projectId}/{@code repoName} pair. Both go onto the run row, and what the pair
+ * buys is every URL the run builds afterwards: the clone address a step container is handed and the
+ * content reads the config comes from. A push on the git host's internal id-addressed route carries
+ * <b>no</b> pair, and neither does anything a pre-cutover host published; such a run is addressed by
+ * id exactly as every run before this campaign was, which is correct rather than degraded — on that
+ * platform the id IS the name. See {@link #repoOf}.
  *
  * <h2>The fifth value is the frame's id, and it closes the causation chain</h2>
  *
@@ -97,6 +110,29 @@ public class ScmPublishCommitListener implements QitsDurableEventListener {
     return Set.of(SCMPublishCommit.class.getSimpleName());
   }
 
+  /**
+   * How the push addresses its repository: the storage id the event has always carried, plus the
+   * {@code projectId}/{@code repoName} the git host fills from the address the push arrived on.
+   *
+   * <p><b>Read off the payload TREE rather than the bound record</b>, and deliberately. The two
+   * fields are new to {@code SCMPublishCommit} and this repository pins a vocabulary jar that may
+   * predate them, so binding them would tie a run's identity to a version bump; walking the JSON
+   * needs no reflection either, which is the rule the whole trigger engine follows for the
+   * native-image reason {@code EventWireReflection} writes down. Absent — an id-addressed push, a
+   * mirror sync, any event a pre-cutover git host published — yields a reference with no name, and
+   * every URL built from it is the id-addressed one this service always built.
+   */
+  private static CiRepoRef repoOf(SCMPublishCommit push, String payload) {
+    JsonNode root = CiEventSelectionEvaluator.parsePayload(payload);
+    return CiRepoRef.of(push.repoId(), text(root, "projectId"), text(root, "repoName"));
+  }
+
+  /** One top-level string off the payload, or null when it is absent or not a string. */
+  private static String text(JsonNode root, String field) {
+    JsonNode at = root == null ? null : root.get(field);
+    return at == null || !at.isTextual() ? null : at.textValue();
+  }
+
   @Override
   public void onFrame(EventFrame frame) {
     SCMPublishCommit push;
@@ -124,7 +160,11 @@ public class ScmPublishCommitListener implements QitsDurableEventListener {
       // is the frame. Nor its parentId — the arriving event is what causes this run; its own parent
       // is the previous hop's business, which is the same rule CiEventTriggerListener follows.
       runService.onPostReceive(
-          push.repoId(), push.branch(), push.oldSha(), push.sha(), frame.id());
+          repoOf(push, frame.payload()),
+          push.branch(),
+          push.oldSha(),
+          push.sha(),
+          frame.id());
     } catch (BadRequestException refused) {
       // Poison: the identifiers are what they are on every offer, so no later attempt could accept
       // this push. Loud, because a git host publishing a ref name qits-ci refuses is a fact

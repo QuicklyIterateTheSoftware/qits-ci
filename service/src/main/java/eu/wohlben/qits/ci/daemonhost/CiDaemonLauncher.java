@@ -12,6 +12,7 @@ import eu.wohlben.qits.containers.client.ContainersWire.Security;
 import eu.wohlben.qits.containers.client.ContainersWire.Spec;
 import eu.wohlben.qits.ci.control.CiDaemonPins;
 import eu.wohlben.qits.ci.control.CiIdentifiers;
+import eu.wohlben.qits.ci.control.CiRepoRef;
 import eu.wohlben.qits.ci.idp.IdpCommissioner;
 import eu.wohlben.qits.ci.idp.RunCommissions;
 import io.quarkus.runtime.LaunchMode;
@@ -441,7 +442,7 @@ public class CiDaemonLauncher {
   public record LaunchSpec(
       String runId,
       int stepIndex,
-      String repoId,
+      CiRepoRef repo,
       String branch,
       String sha,
       String image,
@@ -582,7 +583,9 @@ public class CiDaemonLauncher {
    * slow one. It is not retried either: something answered about this very container.
    */
   public Launched launch(LaunchSpec spec) {
-    CiIdentifiers.requireRepoId(spec.repoId());
+    // The name half only when it is there: an id-addressed run carries none, and refusing that
+    // would refuse every run this service recorded before the identity campaign.
+    CiIdentifiers.requireRepo(spec.repo());
     CiIdentifiers.requireBranch(spec.branch());
     CiIdentifiers.requireSha(spec.sha());
     // The image comes from the repository's own config rather than from the intake, but it reaches a
@@ -922,10 +925,17 @@ public class CiDaemonLauncher {
     env.put("QITS_CI_DAEMON_SECRET", value(spec.secret()));
     env.put("QITS_CI_DAEMON_URL", value(containerDaemonUrl));
     env.put("QITS_CI_DAEMON_BINARY_URL", value(spec.daemonBinaryUrl()));
-    env.put("QITS_CI_REPOSITORY_URL", value(cloneUrl(spec.repoId())));
+    env.put("QITS_CI_REPOSITORY_URL", value(cloneUrl(spec.repo())));
     env.put("QITS_CI_BRANCH", value(spec.branch()));
     env.put("QITS_CI_SHA", value(spec.sha()));
-    env.put("QITS_CI_REPO_ID", value(spec.repoId()));
+    // The repository, in both coordinate systems. QITS_CI_REPO_ID is the storage id the event
+    // announced and keeps its meaning exactly — every pipeline in the estate still reads it — while
+    // the pair beside it is the public address a pipeline moves to as its release call is rewritten.
+    // Empty, never absent, when the announcing push was id-addressed: a step reading an unset
+    // variable and one reading an empty one behave the same, and one shape is one thing to document.
+    env.put("QITS_CI_REPO_ID", value(spec.repo().repoId()));
+    env.put("QITS_CI_PROJECT_ID", value(spec.repo().projectId()));
+    env.put("QITS_CI_REPO_NAME", value(spec.repo().name()));
     // For the step script rather than the daemon: the de-facto convention tooling checks for
     // non-interactive mode, and one that says which CI this is.
     env.put("CI", "true");
@@ -1115,13 +1125,22 @@ public class CiDaemonLauncher {
   }
 
   /**
-   * The id-addressed smart-HTTP url of a repository, as reachable from inside a step container.
-   * {@code /git} is the codebase's second-level segment for the git wire protocol, so it lives here;
-   * the configured base names only which service hosts it. It is the daemon's {@code
+   * The smart-HTTP url of a repository, as reachable from inside a step container: {@code
+   * <base>/git/<projectId>/<repoName>} when the run carries the public coordinate, and the
+   * id-addressed {@code <base>/git/<repoId>} when it does not.
+   *
+   * <p>{@code /git} is the codebase's second-level segment for the git wire protocol, so it lives
+   * here; the configured base names only which service hosts it. It is the daemon's {@code
    * $QITS_CI_REPOSITORY_URL} — a value the container clones from, never a word in a command line.
+   *
+   * <p><b>The name-addressed form is the public clone address</b>, and after the identity cutover it
+   * is the only one a step container can use: the id route belongs to qits-projects alone. The id
+   * arm is the compatibility fallback for a run whose push was id-addressed, and on a pre-cutover
+   * platform — where the storage id is the name — it produces the same URL it always did.
    */
-  String cloneUrl(String repoId) {
-    return containerGitUrl.replaceAll("/+$", "") + "/git/" + repoId;
+  String cloneUrl(CiRepoRef repo) {
+    String base = containerGitUrl.replaceAll("/+$", "") + "/git/";
+    return repo.named() ? base + repo.projectId() + "/" + repo.name() : base + repo.repoId();
   }
 
   /**

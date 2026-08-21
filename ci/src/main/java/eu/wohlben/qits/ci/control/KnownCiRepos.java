@@ -7,7 +7,7 @@ import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Duration;
-import java.util.Set;
+import java.util.List;
 import java.util.TreeSet;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
@@ -55,13 +55,23 @@ public class KnownCiRepos implements CiCandidateRepos {
    * connection; inside it would re-run the query in a transaction the severed connection already
    * doomed.
    */
+  /**
+   * <b>Id-addressed by construction.</b> A run row records the storage id and, since the identity
+   * campaign, the name pair beside it — but this listing is {@code select distinct repo_id}, so what
+   * it can answer is ids. The names come from the platform's own catalogue ({@link
+   * CiRepositoryListing}); this half is what still answers when that catalogue cannot be read, and an
+   * id-addressed read is exactly what qits-ci did before names existed.
+   */
   @Override
-  public Set<String> candidates() {
+  public List<CiRepoRef> candidates() {
     return new TreeSet<>(
-        DbRetry.call(
-            "known ci repository listing",
-            () -> QuarkusTransaction.requiringNew().call(() -> runs.distinctRepoIds()),
-            retryDeadline()));
+            DbRetry.call(
+                "known ci repository listing",
+                () -> QuarkusTransaction.requiringNew().call(() -> runs.distinctRepoIds()),
+                retryDeadline()))
+        .stream()
+        .map(CiRepoRef::of)
+        .toList();
   }
 
   /**

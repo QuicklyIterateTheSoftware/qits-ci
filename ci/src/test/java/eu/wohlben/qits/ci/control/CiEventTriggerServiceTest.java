@@ -104,6 +104,65 @@ public class CiEventTriggerServiceTest extends CiTestSupport {
   }
 
   @Test
+  public void aNamedCandidateIsReadNameAddressedAndItsRunRecordsThePair() throws Exception {
+    // The candidate unit is (repoId, projectId, name), so the engine reads the trigger files at the
+    // public address and the run it accepts carries the pair — which is what every URL that run
+    // builds afterwards comes from.
+    CiRepoRef named = CiRepoRef.of(repoId, "qits", "qits-blobstore");
+    fakeCandidates.setRefs(named);
+    seedTrigger(TRIGGER_PATH, TRIGGER);
+
+    deliver(arrival(UUID.randomUUID().toString(), "BuildSuccessful", PAYLOAD));
+
+    assertTrue(
+        fakeConfig.addressed().contains(named),
+        "the trigger read went out with the public coordinate: " + fakeConfig.addressed());
+    CiRun run = runService.runsFor(repoId).get(0);
+    assertEquals("qits", run.projectId);
+    assertEquals("qits-blobstore", run.repoName);
+    assertEquals(repoId, run.repoId, "the storage id stays the key the row is found by");
+  }
+
+  @Test
+  public void anUnnamedCandidateIsReadIdAddressedAndRecordsNoPair() throws Exception {
+    // The compatibility arm: a candidate qits-ci knows only from its own run rows has no public
+    // address, so it is read exactly as it always was and its run records no names.
+    seedTrigger(TRIGGER_PATH, TRIGGER);
+
+    deliver(arrival(UUID.randomUUID().toString(), "BuildSuccessful", PAYLOAD));
+
+    assertTrue(fakeConfig.addressed().contains(CiRepoRef.of(repoId)));
+    CiRun run = runService.runsFor(repoId).get(0);
+    assertNull(run.projectId);
+    assertNull(run.repoName);
+  }
+
+  @Test
+  public void aTriggerFileNamingTheRepositoryMatchesAnEventCarryingAUuidAndThatName()
+      throws Exception {
+    // The estate's own files, unedited, against a post-cutover event: the payload's repoId is an
+    // opaque storage UUID and the file names the repository, so the matcher reads repoName.
+    seedTrigger(
+        TRIGGER_PATH,
+        """
+        event: SCMPublishTag
+        when:
+          - repoId: { exact: qits-blobstore }
+        steps: []
+        """);
+    String uuidPayload =
+        "{\"repoId\":\"2f1c9b3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f\",\"projectId\":\"qits\","
+            + "\"repoName\":\"qits-blobstore\",\"tagName\":\"2026.821.1\"}";
+
+    deliver(arrival(UUID.randomUUID().toString(), "SCMPublishTag", uuidPayload));
+
+    assertEquals(
+        1,
+        runService.runsFor(repoId).size(),
+        "a file naming the repository must keep matching once the id becomes a UUID");
+  }
+
+  @Test
   public void aPushKeepsRecordingAPostReceiveRunWithNoEvent() {
     // The other trigger type, asserted here so the pair reads in one place — and because every one
     // of these rows has a NULL trigger_event_id, which the unique constraint must let past.

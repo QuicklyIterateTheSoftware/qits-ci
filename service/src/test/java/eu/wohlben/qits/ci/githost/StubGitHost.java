@@ -22,10 +22,17 @@ import java.util.stream.Stream;
  * out of ordinary bare repositories a test seeds on disk.
  *
  * <pre>
- *   GET /git/&lt;repoId&gt;/blob/&lt;rev&gt;/&lt;path&gt;   → the bytes, plus Git-Commit-Sha
- *   GET /git/&lt;repoId&gt;/tree/&lt;rev&gt;[/&lt;path&gt;]  → {"entries":[{"name","type"}]}
- *   GET /git                                → {"repositories":[…]}
+ *   GET /git/&lt;repoId&gt;/blob/&lt;rev&gt;/&lt;path&gt;               → the bytes, plus Git-Commit-Sha
+ *   GET /git/&lt;repoId&gt;/tree/&lt;rev&gt;[/&lt;path&gt;]              → {"entries":[{"name","type"}]}
+ *   GET /git/&lt;projectId&gt;/&lt;repoName&gt;/blob/&lt;rev&gt;/&lt;path&gt;  → the same, name-addressed
+ *   GET /git/&lt;projectId&gt;/&lt;repoName&gt;/tree/&lt;rev&gt;[/…]     → the same, name-addressed
+ *   GET /git                                            → {"repositories":[…]}
  * </pre>
+ *
+ * <p>The name-addressed pair is what the host serves publicly after the repository identity cutover,
+ * and the id-addressed pair is the internal scheme qits-projects keeps. Both are here because
+ * qits-ci reads whichever one the run it is building was announced with — see {@code
+ * HttpGitConfigSource#repoUrl}.
  *
  * <p><b>The base moved out of {@code /artifacts} and that is the point of it being spelled here.</b>
  * The git host used to be part of qits-artifacts and borrow that service's gateway segment; standing
@@ -128,15 +135,25 @@ public class StubGitHost implements QuarkusTestResourceLifecycleManager {
         send(exchange, 200, json("repositories", repositories(root)), null);
         return;
       }
-      String[] segments = path.substring(1).split("/", 4);
-      if (segments.length < 3) {
+      // Both addressing schemes, told apart by where the verb sits: /git/<repoId>/blob/… is the
+      // id-addressed read, /git/<projectId>/<repoName>/blob/… the name-addressed one. That is
+      // exactly how the real host routes them, and it is why the two can share one prefix.
+      // Peek at the second segment to learn the scheme, THEN split with the limit that scheme
+      // needs: the trailing file path must stay one element, whichever of the two it is.
+      String[] head = path.substring(1).split("/", 3);
+      boolean idAddressed = head.length >= 2 && isVerb(head[1]);
+      int verb = idAddressed ? 1 : 2;
+      String[] segments = path.substring(1).split("/", verb + 3);
+      if (segments.length < verb + 2) {
         send(exchange, 400, "not a content read".getBytes(StandardCharsets.UTF_8), null);
         return;
       }
-      Path bare = root.resolve("git").resolve(segments[0]);
-      String kind = segments[1];
-      String rev = URLDecoder.decode(segments[2], StandardCharsets.UTF_8);
-      String file = segments.length == 4 ? segments[3] : "";
+      Path bare =
+          root.resolve("git")
+              .resolve(idAddressed ? segments[0] : resolve(segments[0], segments[1]));
+      String kind = segments[verb];
+      String rev = URLDecoder.decode(segments[verb + 1], StandardCharsets.UTF_8);
+      String file = segments.length > verb + 2 ? segments[verb + 2] : "";
       if (!Files.isDirectory(bare)) {
         send(exchange, 404, new byte[0], null);
         return;
@@ -157,6 +174,27 @@ public class StubGitHost implements QuarkusTestResourceLifecycleManager {
     } catch (Exception e) {
       throw new IllegalStateException("the stub git host could not answer", e);
     }
+  }
+
+  private static boolean isVerb(String segment) {
+    return segment.equals("blob") || segment.equals("tree");
+  }
+
+  /**
+   * The name resolver, as much of it as this stub needs: {@code (projectId, name)} to the bare the
+   * repository is stored in. A test registers one with {@link #alias}; with none registered the name
+   * IS the storage directory, which is what a pre-cutover platform looks like and what keeps a suite
+   * that seeds by name from having to declare anything.
+   */
+  private static final Map<String, String> ALIASES = new java.util.concurrent.ConcurrentHashMap<>();
+
+  /** Registers {@code /git/<projectId>/<name>} as an address for the bare {@code repoId}. */
+  public static void alias(String projectId, String name, String repoId) {
+    ALIASES.put(projectId + "/" + name, repoId);
+  }
+
+  private static String resolve(String projectId, String name) {
+    return ALIASES.getOrDefault(projectId + "/" + name, name);
   }
 
   /** {@code {"entries":[{"name","type"}]}} for the directory at {@code sha:path}, or null. */

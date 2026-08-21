@@ -24,6 +24,13 @@ import java.util.List;
  * <p>{@code daemonVersion} is the {@code qits-ci-daemon} build every one of this run's containers
  * ran, pinned once at run creation — so the row records forever what produced its results.
  *
+ * <p>{@code projectId} and {@code repoName} are the repository's <b>public</b> coordinate — the one
+ * address the platform speaks, {@code /git/<projectId>/<repoName>} — and they are additive rather
+ * than a replacement: {@code repoId} stays the storage key every existing client already binds and
+ * every run row is found by. Both are <b>null</b> when the announcing push was id-addressed and on
+ * every run recorded before the identity campaign, so a client labels by {@code repoName} when it is
+ * there and falls back to {@code repoId} when it is not.
+ *
  * <p>The four <b>provenance</b> fields say what caused the run. {@code triggerType} is {@code
  * POST_RECEIVE} or {@code EVENT}; {@code configPath} is the committed file that declared the
  * pipeline, which on an event-triggered run identifies <em>which</em> {@code
@@ -35,6 +42,8 @@ import java.util.List;
 public record CiRunDto(
     String id,
     String repoId,
+    String projectId,
+    String repoName,
     String branch,
     String commitSha,
     CiRunStatus status,

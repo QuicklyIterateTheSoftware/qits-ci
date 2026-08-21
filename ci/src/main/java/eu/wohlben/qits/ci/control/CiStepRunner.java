@@ -23,6 +23,12 @@ public interface CiStepRunner {
   /**
    * Everything one step execution needs — ids and strings only, never entities.
    *
+   * <p>{@code repo} is how the step addresses the repository it builds: the storage id it has always
+   * carried, plus the public {@code (projectId, name)} pair when the run's announcing push carried
+   * one. The implementation turns it into the clone URL and into the step's own {@code
+   * QITS_CI_PROJECT_ID}/{@code QITS_CI_REPO_NAME}; with no pair it builds the id-addressed URL this
+   * service always built.
+   *
    * <p>{@code daemonBinaryUrl} is resolved once per run from {@link #pinDaemon()} and repeated into
    * every one of that run's containers, so a deploy landing mid-run cannot make step 3 speak a
    * different protocol than step 1. {@code timeoutSeconds} is the step's own deadline — the
@@ -53,7 +59,7 @@ public interface CiStepRunner {
   record StepSpec(
       String runId,
       int stepIndex,
-      String repoId,
+      CiRepoRef repo,
       String branch,
       String sha,
       String image,

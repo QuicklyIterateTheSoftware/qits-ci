@@ -123,6 +123,35 @@ public class CiSchemaTest {
     assertEquals("text", columnType("ci_daemon_pin", "detail"));
   }
 
+  @Test
+  public void theRepositoryIdentityColumnsAreNullableAndTakeBothArms() throws SQLException {
+    // V5. Both halves of the public coordinate are optional BY DESIGN: an id-addressed push
+    // announces neither, and no historical row has them, so a not-null column would have needed a
+    // value nobody pushed. Written and rolled back rather than described, so the lineage is proven
+    // to accept a run with names and one without.
+    assertEquals("character varying", columnType("ci_run", "project_id"));
+    assertEquals("character varying", columnType("ci_run", "repo_name"));
+    try (Connection connection = ci.getConnection()) {
+      connection.setAutoCommit(false);
+      try (PreparedStatement run =
+          connection.prepareStatement(
+              "insert into ci_run (id, repo_id, project_id, repo_name, branch, commit_sha, status,"
+                  + " created_at, trigger_type, config_path) values (?, 'schema-probe', ?, ?,"
+                  + " 'main', '0', 'QUEUED', current_timestamp, 'POST_RECEIVE',"
+                  + " '.config/qits/ci-post-receive.yml')")) {
+        run.setString(1, "identity-probe-named");
+        run.setString(2, "qits");
+        run.setString(3, "qits-blobstore");
+        run.executeUpdate();
+        run.setString(1, "identity-probe-unnamed");
+        run.setString(2, null);
+        run.setString(3, null);
+        run.executeUpdate();
+      }
+      connection.rollback();
+    }
+  }
+
   private List<String> constraints(String table, char type) throws SQLException {
     List<String> names = new ArrayList<>();
     try (Connection connection = ci.getConnection();

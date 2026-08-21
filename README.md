@@ -97,11 +97,12 @@ rest of qits it reaches over a URL it is configured with:
 | in | `GET /ci/api/runs?repositoryId={repoId}[&limit={n}]`, `GET /ci/api/runs/{runId}` | not machine-guarded; they carry build logs, so a deployment must keep them behind its auth policy |
 | in | `GET /ci/api/runs/active` → `{"runs": [...]}` — every `QUEUED` or `RUNNING` run on the instance, all repositories, newest first, no parameters | same; unscoped, because "what is CI doing right now" has no repository to scope to |
 | in | `GET /ci/api/repositories` → `{"repositoryIds": [...]}` — the distinct repo ids this instance has runs for, ascending | same; it is the one read here that is not scoped to a repository, because it answers *which* |
-| in | `GET /ci/api/repositories/summary` → `{"repositories": [{repositoryId, lastRun, lastMainRun}]}` — ascending by id, full run objects, `lastMainRun` null when there is none | same; it is the id listing plus the two runs a client would otherwise make a request per repository to find |
+| in | `GET /ci/api/repositories/summary` → `{"repositories": [{repositoryId, projectId, repoName, lastRun, lastMainRun}]}` — ascending by id, full run objects, `lastMainRun` null when there is none, and the name pair null for a repository whose pushes were id-addressed | same; it is the id listing plus the two runs a client would otherwise make a request per repository to find |
 | in | `GET /ci/api/daemon` → `{"daemonName", "daemonVersion", "previousDaemonVersion", "source"}` — the pin ladder's top rung (an adopted release, else the configured pin), never a run row; blank `daemonVersion` and `source: "none"` mean this deployment has pinned none | same; read fail-closed by qits-artifacts' daemon GC and readable by the client |
 | in | `POST /ci/api/runs/{runId}/cancel` → 202, 409 on a run that has already finished | same: no machine guard, behind the deployment's auth policy |
 | in | `ws://…/ci/daemon` — the socket each step container's daemon dials **out** to | authenticated by a host-minted per-container secret, not by a machine token |
-| out | where the git host answers: ci reads a commit's pipeline config off its content routes (`<base>/git/<repoId>/blob/<rev>/<path>` and `…/tree/<rev>[/<path>]`) and its candidate listing off `GET <base>/git` → `{"repositories": [...]}` | `qits.ci.git-host-url` |
+| out | where the git host answers: ci reads a commit's pipeline config off its content routes — `<base>/git/<projectId>/<repoName>/blob/<rev>/<path>` and `…/tree/<rev>[/<path>]` for a run whose push carried the public pair, `<base>/git/<repoId>/…` for one that did not — and, with no `qits.ci.projects-url` set, its candidate listing off `GET <base>/git` → `{"repositories": [...]}` | `qits.ci.git-host-url` |
+| out | `GET <base>/projects/api/repositories` → `{"repositories": [{id, projectId, name, mainBranch}]}` — the candidate list an arriving event is evaluated against, and the only place the public `(projectId, name)` pair can be read. **Unset by default**: with no value ci falls back to the git host's storage listing, which is what a pre-cutover platform and a clone-alone build need | `qits.ci.projects-url` |
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
 | out | where a step container downloads the daemon binary from | `qits.ci.daemon-binary-url-template` + the pin ladder's answer (`qits.ci.daemon-version` is the ladder's bottom rung, never demoted) |
 | out | `PUT /events/api/events/{uuid}` — one `BuildSuccessful` per **green** run, idempotent (the `RunAnnouncer` seam), and the **only** thing a green run announces | `qits.events.url`, `qits.eventstream.enabled` |
@@ -258,7 +259,8 @@ OTLP exporter takes, and a deployment without a qits-events is a supported confi
 the way a deployment with no deployer is.
 
 ci never touches the bare origins on disk, and it clones nothing: it **reads the one file** off the
-git host's content routes — `GET <qits.ci.git-host-url>/git/<repoId>/blob/<rev>/<path>`, with `rev`
+git host's content routes — `GET <qits.ci.git-host-url>/git/<projectId>/<repoName>/blob/<rev>/<path>`
+for a run that carries the public pair and `…/git/<repoId>/blob/…` for one that does not, with `rev`
 a sha or a ref name and the resolved commit answered in a `Git-Commit-Sha` header. So it runs on a
 machine with no shared filesystem with qits, no local mirror and no `git` binary.
 
@@ -452,6 +454,14 @@ env npm_config_registry="$QITS_NPM_PROXY_URL" \
     "npm_config_@qits:registry=$QITS_NPM_REGISTRY_URL" \
     pnpm install --frozen-lockfile
 ```
+
+**Every step container is told which repository it is building, in both coordinate systems.**
+`$QITS_CI_REPO_ID` is the git host's storage id, exactly as it always was — after the identity
+cutover an opaque UUID — and beside it are `$QITS_CI_PROJECT_ID` and `$QITS_CI_REPO_NAME`, the public
+pair `/git/<projectId>/<repoName>` is built from and the one a person reads. The two new variables
+are **empty rather than absent** when the run's push was announced id-addressed, so a step reads one
+shape whichever way its run arrived. `$QITS_CI_REPOSITORY_URL` — what the checkout clones — follows
+the same rule: the public address when the pair is there, the id-addressed one when it is not.
 
 **`$QITS_WORKSPACES_URL` is injected on the same reading**, and it is qits-workspaces' root —
 scheme, host and port, no path. A step that asks for its own repository to be released after the
@@ -714,12 +724,21 @@ answer inside a step. A push-triggered run gets none of these.
 
 ### Which repositories are asked
 
-Every arriving event is evaluated against the union of **what the git host lists** (`GET
-<qits.ci.git-host-url>/git`) and **what qits-ci already knows** — its recorded runs' repo ids. The
-listing is what lets a repository seeded straight onto the git host event-trigger before its first
-push; the known set is what still answers when the listing cannot be read, because a read failure
-must never shrink the candidate set. It is one method (`CiCandidateRepos`), which is how the listing
-was added: one class, nothing in the engine moved.
+Every arriving event is evaluated against the union of **the platform's repository catalogue** and
+**what qits-ci already knows** — its recorded runs' repo ids. The catalogue is what lets a repository
+that has never pushed event-trigger at all; the known set is what still answers when the catalogue
+cannot be read, because a read failure must never shrink the candidate set. It is one method
+(`CiCandidateRepos`), which is how the catalogue was swapped: one class, nothing in the engine moved.
+
+**Which catalogue is a kill switch.** With `qits.ci.projects-url` set, it is qits-projects' `GET
+/projects/api/repositories` — the only listing that answers the public `(projectId, name)` pair, and
+after the identity cutover the only one qits-ci may read at all, since the git host's own `GET /git`
+becomes an internal storage listing of UUIDs. With the key unset it is that git-host listing, exactly
+as it was before this campaign. A catalogue entry with no `name` is skipped: no public address means
+no content route to read its trigger files from.
+
+The candidate unit is `(repoId, projectId, name)`, and the pair is what the trigger read is addressed
+by. A candidate qits-ci knows only from its own run rows carries no pair and is read id-addressed.
 
 ### Exactly one run per (event, trigger file)
 

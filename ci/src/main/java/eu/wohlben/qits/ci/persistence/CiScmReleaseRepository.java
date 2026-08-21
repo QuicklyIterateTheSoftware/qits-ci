@@ -10,15 +10,37 @@ import java.util.Optional;
 public class CiScmReleaseRepository implements PanacheRepositoryBase<CiScmRelease, String> {
 
   /**
-   * Whether a {@code (repository, version)} was really released.
-   *
-   * <p><b>Either spelling of the repository matches</b>, and that is the whole reason this is not a
-   * {@code find("repoId", …)}: the run's side of the join is the git host's repository id, while the
-   * event carries an id and, optionally, the registered name. The two agree on this platform and the
-   * event does not promise it, so a join that only compared one of them would silently never close.
+   * Whether a {@code (repository, version)} was really released, asked with the storage id alone —
+   * what the boot sweep has, since an owed row is keyed by the run's repository id.
    */
   public boolean released(String repoId, String version) {
-    return count("(repoId = ?1 or repoName = ?1) and version = ?2", repoId, version) > 0;
+    return released(repoId, null, version);
+  }
+
+  /**
+   * Whether a {@code (repository, version)} was really released, asked with <b>both</b> spellings of
+   * the repository the run knows.
+   *
+   * <p><b>The name is the preferred half and the id is the fallback</b>, which is the whole reason
+   * this is not a {@code find("repoId", …)}. After the identity cutover a run's {@code repoId} is an
+   * opaque storage UUID while {@code SCMRelease} announces the platform's public name, so comparing
+   * ids alone would silently never close the join; before it, id and name agree and either arm
+   * answers. Every combination is compared because neither side promises which spelling it carries:
+   * the event records an id and, optionally, a registered name, and the run now records the same
+   * pair.
+   *
+   * @param repoName the run's own public name, or null when its push was id-addressed
+   */
+  public boolean released(String repoId, String repoName, String version) {
+    if (repoName == null || repoName.isBlank()) {
+      return count("(repoId = ?1 or repoName = ?1) and version = ?2", repoId, version) > 0;
+    }
+    return count(
+            "(repoName = ?1 or repoId = ?1 or repoId = ?2 or repoName = ?2) and version = ?3",
+            repoName,
+            repoId,
+            version)
+        > 0;
   }
 
   /**

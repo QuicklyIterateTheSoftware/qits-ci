@@ -359,8 +359,17 @@ Two more things live in this package and belong to it rather than to `ci/`:
 `service/…/githost/HttpGitConfigSource` is the only implementation of `CiConfigSource`, and it is
 two `GET`s against the git host:
 
-    <qits.ci.git-host-url>/git/<repoId>/blob/<rev>/<path>    the bytes
-    <qits.ci.git-host-url>/git/<repoId>/tree/<rev>[/<path>]  {"entries":[{"name","type"}]}
+    <qits.ci.git-host-url>/git/<projectId>/<repoName>/blob/<rev>/<path>    the bytes
+    <qits.ci.git-host-url>/git/<projectId>/<repoName>/tree/<rev>[/<path>]  {"entries":[…]}
+
+**The repository arrives as a `CiRepoRef`, and `repoUrl` is the one place the two addressing schemes
+are chosen between.** A reference carrying `(projectId, name)` is read name-addressed, which is the
+public scheme and the only one the git host keeps serving above the projects↔githost seam; one
+carrying only a storage id is read `…/git/<repoId>/…`, exactly as this service always read. The id
+arm is not legacy tolerance for its own sake — an id-addressed push announces no name at all, and on
+a pre-cutover platform the id IS the name — so it is correct where it fires and silent everywhere
+else. `CiIdentifiers.requireRepo` validates the name half **only when it is present**; widening that
+to "always" would refuse every mirror sync.
 
 Both answer the commit they resolved in a `Git-Commit-Sha` header, and `<rev>` is a sha **or** a ref
 name. Four things follow, and each of them replaced something:
@@ -1079,8 +1088,20 @@ follows is what biting it feels like.
   class the javadoc promised, and nothing in the engine moved.
 
   **What ships now is a union, and union is the design rather than a step towards replacement.**
-  `ListedAndKnownCiRepos` is the bean the engine gets: `GET <qits.ci.git-host-url>/git` →
-  `{"repositories": […]}` through the `GitHostRepoListing` port, **added to** `KnownCiRepos`' answer.
+  `ListedAndKnownCiRepos` is the bean the engine gets: the platform's catalogue **added to**
+  `KnownCiRepos`' answer.
+
+  **Which catalogue is a config kill switch, and the candidate unit is a `CiRepoRef`.** With
+  `qits.ci.projects-url` set it is qits-projects' `GET /projects/api/repositories` →
+  `{"repositories":[{id, projectId, name, mainBranch}]}` through the `CiRepositoryListing` port
+  (`service/…/projects/HttpProjectsRepoListing`) — the only listing that can answer a public NAME,
+  which after the identity cutover is the only thing a trigger file can select on or a content read
+  can be addressed by. With the key unset it is the git host's own `GET <qits.ci.git-host-url>/git`
+  through `GitHostRepoListing`, which is what this service always used and what keeps a clone-alone
+  build and a pre-cutover platform working. Never both: a configured qits-projects is the authority
+  on which repositories exist, and adding UUIDs under it would put candidates nothing can address
+  back into the set. An entry with no `name` is **skipped** — no public address means no trigger file
+  to read — and a named entry beats the known set's id-only one for the same repository.
   The listing is one HTTP call away, so an unreachable host, a non-200, a body that is not JSON and a
   body with no `repositories` array are each one WARN naming the url and an empty contribution — the
   answer is then the known set alone, which is precisely what shipped before. **A read failure must
@@ -1176,7 +1197,12 @@ Four things reaching this code are attacker-controlled and must stay that way in
   the sha on it are as attacker-shaped as the intake POST they replaced — a durable event with a
   claim row behind it establishes *delivery*, never content.
   `CiIdentifiers.require{RepoId,Branch,Sha}` validates all three *before* they reach a
-  filesystem path or an argv. Never widen those, never bypass them, never interpolate an identifier
+  filesystem path or an argv. **The payload's `projectId` and `repoName` join them, and they are
+  checked ONLY WHEN PRESENT** (`CiIdentifiers.requireRepo`): both reach the same clone URL as a path
+  segment, so a value that is there is validated to the same standard — and absence is the
+  compatibility arm rather than a refusal, because an id-addressed push announces neither. They are
+  read off the payload TREE rather than the bound record, so a `qits-githost-events` that predates
+  them still builds. Never widen those, never bypass them, never interpolate an identifier
   into a shell string. What changed with the transport is only the answer to a refusal: a 400 to a
   caller became a WARN and a settled event, because there is no caller.
 - **The step's `image`.** It comes from a file in the repository being tested and still lands in a
@@ -1258,6 +1284,14 @@ CiDaemonPin — `event_id` is already the adopting event; CiReleaseAnnouncement 
 is already the cause, and it is on the row because the published event is stamped with it;
 CiScmRelease — `event_id` is already the announcing release). A new entity that skips the decision
 fails the build naming the class.
+
+`V4__run_started_at.sql` and `V5__run_repository_identity.sql` continue the same rule. The second is
+the repository-identity campaign's half of it: `ci_run.project_id` and `ci_run.repo_name`, both
+nullable, no backfill and part of no constraint. **Nullable is the design, not a shortcut** — the git
+host fills the pair from the address a push arrived on, so an id-addressed push announces neither and
+no historical row has them; a run with no pair builds id-addressed URLs, which is what this service
+did before names existed. `repo_id` is untouched and stays the key: the dedupe constraint is built on
+it and every existing row is found by it.
 
 `V1__init.sql` is the rest of the schema. The nine H2 migrations it replaces (V1-V8 plus a Java V9) are
 history in this repository's log and are not a prefix of this lineage: the move off H2 is a

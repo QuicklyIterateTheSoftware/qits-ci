@@ -5,6 +5,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -38,15 +39,24 @@ public class FakeCandidateRepos implements CiCandidateRepos {
   private static final String TRIGGER_WORKER = "ci-trigger-worker";
 
   // Read through methods: a field read on an injected CDI client proxy sees the proxy's fields.
-  private final Set<String> repoIds = new LinkedHashSet<>();
+  private final Set<CiRepoRef> repos = new LinkedHashSet<>();
   private volatile CountDownLatch gate;
   private final AtomicBoolean released = new AtomicBoolean(true);
   private volatile CountDownLatch workerGate;
   private volatile CountDownLatch workerWedged;
 
+  /** Candidates known by storage id alone — the id-addressed arm, which is most of this suite. */
   public void set(String... ids) {
-    repoIds.clear();
-    repoIds.addAll(List.of(ids));
+    repos.clear();
+    for (String id : ids) {
+      repos.add(CiRepoRef.of(id));
+    }
+  }
+
+  /** Candidates carrying their public coordinate — the name-addressed arm. */
+  public void setRefs(CiRepoRef... refs) {
+    repos.clear();
+    repos.addAll(List.of(refs));
   }
 
   /** The next {@link #candidates()} parks until {@link #release()}. */
@@ -89,7 +99,7 @@ public class FakeCandidateRepos implements CiCandidateRepos {
   }
 
   public void reset() {
-    repoIds.clear();
+    repos.clear();
     release();
     freeTheTriggerWorker();
     gate = null;
@@ -98,7 +108,7 @@ public class FakeCandidateRepos implements CiCandidateRepos {
   }
 
   @Override
-  public Set<String> candidates() {
+  public List<CiRepoRef> candidates() {
     CountDownLatch worker = workerGate;
     if (worker != null && TRIGGER_WORKER.equals(Thread.currentThread().getName())) {
       workerWedged.countDown();
@@ -121,6 +131,6 @@ public class FakeCandidateRepos implements CiCandidateRepos {
       released.set(true);
       gate = null;
     }
-    return Set.copyOf(repoIds);
+    return List.copyOf(repos);
   }
 }

@@ -56,6 +56,25 @@ public class CiRun extends PanacheEntityBase implements CausedRow {
   @Column(name = "repo_id", nullable = false)
   public String repoId;
 
+  /**
+   * The public coordinate of the same repository — the project it belongs to and its name within
+   * that project, which together are the one address anything above the projects↔githost seam
+   * speaks: {@code /git/<projectId>/<repoName>}.
+   *
+   * <p><b>Both are nullable, and that is the compatibility arm rather than an oversight.</b> The git
+   * host fills them on an {@code SCM*} event from the address the push arrived on, so a push on the
+   * internal id-addressed route announces without them and every row recorded before this campaign
+   * has neither. A run with no pair builds id-addressed URLs and displays its id, which is exactly
+   * what this service did before names existed. {@link #repoId} stays the storage-adjacent key: it
+   * is what the dedupe constraint is built on and what every historical row is found by, and it is
+   * never displayed once a name is there.
+   */
+  @Column(name = "project_id", length = 255)
+  public String projectId;
+
+  @Column(name = "repo_name", length = 255)
+  public String repoName;
+
   @Column(nullable = false)
   public String branch;
 

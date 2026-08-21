@@ -124,7 +124,8 @@ public class CiTagSupersedeTest extends CiTestSupport {
             Thread.currentThread().interrupt();
           }
         });
-    service.onPostReceive(blocker, "main", "0".repeat(40), sha, UUID.randomUUID().toString());
+    service.onPostReceive(
+        CiRepoRef.of(blocker), "main", "0".repeat(40), sha, UUID.randomUUID().toString());
     inStepZero.get(20, TimeUnit.SECONDS);
   }
 
@@ -208,7 +209,7 @@ public class CiTagSupersedeTest extends CiTestSupport {
     assertEquals(CiRunStatus.SUCCESS, service.requireRun(winner.id).status);
     assertEquals(
         1,
-        fakeRunner.executed().stream().filter(spec -> spec.repoId().equals(repoId)).count(),
+        fakeRunner.executed().stream().filter(spec -> spec.repo().repoId().equals(repoId)).count(),
         "a five-tag push starts one pipeline");
   }
 

@@ -6,6 +6,7 @@ import eu.wohlben.qits.ci.control.CiConfigParser;
 import eu.wohlben.qits.ci.control.CiConfigSource;
 import eu.wohlben.qits.ci.control.CiEventTriggerParser;
 import eu.wohlben.qits.ci.control.CiIdentifiers;
+import eu.wohlben.qits.ci.control.CiRepoRef;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.net.URI;
@@ -24,9 +25,13 @@ import org.jboss.logging.Logger;
  * the git host's content endpoints.
  *
  * <pre>
- *   GET {qits.ci.git-host-url}/git/&lt;repoId&gt;/blob/&lt;rev&gt;/&lt;path&gt;  → the raw bytes
- *   GET {qits.ci.git-host-url}/git/&lt;repoId&gt;/tree/&lt;rev&gt;[/&lt;path&gt;] → {"entries":[{"name","type"}]}
+ *   GET {qits.ci.git-host-url}/git/&lt;projectId&gt;/&lt;repoName&gt;/blob/&lt;rev&gt;/&lt;path&gt;  → the raw bytes
+ *   GET {qits.ci.git-host-url}/git/&lt;projectId&gt;/&lt;repoName&gt;/tree/&lt;rev&gt;[/&lt;path&gt;] → {"entries":[…]}
  * </pre>
+ *
+ * <p>…or the id-addressed {@code /git/&lt;repoId&gt;/…} of the same two routes for a repository whose
+ * public name qits-ci does not know — see {@link #repoUrl}, which is the one place that choice is
+ * made.
  *
  * <p>Both answer the commit they resolved in a {@code Git-Commit-Sha} header, and {@code rev} is a
  * full sha or a ref name — which is what lets the push path read <b>at the pushed sha</b> instead of
@@ -131,12 +136,13 @@ public class HttpGitConfigSource implements CiConfigSource {
    * branch is still validated and still travels, because it is the run's own coordinate.
    */
   @Override
-  public ConfigLookup read(String repoId, String branch, String sha) {
-    CiIdentifiers.requireRepoId(repoId);
+  public ConfigLookup read(CiRepoRef repo, String branch, String sha) {
+    CiIdentifiers.requireRepo(repo);
     CiIdentifiers.requireBranch(branch);
     CiIdentifiers.requireSha(sha);
 
-    String url = blobUrl(repoId, sha, CiConfigParser.CONFIG_PATH);
+    String repoId = repo.display();
+    String url = blobUrl(repo, sha, CiConfigParser.CONFIG_PATH);
     Answer blob = get(url);
     if (blob.ok()) {
       if (blob.body().length > MAX_CONFIG_BYTES) {
@@ -152,7 +158,7 @@ public class HttpGitConfigSource implements CiConfigSource {
     // 404 on the blob is either "this commit declares no pipeline" or "this repository does not
     // hold this commit", and the two mean opposite things to the record. One tree listing at the
     // same sha tells them apart: it 404s only when the rev does not resolve.
-    Answer commit = get(treeUrl(repoId, sha, ""));
+    Answer commit = get(treeUrl(repo, sha, ""));
     if (commit.ok()) {
       return ConfigLookup.absent();
     }
@@ -183,14 +189,15 @@ public class HttpGitConfigSource implements CiConfigSource {
    * unbounded count is an unbounded amount of work per frame.
    */
   @Override
-  public EventTriggerLookup readEventTriggers(String repoId, String branch) {
-    CiIdentifiers.requireRepoId(repoId);
+  public EventTriggerLookup readEventTriggers(CiRepoRef repo, String branch) {
+    CiIdentifiers.requireRepo(repo);
     CiIdentifiers.requireBranch(branch);
 
+    String repoId = repo.display();
     String dir = CiEventTriggerParser.CONFIG_DIR.replaceAll("/+$", "");
-    Answer listed = get(treeUrl(repoId, branch, dir));
+    Answer listed = get(treeUrl(repo, branch, dir));
     if (!listed.ok()) {
-      return noTriggerDirectory(repoId, branch, listed);
+      return noTriggerDirectory(repo, branch, listed);
     }
     String headSha = listed.commitSha();
     if (headSha == null || headSha.isBlank()) {
@@ -210,7 +217,7 @@ public class HttpGitConfigSource implements CiConfigSource {
             repoId, MAX_TRIGGER_FILES, MAX_TRIGGER_FILES);
         break;
       }
-      Answer file = get(blobUrl(repoId, headSha, path));
+      Answer file = get(blobUrl(repo, headSha, path));
       if (!file.ok()) {
         LOG.warnf("ci could not read %s at %s in %s", path, headSha, repoId);
         continue;
@@ -236,12 +243,13 @@ public class HttpGitConfigSource implements CiConfigSource {
    * or renamed would otherwise cost one warning per green build, platform-wide, forever. A warning
    * that cannot be acted on and never stops is how a log stops being read.
    */
-  private EventTriggerLookup noTriggerDirectory(String repoId, String branch, Answer listed) {
+  private EventTriggerLookup noTriggerDirectory(CiRepoRef repo, String branch, Answer listed) {
+    String repoId = repo.display();
     if (!listed.notFound()) {
       LOG.debugf("ci could not list %s in %s: HTTP %d", branch, repoId, listed.status());
       return EventTriggerLookup.unreachable();
     }
-    Answer root = get(treeUrl(repoId, branch, ""));
+    Answer root = get(treeUrl(repo, branch, ""));
     if (root.ok() && root.commitSha() != null && !root.commitSha().isBlank()) {
       return EventTriggerLookup.found(root.commitSha(), List.of());
     }
@@ -306,17 +314,28 @@ public class HttpGitConfigSource implements CiConfigSource {
     }
   }
 
-  /** {@code <base>/git/<repoId>} — the same base the repository listing and a clone address. */
-  private String repoUrl(String repoId) {
-    return gitHostUrl.replaceAll("/+$", "") + "/git/" + repoId;
+  /**
+   * Where this repository's content is served: {@code <base>/git/<projectId>/<repoName>} when the
+   * reference carries the public coordinate, {@code <base>/git/<repoId>} when it does not.
+   *
+   * <p><b>The name-addressed form is the one the git host will keep serving.</b> After the identity
+   * cutover the id route is qits-projects' alone — a storage UUID is not an address anything above
+   * that seam holds — and the host serves blob and tree name-addressed in exactly the same shapes.
+   * The id arm stays because an id-addressed push announces no name and a pre-cutover platform
+   * (where the id IS the name) is served correctly by it, so the fallback is right rather than
+   * merely tolerated; post-cutover it goes quiet on its own.
+   */
+  private String repoUrl(CiRepoRef repo) {
+    String base = gitHostUrl.replaceAll("/+$", "") + "/git/";
+    return repo.named() ? base + repo.projectId() + "/" + repo.name() : base + repo.repoId();
   }
 
-  String blobUrl(String repoId, String rev, String path) {
-    return repoUrl(repoId) + "/blob/" + encodeRev(rev) + "/" + path;
+  String blobUrl(CiRepoRef repo, String rev, String path) {
+    return repoUrl(repo) + "/blob/" + encodeRev(rev) + "/" + path;
   }
 
-  String treeUrl(String repoId, String rev, String path) {
-    return repoUrl(repoId) + "/tree/" + encodeRev(rev) + (path.isEmpty() ? "" : "/" + path);
+  String treeUrl(CiRepoRef repo, String rev, String path) {
+    return repoUrl(repo) + "/tree/" + encodeRev(rev) + (path.isEmpty() ? "" : "/" + path);
   }
 
   /**

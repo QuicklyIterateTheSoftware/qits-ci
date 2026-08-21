@@ -2,6 +2,7 @@ package eu.wohlben.qits.ci.bus;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -73,6 +74,48 @@ public class ScmPublishCommitListenerTest {
         frame.id(),
         run.get("triggerEventId"),
         "the announcing event is the run's cause, and the row is how it survives the hand-off");
+  }
+
+  /**
+   * The name-addressed push: the event carries the public {@code (projectId, repoName)} pair the git
+   * host filled in from the address it arrived on, and both land on the run row.
+   *
+   * <p>The bare is stored under an opaque id and the git host resolves the pair to it, so this also
+   * shows the config read really went out name-addressed — an id-addressed read would have found the
+   * bare too, but the alias is the only thing that makes {@code /git/<project>/<name>} resolve.
+   */
+  @Test
+  public void aNameAddressedPushRecordsTheProjectAndTheName() throws Exception {
+    String repoId = seedOrigin();
+    String repoName = "named-" + repoId.substring(0, 8);
+    StubGitHost.alias("qits", repoName, repoId);
+    String sha = pushBranchWithConfig(repoId, "scm-named", CONFIG);
+
+    listener.onFrame(
+        ScmPushFrames.named(repoId, "qits", repoName, "scm-named", ScmPushFrames.ZERO_SHA, sha));
+
+    Map<String, Object> run = awaitTerminalRun(repoId);
+    assertEquals("SUCCESS", run.get("status"));
+    assertEquals("qits", run.get("projectId"));
+    assertEquals(repoName, run.get("repoName"));
+    assertEquals(repoId, run.get("repoId"), "the storage id stays the key the row is found by");
+  }
+
+  /**
+   * The compatibility arm: a push announced with no name pair — an id-addressed push, a mirror sync,
+   * anything a pre-cutover git host published — records nulls and is built exactly as before.
+   */
+  @Test
+  public void anIdAddressedPushRecordsNoNamesAndStillBuilds() throws Exception {
+    String repoId = seedOrigin();
+    String sha = pushBranchWithConfig(repoId, "scm-unnamed", CONFIG);
+
+    listener.onFrame(ScmPushFrames.push(repoId, "scm-unnamed", ScmPushFrames.ZERO_SHA, sha));
+
+    Map<String, Object> run = awaitTerminalRun(repoId);
+    assertEquals("SUCCESS", run.get("status"));
+    assertNull(run.get("projectId"), "an id-addressed push names no project");
+    assertNull(run.get("repoName"), "and no repository name");
   }
 
   /**

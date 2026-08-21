@@ -26,6 +26,23 @@ import java.util.Set;
  *     script: ./bump-and-push.sh
  * }</pre>
  *
+ * <h2>{@code repoId:} names the repository's ADDRESSABLE NAME</h2>
+ *
+ * <p>The matcher above reads as "the repository this event is about", and after the repository
+ * identity campaign that is the repository's <b>name</b> — the second half of the one public address
+ * {@code /git/<projectId>/<repoName>}. An {@code SCM*} event carries {@code repoName} filled from
+ * the address the push arrived on, and a condition on {@code repoId} is evaluated against it
+ * whenever it is there.
+ *
+ * <p><b>The id is the legacy fallback.</b> An event with no {@code repoName} — a push on the
+ * internal id-addressed route, and every event published before the campaign — is matched against
+ * its {@code repoId} exactly as it always was. That is what keeps the estate's existing files
+ * working unedited on both sides of the cutover: before it the storage id and the name agree, and
+ * after it the name field answers. The key keeps its spelling deliberately, because renaming it
+ * would break every one of those files to say something they already mean. The alias itself is
+ * {@code CiEventSelectionEvaluator.resolveAddressable}, applied at evaluation rather than here,
+ * since whether the fallback applies is a property of the arriving event and not of the file.
+ *
  * <p>A <b>release pipeline</b> is the same file with the fourth key: it selects an {@code SCMRelease}
  * naming its own repository, checks out the released tag, publishes — and declares what it published,
  * so that a green run announces one {@code SoftwareRelease} per artifact. See {@link CiArtifact}.

@@ -24,6 +24,10 @@ components:
           type: string
         repoId:
           type: string
+        projectId:
+          type: string
+        repoName:
+          type: string
         branch:
           type: string
         commitSha:
@@ -138,6 +142,10 @@ components:
       type: object
       properties:
         repositoryId:
+          type: string
+        projectId:
+          type: string
+        repoName:
           type: string
         lastRun:
           $ref: "#/components/schemas/CiRunDto"
@@ -423,4 +431,4 @@ paths:
         - qits:admin
 info:
   title: qits-ci API
-  version: 2026.814.123830
+  version: 2026.821.52538
