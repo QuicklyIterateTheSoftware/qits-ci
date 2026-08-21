@@ -202,7 +202,10 @@ public class CiDaemonLauncher {
         response=$(curl -fsS --connect-timeout 2 --max-time 10 -u "$QITS_COMMISSIONED_CLIENT_ID:$QITS_COMMISSIONED_CLIENT_SECRET" \\
           -H 'Content-Type: application/x-www-form-urlencoded' --data "grant_type=client_credentials&audience=$QITS_GIT_AUTH_AUDIENCE" "$QITS_GIT_AUTH_TOKEN_URL") || exit 0
       else
-        response=$(wget -qO- --timeout=10 --user="$QITS_COMMISSIONED_CLIENT_ID" --password="$QITS_COMMISSIONED_CLIENT_SECRET" \\
+        # BusyBox wget knows neither --user nor --password, so the wget arm authenticates
+        # with a composed Basic header. base64 may wrap long input; tr joins it.
+        auth=$(printf '%s:%s' "$QITS_COMMISSIONED_CLIENT_ID" "$QITS_COMMISSIONED_CLIENT_SECRET" | base64 | tr -d '\\n')
+        response=$(wget -qO- -T 10 --header "Authorization: Basic $auth" \\
           --post-data="grant_type=client_credentials&audience=$QITS_GIT_AUTH_AUDIENCE" "$QITS_GIT_AUTH_TOKEN_URL") || exit 0
       fi
       token=$(printf '%s' "$response" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
