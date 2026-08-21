@@ -929,8 +929,9 @@ public class CiDaemonLauncher {
     env.put("QITS_CI_BRANCH", value(spec.branch()));
     env.put("QITS_CI_SHA", value(spec.sha()));
     // The repository, in both coordinate systems. QITS_CI_REPO_ID is the storage id the event
-    // announced and keeps its meaning exactly — every pipeline in the estate still reads it — while
-    // the pair beside it is the public address a pipeline moves to as its release call is rewritten.
+    // announced and keeps its meaning exactly, while the pair beside it is the public address —
+    // which is what every release call in the estate now spells, the storage id staying below the
+    // projects↔githost seam.
     // Empty, never absent, when the announcing push was id-addressed: a step reading an unset
     // variable and one reading an empty one behave the same, and one shape is one thing to document.
     env.put("QITS_CI_REPO_ID", value(spec.repo().repoId()));

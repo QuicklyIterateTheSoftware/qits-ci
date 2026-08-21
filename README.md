@@ -465,9 +465,10 @@ the same rule: the public address when the pair is there, the id-addressed one w
 
 **`$QITS_WORKSPACES_URL` is injected on the same reading**, and it is qits-workspaces' root —
 scheme, host and port, no path. A step that asks for its own repository to be released after the
-tests it follows went green POSTs to
-`$QITS_WORKSPACES_URL/workspaces/api/branches/release?repositoryId=$QITS_CI_REPO_ID`; the path is
-the caller's to spell, and the address is never a literal in a pipeline. Like the npm pair and
+tests it follows went green POSTs to `$QITS_WORKSPACES_URL/workspaces/api/branches/release`
+with `?projectId=$QITS_CI_PROJECT_ID&repositoryName=$QITS_CI_REPO_NAME` — the door takes the
+**public** pair and refuses the storage id above the seam; the path is the caller's to spell, and
+the address is never a literal in a pipeline. Like the npm pair and
 unlike `$QITS_REGISTRY`, it is dialled by the step container itself over the shared network, so the
 in-network alias is the value that is right for it.
 

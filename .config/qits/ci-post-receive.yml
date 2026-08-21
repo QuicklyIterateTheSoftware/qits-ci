@@ -229,5 +229,5 @@ steps:
           console.error(`release call failed: ${err.message}`);
           process.exit(1);
         });
-      ' "$QITS_WORKSPACES_URL/workspaces/api/branches/release?repositoryId=$QITS_CI_REPO_ID" \
+      ' "$QITS_WORKSPACES_URL/workspaces/api/branches/release?projectId=$QITS_CI_PROJECT_ID&repositoryName=$QITS_CI_REPO_NAME" \
         "$QITS_CI_BRANCH" "$summary"
