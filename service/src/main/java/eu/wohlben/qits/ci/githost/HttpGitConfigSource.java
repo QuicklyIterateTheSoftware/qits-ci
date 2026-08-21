@@ -7,6 +7,7 @@ import eu.wohlben.qits.ci.control.CiConfigSource;
 import eu.wohlben.qits.ci.control.CiEventTriggerParser;
 import eu.wohlben.qits.ci.control.CiIdentifiers;
 import eu.wohlben.qits.ci.control.CiRepoRef;
+import eu.wohlben.qits.ci.control.CiTriggerScope;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.net.URI;
@@ -187,9 +188,14 @@ public class HttpGitConfigSource implements CiConfigSource {
    * from the host and goes straight into a URL — and a repository may declare at most {@link
    * #MAX_TRIGGER_FILES} of them, because this runs per repository per arriving event and an
    * unbounded count is an unbounded amount of work per frame.
+   *
+   * <p><b>{@code scope} decides which prefix in that one directory is read</b>, and nothing else
+   * about this method changes with it. A platform read is one listing of one configured repository
+   * per arriving event, on top of the per-candidate reads — see {@link CiTriggerScope}.
    */
   @Override
-  public EventTriggerLookup readEventTriggers(CiRepoRef repo, String branch) {
+  public EventTriggerLookup readEventTriggers(
+      CiRepoRef repo, String branch, CiTriggerScope scope) {
     CiIdentifiers.requireRepo(repo);
     CiIdentifiers.requireBranch(branch);
 
@@ -208,13 +214,13 @@ public class HttpGitConfigSource implements CiConfigSource {
     List<EventTriggerFile> files = new ArrayList<>();
     for (String name : entryNames(repoId, listed)) {
       String path = CiEventTriggerParser.CONFIG_DIR + name;
-      if (!CiEventTriggerParser.isTriggerPath(path)) {
+      if (!scope.matches(path)) {
         continue;
       }
       if (files.size() >= MAX_TRIGGER_FILES) {
         LOG.warnf(
-            "%s declares more than %d event triggers — reading the first %d",
-            repoId, MAX_TRIGGER_FILES, MAX_TRIGGER_FILES);
+            "%s declares more than %d %s event triggers — reading the first %d",
+            repoId, MAX_TRIGGER_FILES, scope, MAX_TRIGGER_FILES);
         break;
       }
       Answer file = get(blobUrl(repo, headSha, path));

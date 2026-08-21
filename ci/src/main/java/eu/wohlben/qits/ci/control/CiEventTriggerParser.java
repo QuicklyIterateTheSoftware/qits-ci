@@ -94,8 +94,18 @@ public class CiEventTriggerParser {
   /** The directory both trigger types live in. */
   public static final String CONFIG_DIR = ".config/qits/";
 
-  /** The prefix that makes a file in {@link #CONFIG_DIR} an event trigger. */
+  /** The prefix that makes a file in {@link #CONFIG_DIR} a repository's own event trigger. */
   public static final String CONFIG_PREFIX = CONFIG_DIR + "ci-event-";
+
+  /**
+   * The prefix that makes a file in {@link #CONFIG_DIR} a <b>platform</b> event trigger — one file,
+   * in one configured repository, evaluated for every arriving event and recorded against the
+   * repository the payload names. See {@link CiTriggerScope}.
+   *
+   * <p>It does not start with {@link #CONFIG_PREFIX}, so the two sets never overlap and a repository
+   * that carries both kinds declares two pipelines rather than one ambiguous file.
+   */
+  public static final String PLATFORM_CONFIG_PREFIX = CONFIG_DIR + "ci-platform-event-";
 
   public static final String CONFIG_SUFFIX = ".yml";
 
@@ -134,14 +144,23 @@ public class CiEventTriggerParser {
    * gets.
    */
   public static boolean isTriggerPath(String path) {
+    return isTriggerPath(path, CONFIG_PREFIX);
+  }
+
+  /** Whether a path is a <b>platform</b> trigger file — the same rule, one prefix over. */
+  public static boolean isPlatformTriggerPath(String path) {
+    return isTriggerPath(path, PLATFORM_CONFIG_PREFIX);
+  }
+
+  /** The shared rule: this prefix, the {@code .yml} suffix, and a plain slug in between. */
+  static boolean isTriggerPath(String path, String prefix) {
     if (path == null
-        || !path.startsWith(CONFIG_PREFIX)
+        || !path.startsWith(prefix)
         || !path.endsWith(CONFIG_SUFFIX)
-        || path.length() <= CONFIG_PREFIX.length() + CONFIG_SUFFIX.length()) {
+        || path.length() <= prefix.length() + CONFIG_SUFFIX.length()) {
       return false;
     }
-    String name =
-        path.substring(CONFIG_PREFIX.length(), path.length() - CONFIG_SUFFIX.length());
+    String name = path.substring(prefix.length(), path.length() - CONFIG_SUFFIX.length());
     return name.length() <= 64 && name.matches("[A-Za-z0-9][A-Za-z0-9._-]*");
   }
 

@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.ci.control.CiConfigParser;
 import eu.wohlben.qits.ci.control.CiRepoRef;
+import eu.wohlben.qits.ci.control.CiTriggerScope;
 import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerFile;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerLookup;
@@ -297,6 +298,30 @@ public class HttpGitConfigSourceTest {
     assertEquals(
         List.of(".config/qits/ci-event-real.yml"),
         source.readEventTriggers(id(repoId), BRANCH).files().stream()
+            .map(EventTriggerFile::path)
+            .toList());
+  }
+
+  @Test
+  public void eachScopeReadsItsOwnPrefixAndNeverTheOthers() throws Exception {
+    // One directory, two kinds of file. A repository read must not pick up the platform's pipelines
+    // and a platform read must not pick up the repository's, or one listing would mean two things.
+    String repoId = "repo-scoped";
+    seed(
+        repoId,
+        "steps: []\n",
+        Map.of(
+            ".config/qits/ci-event-local.yml", "event: A\n",
+            ".config/qits/ci-platform-event-bump.yml", "event: B\n"));
+
+    assertEquals(
+        List.of(".config/qits/ci-event-local.yml"),
+        source.readEventTriggers(id(repoId), BRANCH, CiTriggerScope.REPOSITORY).files().stream()
+            .map(EventTriggerFile::path)
+            .toList());
+    assertEquals(
+        List.of(".config/qits/ci-platform-event-bump.yml"),
+        source.readEventTriggers(id(repoId), BRANCH, CiTriggerScope.PLATFORM).files().stream()
             .map(EventTriggerFile::path)
             .toList());
   }

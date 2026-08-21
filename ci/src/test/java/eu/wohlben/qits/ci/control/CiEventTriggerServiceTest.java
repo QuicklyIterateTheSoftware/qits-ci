@@ -254,7 +254,8 @@ public class CiEventTriggerServiceTest extends CiTestSupport {
   @Test
   public void aRepositoryDeclaringNoTriggerIsAskedAndFiresNothing() throws Exception {
     deliver(arrival(UUID.randomUUID().toString(), "BuildSuccessful", PAYLOAD));
-    assertTrue(fakeConfig.triggerReads().contains(repoId + "@main"), "the candidate was asked");
+    assertTrue(
+        fakeConfig.triggerReads().contains(repoId + "@main#REPOSITORY"), "the candidate was asked");
     assertEquals(List.of(), runService.runsFor(repoId));
   }
 
