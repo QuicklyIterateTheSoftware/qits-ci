@@ -266,6 +266,7 @@ paths:
       security:
       - SecurityScheme:
         - qits:admin
+        - qits:system
   /ci/api/repositories/summary:
     get:
       summary: Each repository with its newest run and its newest run on main
@@ -285,6 +286,7 @@ paths:
       security:
       - SecurityScheme:
         - qits:admin
+        - qits:system
   /ci/api/runs:
     get:
       summary: "List a repository's CI runs, newest first"
@@ -320,6 +322,7 @@ paths:
       security:
       - SecurityScheme:
         - qits:admin
+        - qits:system
   /ci/api/runs/active:
     get:
       summary: "Every queued or running CI run, all repositories, newest first"
@@ -339,6 +342,7 @@ paths:
       security:
       - SecurityScheme:
         - qits:admin
+        - qits:system
   /ci/api/runs/finished:
     get:
       summary: "The newest finished CI runs, all repositories, newest first"
@@ -368,6 +372,7 @@ paths:
       security:
       - SecurityScheme:
         - qits:admin
+        - qits:system
   /ci/api/runs/{runId}:
     get:
       summary: "One CI run with its steps, output and — while it runs — its live step"
@@ -395,6 +400,7 @@ paths:
       security:
       - SecurityScheme:
         - qits:admin
+        - qits:system
   /ci/api/runs/{runId}/cancel:
     post:
       summary: Cancel a queued or running CI run

@@ -40,10 +40,13 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * so it adds <b>no literal route</b> and {@code quarkus.quinoa.ignored-path-prefixes} is unchanged —
  * {@code /api} already covers it. And it is a read, so it calls no machine guard — exactly like the
  * run reads.
+ *
+ * <p><b>Read by both kinds of caller</b>, so it takes {@code qits:admin} and {@code qits:system}
+ * together — the same pair {@code CiRunController}'s reads take, and for the reason stated there.
  */
 @Path("/repositories")
 @Produces(MediaType.APPLICATION_JSON)
-@jakarta.annotation.security.RolesAllowed("qits:admin")
+@jakarta.annotation.security.RolesAllowed({"qits:admin", "qits:system"})
 public class CiRepositoryController {
 
   @Inject CiRunService runService;

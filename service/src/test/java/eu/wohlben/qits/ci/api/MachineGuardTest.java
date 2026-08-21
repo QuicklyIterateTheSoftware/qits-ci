@@ -40,8 +40,10 @@ import org.junit.jupiter.api.Test;
  * roles with no configuration at all, so a token minted without it authenticates and covers
  * nothing. Only then is {@code MachineAuth} asked, and a wrong audience or an uncovered project is
  * its own 403. Which caller each read serves is spelled out per case: the daemon pin takes the two
- * system roles a machine peer holds, and the repository listing takes {@code qits:admin}, which
- * only a forwarded {@code X-Qits-Roles} carries.
+ * system roles a machine peer holds, and the run and repository reads take <b>the pair</b> —
+ * {@code qits:system} is the machine role, {@code qits:admin} the human one, and both of those
+ * callers legitimately read. What mutates is not widened with them: cancelling a run stays
+ * {@code qits:admin} alone.
  */
 @QuarkusTest
 @TestProfile(MachineGuardTest.GateOn.class)
@@ -240,11 +242,54 @@ class MachineGuardTest {
         @Claim(key = "aud", value = OWN_AUDIENCE),
         @Claim(key = QitsClaims.PROJECT, value = "*")
       })
-  void theRepositoryListingIsAPersonsReadAndRefusesAMachine() {
-    // qits-spa-ci draws this listing, so it takes qits:admin — a role only a forwarded
-    // X-Qits-Roles carries. An impeccable machine token is refused 403 here: the reads used to be
-    // open and are not, and which caller each one serves is the whole of what this case says.
-    given().when().get("/ci/api/repositories").then().statusCode(403);
+  void theRepositoryListingIsReadByMachinesToo() {
+    // It used to answer a machine 403, on the reading that qits-spa-ci draws it so it is a person's.
+    // That was the human role standing in for "may read", and the price was a machine peer being
+    // told to hold qits:admin. A read takes the pair.
+    given().when().get("/ci/api/repositories").then().statusCode(200);
+  }
+
+  @Test
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = OWN_AUDIENCE),
+        @Claim(key = QitsClaims.PROJECT, value = "*")
+      })
+  void aMachinePeerPollsOneRunWithItsOwnRole() {
+    // qits-platform-maintenance asks for a bump and then polls GET /ci/api/runs/{id} until it is
+    // terminal. 404 is the guard PASSING — no such run in this instance — and it is what rules out
+    // the 401 and the 403 this case exists for.
+    given().when().get("/ci/api/runs/no-such-run").then().statusCode(404);
+  }
+
+  @Test
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = OWN_AUDIENCE),
+        @Claim(key = QitsClaims.PROJECT, value = "*")
+      })
+  void theRunListingsAreReadByMachinesToo() {
+    // The other three reads on the same resource, so that a widening applied to one of them and not
+    // the others shows up here rather than in a poller that half works.
+    given().when().get("/ci/api/runs/active").then().statusCode(200);
+    given().when().get("/ci/api/runs/finished").then().statusCode(200);
+    given().when().get("/ci/api/runs?repositoryId=guarded-repo").then().statusCode(200);
+    given().when().get("/ci/api/repositories/summary").then().statusCode(200);
+  }
+
+  @Test
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = OWN_AUDIENCE),
+        @Claim(key = QitsClaims.PROJECT, value = "*")
+      })
+  void cancellingARunStaysAPersonsAndRefusesAMachine() {
+    // The one write on the read resource, and the whole reason the reads' widening is method-scoped
+    // rather than class-wide: stopping somebody's build is not a thing a peer service does.
+    given().when().post("/ci/api/runs/no-such-run/cancel").then().statusCode(403);
   }
 
   @Test

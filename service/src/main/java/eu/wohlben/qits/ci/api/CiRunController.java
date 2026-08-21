@@ -41,6 +41,12 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * not exist, and put three services under one gateway prefix. {@code {runId}} stays in the path:
  * there it is identity, not scope.
  *
+ * <p><b>The reads take the pair {@code qits:admin, qits:system}; the cancel takes {@code qits:admin}
+ * alone.</b> qits:system is the machine role and qits:admin the human one, and a machine that has to
+ * poll a run it asked for — qits-platform-maintenance waits out every bump this way — must not be
+ * granted a person's role to do it. What mutates is not widened: {@link #cancelRun} carries its own
+ * method-level list, which replaces the class's rather than adding to it.
+ *
  * <p><b>Nothing here is hidden from the OpenAPI document any more.</b> The two reads used to carry
  * {@code @Operation(hidden = true)} on the criterion "does a client consume it, does a person invoke
  * it" — machine surfaces stay out, the cancel button goes in. The criterion was right and its answer
@@ -53,7 +59,7 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  */
 @Path("/runs")
 @Produces(MediaType.APPLICATION_JSON)
-@jakarta.annotation.security.RolesAllowed("qits:admin")
+@jakarta.annotation.security.RolesAllowed({"qits:admin", "qits:system"})
 public class CiRunController {
 
   @Inject CiRunService runService;
@@ -240,6 +246,9 @@ public class CiRunController {
    */
   @POST
   @Path("/{runId}/cancel")
+  // A method-level list REPLACES the class-level one rather than adding to it, which is exactly what
+  // this needs: the reads above take the pair, and cancelling a build stays a person's.
+  @jakarta.annotation.security.RolesAllowed("qits:admin")
   @Consumes(MediaType.WILDCARD)
   @Operation(summary = "Cancel a queued or running CI run")
   @APIResponse(responseCode = "202", description = "The run has been stopped or asked to stop")

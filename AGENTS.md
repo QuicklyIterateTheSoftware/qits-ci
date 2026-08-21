@@ -507,9 +507,12 @@ Add a write endpoint, add its case there, and keep every address in that test ab
 prefix then shows up as a 404 rather than as a pass.
 
 **The reads are not open, and `@RolesAllowed` shuts before the guard call is reached.** Every
-controller carries a class-level role: `qits:admin` on `CiRunController` and `CiRepositoryController`,
-which is what qits-spa-ci's session holds, and `qits:system` on `CiEventController`,
-`CiDaemonController` and `CiDaemonSocket`, which is what a machine peer holds. So three doors shut in
+controller carries a class-level role: **the pair** `{qits:admin, qits:system}` on `CiRunController`
+and `CiRepositoryController` — `qits:system` is the machine role and `qits:admin` the human one, and
+a peer that polls a run it asked for must not be handed a person's role to do it — and `qits:system`
+on `CiEventController`, `CiDaemonController` and `CiDaemonSocket`, which is what a machine peer
+holds. **Nothing that mutates was widened with them**: `CiRunController.cancelRun` carries its own
+method-level `qits:admin`, which replaces the class's list rather than adding to it. So three doors shut in
 order, and `MachineGuardTest` pins which: no token is 401, a token granted no roles is 403 at
 `@RolesAllowed`, a wrong audience or an uncovered project is `MachineAuth`'s own 403. **A machine
 token carries its roles in the `groups` claim** — qits-platform-idp copies them there from
@@ -1380,8 +1383,9 @@ comment beside the dependency. There is no `security` package here any more, and
 `SecurityIdentity`; this service authenticates no person. The platform edge establishes the
 session, and `qits-gateway` strips and re-asserts its reserved `X-Qits-*` namespace. That hygiene is
 the entire reason the headers can be trusted here. There is no auth variant to select in this
-service: the human-facing controllers require `qits:admin`; machine controllers retain their
-separate `MachineAuth` audience/scope checks pending endpoint-scoped machine roles.
+service: the read routes accept `qits:admin` or `qits:system`, the one human write (`cancel`)
+requires `qits:admin`, and machine controllers retain their separate `MachineAuth` audience/scope
+checks pending endpoint-scoped machine roles.
 
 **`identity.isAnonymous()` is not a security state** — it means "no name for the audit row". A check
 of the form `if (identity.isAnonymous()) deny` would look like a security control and be worth
