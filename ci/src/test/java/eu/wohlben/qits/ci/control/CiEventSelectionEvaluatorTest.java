@@ -280,7 +280,67 @@ public class CiEventSelectionEvaluatorTest {
     assertTrue(matches("when:\n  - repoId: { exists: true }\n"));
   }
 
-  /** The alias is that one top-level path and nothing else — never a nested key of the same name. */
+  // --- and so does `repository`, which is how qits-workspaces spells the same thing ---
+
+  /**
+   * The live defect of 2026-08-22, in one case. An {@code SCMRelease} out of qits-workspaces carries
+   * {@code repository} = the storage UUID and {@code repositoryName} = the name, and every
+   * repository's {@code ci-event-release.yml} selects the name. Without this alias {@code
+   * repository} resolved literally to the UUID, nothing matched, and no release pipeline ran at all
+   * after the re-bootstrap.
+   */
+  @Test
+  public void repositoryMatchesTheRepositoryNameWhenTheEventCarriesOne() {
+    JsonNode release =
+        CiEventSelectionEvaluator.parsePayload(
+            "{\"branch\":\"release/maintenance-service\","
+                + "\"projectId\":\"b03b7c4e-1d2f-4a5b-8c9d-0e1f2a3b4c5d\","
+                + "\"repository\":\"764e8bf9-3a2b-4c1d-9e8f-7a6b5c4d3e2f\","
+                + "\"repositoryName\":\"qits-platform-maintenance\","
+                + "\"version\":\"2026.822.170613\"}");
+
+    assertTrue(
+        CiEventSelectionEvaluator.matches(
+            selection("when:\n  - repository: { exact: qits-platform-maintenance }\n"), release));
+    assertFalse(
+        CiEventSelectionEvaluator.matches(
+            selection(
+                "when:\n  - repository: { exact: 764e8bf9-3a2b-4c1d-9e8f-7a6b5c4d3e2f }\n"),
+            release),
+        "the storage id is not something a trigger file may select on once a name is there");
+  }
+
+  /** The compatibility arm: no {@code repositoryName}, so {@code repository} reads itself. */
+  @Test
+  public void repositoryFallsBackToItselfWhenTheEventCarriesNoName() {
+    JsonNode preCutover =
+        CiEventSelectionEvaluator.parsePayload(
+            "{\"repository\":\"qits-blobstore\",\"version\":\"2026.811.1\"}");
+
+    assertTrue(
+        CiEventSelectionEvaluator.matches(
+            selection("when:\n  - repository: { exact: qits-blobstore }\n"), preCutover));
+    assertTrue(
+        CiEventSelectionEvaluator.matches(
+            selection("when:\n  - repository: { prefix: qits- }\n"), preCutover));
+    assertTrue(
+        CiEventSelectionEvaluator.matches(
+            selection("when:\n  - repository: { exists: true }\n"), preCutover));
+  }
+
+  /**
+   * The alias must not cost the ordinary reading of the word. This suite's own base payload carries
+   * an OBJECT at {@code repository} and no {@code repositoryName}, so it falls through to the
+   * literal — and every nested path below it was never a candidate for the alias in the first place.
+   */
+  @Test
+  public void aRepositoryThatIsAnObjectIsStillWalkedIntoLiterally() {
+    assertTrue(matches("when:\n  - repository.url: { prefix: \"http://\" }\n"));
+    assertTrue(matches("when:\n  - repository.nested.deep: { exact: \"yes\" }\n"));
+    assertTrue(matches("when:\n  - repository: { exists: true }\n"));
+  }
+
+  /** The alias is those top-level paths and nothing else — never a nested key of the same name. */
   @Test
   public void onlyTheTopLevelRepoIdPathIsAliased() {
     JsonNode nested =
@@ -293,6 +353,21 @@ public class CiEventSelectionEvaluatorTest {
     assertFalse(
         CiEventSelectionEvaluator.matches(
             selection("when:\n  - repository.repoId: { exact: the-name }\n"), nested));
+  }
+
+  /** The same restriction for the second alias, stated on its own so neither can be widened alone. */
+  @Test
+  public void onlyTheTopLevelRepositoryPathIsAliased() {
+    JsonNode nested =
+        CiEventSelectionEvaluator.parsePayload(
+            "{\"repositoryName\":\"the-name\",\"outer\":{\"repository\":\"inner\"}}");
+
+    assertTrue(
+        CiEventSelectionEvaluator.matches(
+            selection("when:\n  - outer.repository: { exact: inner }\n"), nested));
+    assertFalse(
+        CiEventSelectionEvaluator.matches(
+            selection("when:\n  - outer.repository: { exact: the-name }\n"), nested));
   }
 
   @Test

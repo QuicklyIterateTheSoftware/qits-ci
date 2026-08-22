@@ -65,26 +65,40 @@ public final class CiEventSelectionEvaluator {
   }
 
   /**
-   * The path a trigger file writes when it means "this repository", and the field the platform
-   * answers it with now.
+   * The paths a trigger file writes when it means "this repository", and the fields the platform
+   * answers them with now.
    *
-   * <p><b>{@code repoId} names the repository's ADDRESSABLE NAME, and the id is the legacy arm.</b>
-   * After the identity cutover an {@code SCM*} event's {@code repoId} is an opaque storage UUID —
-   * nothing a repository could write in a file, and nothing that stays the same across a
-   * re-bootstrap — while the same event carries {@code repoName} filled from the address the push
-   * arrived on. So a condition on {@code repoId} is evaluated against {@code repoName} whenever the
-   * payload has one, and against {@code repoId} when it does not. The nine estate trigger files that
-   * say {@code repoId: {exact: qits-blobstore}} therefore keep matching on both sides of the
-   * cutover, unedited: before it, id and name agree and the id arm answers; after it, the name
-   * field is there and answers instead.
+   * <p><b>They name the repository's ADDRESSABLE NAME, and the id is the legacy arm.</b> After the
+   * identity cutover a repository's id is an opaque storage UUID — nothing a repository could write
+   * in a file, and nothing that stays the same across a re-bootstrap — while the same event carries
+   * the name filled from the address the push or the release arrived on. So a condition on an id
+   * path is evaluated against its name field whenever the payload has one, and against the id field
+   * when it does not. The estate's trigger files therefore keep matching on both sides of the
+   * cutover, unedited: before it, id and name agree and the id arm answers; after it, the name field
+   * is there and answers instead.
+   *
+   * <p><b>Two producers spell the pair differently, so there are two aliases rather than one.</b> An
+   * {@code SCM*} event out of qits-githost says {@code repoId}/{@code repoName}; an {@code
+   * SCMRelease} out of qits-workspaces says {@code repository}/{@code repositoryName}. Neither
+   * spelling is this service's to choose, and a release pipeline selecting {@code repository:
+   * {exact: qits-blobstore}} is exactly as entitled to keep working as a push pipeline selecting
+   * {@code repoId:}. Measured on <b>2026-08-22</b>: five {@code SCMRelease} events on the bus, every
+   * repository's {@code ci-event-release.yml} selecting the name, {@code repository} resolving
+   * literally to the UUID, and not one release pipeline run since the re-bootstrap.
    *
    * <p>It is an <b>alias at evaluation</b> rather than a rewrite at parse, because whether the
    * fallback applies is a property of the arriving event and not of the file. A payload carrying no
-   * {@code repoName} — every non-SCM event on this bus — is unaffected in every direction.
+   * name field is unaffected in every direction — including a payload whose {@code repository} is an
+   * object rather than a repository, which resolves literally and can still be walked into.
    */
   static final String REPO_ID_PATH = "repoId";
 
   static final String REPO_NAME_PATH = "repoName";
+
+  /** The same pair, as qits-workspaces spells it on an {@code SCMRelease}. */
+  static final String REPOSITORY_PATH = "repository";
+
+  static final String REPOSITORY_NAME_PATH = "repositoryName";
 
   private static boolean groupMatches(Group group, JsonNode payload) {
     for (PathCondition condition : group.conditions()) {
@@ -127,20 +141,38 @@ public final class CiEventSelectionEvaluator {
   }
 
   /**
-   * {@link #resolve}, with the one alias this platform's identity split needs: {@link #REPO_ID_PATH}
-   * reads {@link #REPO_NAME_PATH} when the payload carries it. Everything else resolves literally.
+   * {@link #resolve}, with the aliases this platform's identity split needs: an id path reads its
+   * name field when the payload carries one. Everything else resolves literally.
    *
    * <p>Only the exact top-level path is aliased — never a prefix, never a nested {@code
-   * something.repoId} — so an event that means a different thing by the word cannot be caught by it.
+   * something.repoId} or {@code x.repository} — so an event that means a different thing by the word
+   * cannot be caught by it. That restriction is what lets {@code repository} be an alias here and
+   * still be an ordinary object to walk into elsewhere: {@code repository.url} is untouched.
    */
   static JsonNode resolveAddressable(JsonNode root, String path) {
-    if (REPO_ID_PATH.equals(path)) {
-      JsonNode name = resolve(root, REPO_NAME_PATH);
+    String nameField = nameFieldFor(path);
+    if (nameField != null) {
+      JsonNode name = resolve(root, nameField);
       if (name != null) {
         return name;
       }
     }
     return resolve(root, path);
+  }
+
+  /**
+   * The name field a top-level id path is read through, or null when the path is not one of them.
+   * Spelled as a switch over the two producers rather than a map, because the whole list is two
+   * entries and adding a third is a decision about the DSL.
+   */
+  private static String nameFieldFor(String path) {
+    if (REPO_ID_PATH.equals(path)) {
+      return REPO_NAME_PATH;
+    }
+    if (REPOSITORY_PATH.equals(path)) {
+      return REPOSITORY_NAME_PATH;
+    }
+    return null;
   }
 
   /**

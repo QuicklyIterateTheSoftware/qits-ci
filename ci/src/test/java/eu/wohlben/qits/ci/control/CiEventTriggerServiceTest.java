@@ -163,6 +163,39 @@ public class CiEventTriggerServiceTest extends CiTestSupport {
   }
 
   @Test
+  public void aReleaseFileNamingTheRepositoryMatchesTheRealSCMReleasePayload() throws Exception {
+    // The estate's own ci-event-release.yml, unedited, against the payload qits-workspaces really
+    // publishes: `repository` is the storage UUID and `repositoryName` is the name the file spells.
+    // This is the 2026-08-22 defect — five SCMRelease events and zero release pipelines — as a case.
+    seedTrigger(
+        ".config/qits/ci-event-release.yml",
+        """
+        event: SCMRelease
+        when:
+          - repository: { exact: qits-platform-maintenance }
+        artifacts:
+          - { type: docker, name: qits/qits-platform-maintenance }
+        steps:
+          - image: alpine:3
+            script: echo publish
+        """);
+    String scmRelease =
+        "{\"branch\":\"release/maintenance-service\","
+            + "\"projectId\":\"b03b7c4e-1d2f-4a5b-8c9d-0e1f2a3b4c5d\","
+            + "\"repository\":\"764e8bf9-3a2b-4c1d-9e8f-7a6b5c4d3e2f\","
+            + "\"repositoryName\":\"qits-platform-maintenance\","
+            + "\"version\":\"2026.822.170613\"}";
+
+    deliver(arrival(UUID.randomUUID().toString(), "SCMRelease", scmRelease));
+
+    assertEquals(
+        1,
+        runService.runsFor(repoId).size(),
+        "a release file naming the repository must match once the id becomes a UUID");
+    assertEquals("SCMRelease", runService.runsFor(repoId).get(0).triggerEventName);
+  }
+
+  @Test
   public void aPushKeepsRecordingAPostReceiveRunWithNoEvent() {
     // The other trigger type, asserted here so the pair reads in one place — and because every one
     // of these rows has a NULL trigger_event_id, which the unique constraint must let past.
