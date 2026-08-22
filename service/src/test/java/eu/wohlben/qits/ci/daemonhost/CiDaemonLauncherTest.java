@@ -59,6 +59,7 @@ public class CiDaemonLauncherTest {
     launcher.memoryLimit = "4g";
     launcher.pidsLimit = 2048;
     launcher.cpus = "2";
+    launcher.oomScoreAdj = 1000;
     launcher.artifactsRegistryHost = "qits-artifacts:8080";
     launcher.artifactsImageRepository = "qits";
     launcher.dockerAuthHosts = List.of("qits-artifacts:8080");
@@ -182,7 +183,7 @@ public class CiDaemonLauncherTest {
                 null,
                 null,
                 false,
-                new Security(true, true, "4g", "4g", 2048L, "2"),
+                new Security(true, true, "4g", "4g", 2048L, "2", 1000),
                 null,
                 "qits-ci-01234567-412621e6-2",
                 "",

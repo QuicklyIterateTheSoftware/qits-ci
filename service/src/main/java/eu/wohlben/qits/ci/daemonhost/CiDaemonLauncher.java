@@ -322,6 +322,9 @@ public class CiDaemonLauncher {
   @ConfigProperty(name = "qits.ci.cpus")
   String cpus;
 
+  @ConfigProperty(name = "qits.ci.oom-score-adj", defaultValue = "1000")
+  Integer oomScoreAdj;
+
   /**
    * qits-artifacts' registry coordinates, injected into every step container so a publish script
    * names no deployment fact of its own. Receiver-named on purpose: they are the artifacts service's
@@ -1019,7 +1022,7 @@ public class CiDaemonLauncher {
             spec.docker(),
             // The step's script is repo-controlled: drop privileges and bound the blast radius. The
             // daemon runs inside this sandbox and the script is its child, so these bound both.
-            new Security(true, true, memoryLimit, memoryLimit, pidsLimit, cpus),
+            new Security(true, true, memoryLimit, memoryLimit, pidsLimit, cpus, oomScoreAdj),
             null,
             containerName(spec.runId(), spec.stepIndex()),
             // The other declared opt-in, and the reason it is here rather than in the script: the
