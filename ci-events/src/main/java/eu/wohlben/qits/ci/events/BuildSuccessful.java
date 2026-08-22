@@ -21,18 +21,27 @@ import java.util.UUID;
  * once set, which gives the stability the idempotent {@code PUT} rests on, and it is kept out of
  * the payload by the library rather than by anything spelled here — {@code CanonicalJson} excludes
  * everything {@link QitsEvent} declares, and this record's accessor is that declaration. So
- * identity travels in the envelope and the payload is the six fields below, which is also why
- * reading a payload back yields a fresh id: a received event's identity is the envelope's, and the
- * payload never claimed to carry one.
+ * identity travels in the envelope and the payload is the fields below, which is also why reading a
+ * payload back yields a fresh id: a received event's identity is the envelope's, and the payload
+ * never claimed to carry one.
  *
- * <p>{@code imageDigest} is nullable — a pipeline that runs tests and publishes nothing is an
- * ordinary green build — and a null field is omitted from the canonical payload rather than written
- * as an explicit null.
+ * <p>{@code repoId} is the storage id and is always set; {@code projectId} and {@code repoName} are
+ * the public {@code (project, name)} pair the deployer names the image tag {@code
+ * qits/<repoName>:<sha>} from. They ride together — a push that arrived name-addressed carries both,
+ * an id-addressed one carries neither — so a subscriber that has them addresses the image by name,
+ * and one that does not falls back to the id exactly as before.
+ *
+ * <p>{@code imageDigest}, {@code projectId} and {@code repoName} are nullable — a pipeline that runs
+ * tests and publishes nothing is an ordinary green build, and an id-addressed push announces no name
+ * — and a null field is omitted from the canonical payload rather than written as an explicit null,
+ * so an id-addressed push stays byte-identical on the wire.
  */
 public record BuildSuccessful(
     UUID eventId,
     String runId,
     String repoId,
+    String projectId,
+    String repoName,
     String branch,
     String commitSha,
     String imageDigest,
@@ -49,11 +58,13 @@ public record BuildSuccessful(
   public BuildSuccessful(
       String runId,
       String repoId,
+      String projectId,
+      String repoName,
       String branch,
       String commitSha,
       String imageDigest,
       Instant finishedAt) {
-    this(null, runId, repoId, branch, commitSha, imageDigest, finishedAt);
+    this(null, runId, repoId, projectId, repoName, branch, commitSha, imageDigest, finishedAt);
   }
 
   @Override

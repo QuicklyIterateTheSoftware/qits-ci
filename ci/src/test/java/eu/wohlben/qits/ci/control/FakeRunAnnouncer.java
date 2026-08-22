@@ -19,6 +19,8 @@ public class FakeRunAnnouncer implements RunAnnouncer {
   public record Announced(
       String runId,
       String repoId,
+      String projectId,
+      String repoName,
       String branch,
       String commitSha,
       Instant finishedAt,
@@ -38,10 +40,14 @@ public class FakeRunAnnouncer implements RunAnnouncer {
   public void onRunSucceeded(
       String runId,
       String repoId,
+      String projectId,
+      String repoName,
       String branch,
       String commitSha,
       Instant finishedAt,
       String triggerEventId) {
-    announced.add(new Announced(runId, repoId, branch, commitSha, finishedAt, triggerEventId));
+    announced.add(
+        new Announced(
+            runId, repoId, projectId, repoName, branch, commitSha, finishedAt, triggerEventId));
   }
 }

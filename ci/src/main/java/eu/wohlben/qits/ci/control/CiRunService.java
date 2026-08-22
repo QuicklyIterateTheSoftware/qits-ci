@@ -985,7 +985,14 @@ public class CiRunService {
     for (RunAnnouncer announcer : runAnnouncers) {
       try {
         announcer.onRunSucceeded(
-            run.id, run.repoId, run.branch, run.commitSha, finishedAt, run.triggerEventId);
+            run.id,
+            run.repoId,
+            run.projectId,
+            run.repoName,
+            run.branch,
+            run.commitSha,
+            finishedAt,
+            run.triggerEventId);
       } catch (RuntimeException e) {
         LOG.warnf(e, "Announcing run %s failed", run.id);
       }

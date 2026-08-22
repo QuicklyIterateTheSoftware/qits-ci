@@ -119,6 +119,32 @@ public class BuildSuccessfulPublishTest {
     assertFalse(payload.has("imageDigest"), payload.toString());
     // Identity travels in the envelope's id, never in the payload.
     assertFalse(payload.has("eventId"), payload.toString());
+    // This push arrived id-addressed (no project/name), so the pair is omitted rather than nulled —
+    // the run addresses its image by the storage id, exactly as before names existed.
+    assertFalse(payload.has("projectId"), payload.toString());
+    assertFalse(payload.has("repoName"), payload.toString());
+  }
+
+  @Test
+  public void aNameAddressedRunCarriesTheProjectAndRepoNameOnTheWire() throws Exception {
+    String repoId = seedOriginWithConfig(CONFIG_ONE_STEP);
+    // A name-addressed push: the git host serves the same bare under /git/<projectId>/<repoName>.
+    StubGitHost.alias("acme", "widget", repoId);
+    String sha = tipOf(repoId);
+    pushes.onFrame(ScmPushFrames.named(repoId, "acme", "widget", "main", ZERO_SHA, sha));
+
+    Map<String, Object> run = awaitTerminalRun(repoId);
+    assertEquals("SUCCESS", run.get("status"));
+
+    List<StubEventsServer.Put> puts = awaitPuts(1);
+    JsonNode envelope = json.readTree(puts.get(0).body());
+    JsonNode payload = json.readTree(envelope.get("payload").asText());
+
+    // The pair rides the wire, so the deployer names the image qits/<repoName>:<sha> rather than
+    // falling back to the storage id.
+    assertEquals("acme", payload.get("projectId").asText());
+    assertEquals("widget", payload.get("repoName").asText());
+    assertEquals(repoId, payload.get("repoId").asText());
   }
 
   @Test

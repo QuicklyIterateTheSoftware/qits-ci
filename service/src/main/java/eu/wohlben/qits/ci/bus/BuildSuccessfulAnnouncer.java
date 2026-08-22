@@ -48,12 +48,14 @@ public class BuildSuccessfulAnnouncer implements RunAnnouncer {
   public void onRunSucceeded(
       String runId,
       String repoId,
+      String projectId,
+      String repoName,
       String branch,
       String commitSha,
       Instant finishedAt,
       String triggerEventId) {
     bus.publish(
-        new BuildSuccessful(runId, repoId, branch, commitSha, null, finishedAt),
+        new BuildSuccessful(runId, repoId, projectId, repoName, branch, commitSha, null, finishedAt),
         CausingEvent.parentOf(triggerEventId, runId));
   }
 }

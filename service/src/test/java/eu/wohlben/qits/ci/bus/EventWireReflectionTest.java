@@ -151,7 +151,8 @@ public class EventWireReflectionTest {
   public void theWholeWirePathBindsBothWays() {
     Instant finishedAt = Instant.parse("2026-07-31T12:46:03Z");
     BuildSuccessful out =
-        new BuildSuccessful("run-1", "qits-ci", "main", "0123456789abcdef", null, finishedAt);
+        new BuildSuccessful(
+            "run-1", "qits-ci", "qits", "qits-ci", "main", "0123456789abcdef", null, finishedAt);
 
     EventEnvelope envelope = EventEnvelope.of(out);
     JsonNode body = CanonicalJson.parse(CanonicalJson.envelope(envelope));

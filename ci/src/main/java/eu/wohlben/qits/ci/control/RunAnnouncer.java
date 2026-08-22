@@ -39,6 +39,11 @@ public interface RunAnnouncer {
    * A run went green. {@code triggerEventId} is <b>the event that caused this run</b>, or null when
    * nothing did — which is every push, and a push publishing a chain root is correct.
    *
+   * <p>{@code repoId} is the storage id and is always set; {@code projectId} and {@code repoName}
+   * are the public {@code (project, name)} pair off the run's own row, present when the announcing
+   * push arrived name-addressed and null when it did not. They ride the event so the deployer names
+   * the image {@code qits/<repoName>:<sha>} instead of falling back to the id.
+   *
    * <p><b>A plain {@code String}, and that is the whole reason this parameter is here rather than an
    * ambient value.</b> It is a foreign id, which is exactly how this module names foreign things, and
    * it keeps {@code ci/} free of every eventstream type — the dependency this seam exists to
@@ -52,6 +57,8 @@ public interface RunAnnouncer {
   void onRunSucceeded(
       String runId,
       String repoId,
+      String projectId,
+      String repoName,
       String branch,
       String commitSha,
       Instant finishedAt,

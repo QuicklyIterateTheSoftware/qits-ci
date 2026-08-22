@@ -27,7 +27,8 @@ class BuildSuccessfulTest {
 
   private static BuildSuccessful anEvent() {
     return new BuildSuccessful(
-        "run-1", "qits-ci", "main", "0123456789abcdef", "sha256:deadbeef", FINISHED);
+        "run-1", "repo-uuid", "qits", "qits-ci", "main", "0123456789abcdef", "sha256:deadbeef",
+        FINISHED);
   }
 
   @Test
@@ -67,12 +68,13 @@ class BuildSuccessfulTest {
     assertEquals(
         "{\"branch\":\"main\",\"commitSha\":\"0123456789abcdef\","
             + "\"finishedAt\":\"2026-07-31T12:46:03Z\",\"imageDigest\":\"sha256:deadbeef\","
-            + "\"repoId\":\"qits-ci\",\"runId\":\"run-1\"}",
+            + "\"projectId\":\"qits\",\"repoId\":\"repo-uuid\",\"repoName\":\"qits-ci\","
+            + "\"runId\":\"run-1\"}",
         json.get("payload").asText());
     assertEquals(true, json.get("description").isNull(), "description is an explicit null");
-    // parentId joined the envelope when causation landed. BuildSuccessful itself did NOT change —
-    // that is the design: no event class ever declares a parent, so the payload above is the same
-    // six keys it always was, and the causation lives one level out where the server compares it.
+    // parentId joined the envelope when causation landed. BuildSuccessful itself never declares a
+    // parent — no event class does — so the causation lives one level out where the server compares
+    // it, and the payload above is the whole of what the event carries.
     assertEquals(true, json.get("parentId").isNull(), "a build nothing caused is a chain root");
   }
 
@@ -91,12 +93,45 @@ class BuildSuccessfulTest {
   @Test
   void aPipelineThatPublishedNoImageOmitsTheDigestRatherThanNullingIt() {
     BuildSuccessful noImage =
-        new BuildSuccessful("run-2", "qits-ci", "main", "0123456789abcdef", null, FINISHED);
+        new BuildSuccessful(
+            "run-2", "qits-ci", "qits", "qits-ci", "main", "0123456789abcdef", null, FINISHED);
 
     String payload = CanonicalJson.payload(noImage);
 
     assertFalse(payload.contains("imageDigest"), payload);
     assertFalse(payload.contains("null"), payload);
+  }
+
+  @Test
+  void theNameRidesTheWireWhenTheAnnouncingPushCarriedIt() {
+    String payload = CanonicalJson.payload(anEvent());
+
+    assertEquals(
+        "{\"branch\":\"main\",\"commitSha\":\"0123456789abcdef\","
+            + "\"finishedAt\":\"2026-07-31T12:46:03Z\",\"imageDigest\":\"sha256:deadbeef\","
+            + "\"projectId\":\"qits\",\"repoId\":\"repo-uuid\",\"repoName\":\"qits-ci\","
+            + "\"runId\":\"run-1\"}",
+        payload);
+  }
+
+  @Test
+  void anIdAddressedPushOmitsTheNamePairRatherThanNullingIt() {
+    // No (project, name) pair — an id-addressed push announces neither, and null fields are dropped
+    // from the canonical form, so the payload is byte-identical to what shipped before the pair
+    // existed.
+    BuildSuccessful idOnly =
+        new BuildSuccessful(
+            "run-3", "qits-ci", null, null, "main", "0123456789abcdef", null, FINISHED);
+
+    String payload = CanonicalJson.payload(idOnly);
+
+    assertFalse(payload.contains("projectId"), payload);
+    assertFalse(payload.contains("repoName"), payload);
+    assertFalse(payload.contains("null"), payload);
+    assertEquals(
+        "{\"branch\":\"main\",\"commitSha\":\"0123456789abcdef\","
+            + "\"finishedAt\":\"2026-07-31T12:46:03Z\",\"repoId\":\"qits-ci\",\"runId\":\"run-3\"}",
+        payload);
   }
 
   @Test
@@ -108,6 +143,8 @@ class BuildSuccessfulTest {
 
     assertEquals(published.runId(), received.runId());
     assertEquals(published.repoId(), received.repoId());
+    assertEquals(published.projectId(), received.projectId());
+    assertEquals(published.repoName(), received.repoName());
     assertEquals(published.branch(), received.branch());
     assertEquals(published.commitSha(), received.commitSha());
     assertEquals(published.imageDigest(), received.imageDigest());
