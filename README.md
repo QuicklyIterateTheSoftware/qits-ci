@@ -555,6 +555,16 @@ value compares by its literal: `count: { exact: "3" }` matches the number 3 and 
 "true" }` matches the boolean. Quote them — bare `yes` is a YAML *boolean* and `exact: yes` is a
 parse error rather than a comparison against `"yes"`.
 
+**Two paths name the repository, and both read its NAME when the event carries one.** A condition on
+`repoId` is evaluated against the payload's `repoName`, and a condition on `repository` against its
+`repositoryName` — falling back to the literal field when the payload has no name beside it. That is
+what keeps every `repoId: { exact: qits-blobstore }` and every `repository: { exact: qits-blobstore }`
+in the estate working unedited after the identity cutover, where those id fields became opaque
+storage UUIDs. Two spellings because two services publish them: `repoId`/`repoName` on an `SCM*`
+event out of qits-githost, `repository`/`repositoryName` on an `SCMRelease` out of qits-workspaces.
+The alias is the **exact top-level path only** — `repository.url` and `outer.repository` resolve
+literally, so a payload that means something else by the word is untouched.
+
 **An absent or empty `when:` means unconditional**: the trigger fires on every event of the name it
 declared. That is the documented default, and it is why this file is **strict about unknown
 top-level keys** where `ci-post-receive.yml` is lenient about them — a mistyped `wehn:` would
