@@ -27,9 +27,12 @@ public class FakeCiConfigSource implements CiConfigSource {
   private final Map<String, Deque<ConfigLookup>> byCommit = new HashMap<>();
 
   /**
-   * The event half, per (repoId, branch). Unseeded repositories answer {@link
+   * The event half, per (repoId, branch, scope). Unseeded repositories answer {@link
    * EventTriggerLookup#found} with no files — "this repository declares no trigger", which is the
    * ordinary case and not an error.
+   *
+   * <p>The scope is part of the key because a platform read and a repository read of the same
+   * repository answer different files, which is the whole of what the scope means.
    */
   private final Map<String, EventTriggerLookup> triggersByBranch = new HashMap<>();
 
@@ -65,13 +68,31 @@ public class FakeCiConfigSource implements CiConfigSource {
 
   /** Seeds the trigger files a repository's branch head carries. */
   public void putTriggers(String repoId, String branch, String headSha, EventTriggerFile... files) {
-    triggersByBranch.put(
-        repoId + "@" + branch, EventTriggerLookup.found(headSha, List.of(files)));
+    putTriggers(repoId, branch, CiTriggerScope.REPOSITORY, headSha, files);
+  }
+
+  /** The same, for one scope — how a test seeds the platform-pipelines repository's own files. */
+  public void putTriggers(
+      String repoId,
+      String branch,
+      CiTriggerScope scope,
+      String headSha,
+      EventTriggerFile... files) {
+    triggersByBranch.put(key(repoId, branch, scope), EventTriggerLookup.found(headSha, List.of(files)));
   }
 
   /** Seeds a repository whose branch cannot be read at all — deleted, or the git host is down. */
   public void putTriggersUnreachable(String repoId, String branch) {
-    triggersByBranch.put(repoId + "@" + branch, EventTriggerLookup.unreachable());
+    putTriggersUnreachable(repoId, branch, CiTriggerScope.REPOSITORY);
+  }
+
+  /** The same, for one scope. */
+  public void putTriggersUnreachable(String repoId, String branch, CiTriggerScope scope) {
+    triggersByBranch.put(key(repoId, branch, scope), EventTriggerLookup.unreachable());
+  }
+
+  private static String key(String repoId, String branch, CiTriggerScope scope) {
+    return repoId + "@" + branch + "#" + scope;
   }
 
   public List<String> configReads() {
@@ -113,11 +134,12 @@ public class FakeCiConfigSource implements CiConfigSource {
   }
 
   @Override
-  public EventTriggerLookup readEventTriggers(CiRepoRef repo, String branch) {
+  public EventTriggerLookup readEventTriggers(
+      CiRepoRef repo, String branch, CiTriggerScope scope) {
     String repoId = repo.repoId();
     addressed.add(repo);
-    triggerReads.add(repoId + "@" + branch);
-    EventTriggerLookup seeded = triggersByBranch.get(repoId + "@" + branch);
+    triggerReads.add(key(repoId, branch, scope));
+    EventTriggerLookup seeded = triggersByBranch.get(key(repoId, branch, scope));
     return seeded == null ? EventTriggerLookup.found("0".repeat(40), List.of()) : seeded;
   }
 }

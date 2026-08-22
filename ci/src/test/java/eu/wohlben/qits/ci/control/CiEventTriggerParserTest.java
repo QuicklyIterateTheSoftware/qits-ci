@@ -554,4 +554,19 @@ public class CiEventTriggerParserTest {
     assertFalse(
         CiEventTriggerParser.isTriggerPath(".config/qits/ci-event-" + "x".repeat(65) + ".yml"));
   }
+
+  @Test
+  public void theTwoScopesReadDisjointSetsOfFiles() {
+    // A platform trigger is the same file format one prefix over, and the prefixes do not overlap:
+    // `ci-platform-event-` does not start with `ci-event-`, so a file belongs to exactly one scope
+    // and one listing of the directory sorts them without a second read.
+    assertTrue(
+        CiTriggerScope.PLATFORM.matches(".config/qits/ci-platform-event-maintenance-bump.yml"));
+    assertTrue(CiTriggerScope.REPOSITORY.matches(".config/qits/ci-event-upstream.yml"));
+
+    assertFalse(CiTriggerScope.REPOSITORY.matches(".config/qits/ci-platform-event-x.yml"));
+    assertFalse(CiTriggerScope.PLATFORM.matches(".config/qits/ci-event-x.yml"));
+    assertFalse(CiTriggerScope.PLATFORM.matches(".config/qits/ci-platform-event-.yml"));
+    assertFalse(CiTriggerScope.PLATFORM.matches(".config/qits/ci-platform-event-a b.yml"));
+  }
 }

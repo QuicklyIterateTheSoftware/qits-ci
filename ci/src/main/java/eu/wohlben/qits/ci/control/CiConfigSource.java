@@ -60,8 +60,8 @@ public interface CiConfigSource {
   }
 
   /**
-   * Every {@code .config/qits/ci-event-*.yml} at a branch's current head, with the head it read
-   * them at. Empty {@code files} on a {@link Status#FOUND} is the ordinary case — most repositories
+   * Every trigger file of one {@link CiTriggerScope} at a branch's current head, with the head it
+   * read them at. Empty {@code files} on a {@link Status#FOUND} is the ordinary case — most repositories
    * declare no event trigger — and is not an error.
    *
    * <p>The head sha travels with the files because a run records the commit it built, and the two
@@ -113,5 +113,18 @@ public interface CiConfigSource {
    * while an event names none, so the platform's one tracked branch supplies it (every submodule
    * follows {@code main}) and the head is resolved rather than given.
    */
-  EventTriggerLookup readEventTriggers(CiRepoRef repo, String branch);
+  default EventTriggerLookup readEventTriggers(CiRepoRef repo, String branch) {
+    return readEventTriggers(repo, branch, CiTriggerScope.REPOSITORY);
+  }
+
+  /**
+   * The same read, for a chosen scope: the repository's own {@code ci-event-*.yml} or the platform's
+   * {@code ci-platform-event-*.yml}.
+   *
+   * <p><b>One scope per call, never both.</b> A platform read is a read of a <em>different</em>
+   * repository — the one {@code qits.ci.platform-pipelines-repository} names — and a repository read
+   * of that same repository still answers only its own files. Merging them would make one lookup
+   * mean two things and would hide which file a run came from.
+   */
+  EventTriggerLookup readEventTriggers(CiRepoRef repo, String branch, CiTriggerScope scope);
 }
