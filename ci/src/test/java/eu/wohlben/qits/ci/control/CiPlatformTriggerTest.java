@@ -47,6 +47,7 @@ public class CiPlatformTriggerTest extends CiTestSupport {
 
   @Inject CiEventTriggerService engine;
   @Inject CiRunService runService;
+  @Inject FakeRunAnnouncer announcer;
 
   private String platformId;
   private String targetId;
@@ -62,6 +63,7 @@ public class CiPlatformTriggerTest extends CiTestSupport {
     // recorded at, and what its step containers check out.
     fakeConfig.putTriggers(targetId, "main", TARGET_HEAD);
     engine.platformPipelinesRepository("qits-qits");
+    announcer.reset();
   }
 
   @AfterEach
@@ -133,6 +135,24 @@ public class CiPlatformTriggerTest extends CiTestSupport {
     assertEquals(arrival.eventId(), env.get("QITS_EVENT_ID"));
     assertEquals("MaintenanceBump", env.get("QITS_EVENT_NAME"));
     assertEquals(arrival.payload(), env.get("QITS_EVENT_PAYLOAD"));
+  }
+
+  @Test
+  public void theGreenRunAnnouncesTheTARGETsNamePairAndNotTheWrappers() throws Exception {
+    // The one thing this feature could get wrong that no other trigger can: the file comes from the
+    // wrapper and the build is somebody else's, so an announcement carrying the file's repository
+    // would have the deployer looking for qits/qits-qits:<sha>. The pair rides off the run's own
+    // row, and the row is the target's.
+    seedPlatformTrigger(TRIGGER);
+
+    deliver(arrival(payloadNaming("qits-target")));
+
+    assertEquals(1, announcer.announced().size());
+    FakeRunAnnouncer.Announced announced = announcer.announced().get(0);
+    assertEquals(targetId, announced.repoId());
+    assertEquals("qits", announced.projectId());
+    assertEquals("qits-target", announced.repoName());
+    assertEquals(TARGET_HEAD, announced.commitSha());
   }
 
   @Test
