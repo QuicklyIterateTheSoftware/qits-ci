@@ -810,8 +810,8 @@ public class CiRunService {
    * <p><b>A step the run's branch does not bind is written {@code SKIPPED} before any container
    * exists, and nothing else moves</b>: {@code failed} is untouched, the loop continues, and later
    * steps run. It launches nothing and is a non-event to the run's verdict — precisely unlike a
-   * {@code FAILED} step, whose {@code failed = !ok} is what stops the loop and turns the run red. So
-   * a run whose every step is branch-skipped finishes green, which is the existing "config present
+   * {@code FAILED} or {@code TIMED_OUT} step, whose {@code failed = !ok} stops the loop and ends the
+   * run. So a run whose every step is branch-skipped finishes green, which is the existing "config present
    * with no steps" precedent rather than a new rule, and it announces the deploy and publishes like any other
    * green run.
    *
@@ -830,6 +830,7 @@ public class CiRunService {
     List<CiPipeline.CiStepDecl> declared = pipeline.steps();
     int index = 0;
     boolean failed = false;
+    boolean timedOut = false;
 
     try {
       while (index < declared.size() && !failed && !cancelled.contains(run.id)) {
@@ -893,6 +894,11 @@ public class CiRunService {
               run.id, index, run.commitSha, firstLine(result.output()));
         }
 
+        // A deadline is not a verdict, so it is recorded apart from FAILED — on the step and, below,
+        // on the run. It still stops the loop exactly as a failure does: the remaining steps are
+        // SKIPPED. Cancellation wins over it, because a cancelled step's deadline is beside the
+        // point.
+        boolean stepTimedOut = !wasCancelled && result.timedOut();
         boolean ok =
             !wasCancelled
                 && !result.timedOut()
@@ -902,12 +908,15 @@ public class CiRunService {
             run.id,
             index,
             stepImage(decl),
-            ok ? CiStepStatus.SUCCESS : CiStepStatus.FAILED,
+            ok
+                ? CiStepStatus.SUCCESS
+                : stepTimedOut ? CiStepStatus.TIMED_OUT : CiStepStatus.FAILED,
             result.exitCode(),
             annotate(result, wasCancelled),
             stamps.startedAt(),
             stamps.finishedAt());
         failed = !ok;
+        timedOut = stepTimedOut;
         index++;
       }
     } catch (RuntimeException e) {
@@ -928,6 +937,7 @@ public class CiRunService {
         index++;
       }
       failed = true;
+      timedOut = false;
     }
 
     for (int skipped = index; skipped < declared.size(); skipped++) {
@@ -944,7 +954,11 @@ public class CiRunService {
     boolean wasCancelled = cancelled.contains(run.id);
     boolean red = failed || wasCancelled;
     CiRunStatus outcome =
-        wasCancelled ? CiRunStatus.CANCELLED : red ? CiRunStatus.FAILED : CiRunStatus.SUCCESS;
+        wasCancelled
+            ? CiRunStatus.CANCELLED
+            : timedOut
+                ? CiRunStatus.TIMED_OUT
+                : red ? CiRunStatus.FAILED : CiRunStatus.SUCCESS;
     Instant finishedAt = finishRun(run.id, outcome);
     if (outcome == CiRunStatus.SUCCESS) {
       announceRun(run, finishedAt);

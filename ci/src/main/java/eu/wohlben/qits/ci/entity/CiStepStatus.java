@@ -1,8 +1,8 @@
 package eu.wohlben.qits.ci.entity;
 
 /**
- * Lifecycle of a single step. Steps run sequentially; the first {@link #FAILED} step fails the run
- * and leaves the remaining steps {@link #SKIPPED}.
+ * Lifecycle of a single step. Steps run sequentially; the first {@link #FAILED} or {@link
+ * #TIMED_OUT} step ends the run and leaves the remaining steps {@link #SKIPPED}.
  *
  * <p><b>{@link #PENDING} and {@link #RUNNING} are legacy values.</b> Step rows are written once and
  * already terminal (see {@link CiStep}), so nothing writes either of them any more — they stay in
@@ -14,5 +14,10 @@ public enum CiStepStatus {
   RUNNING,
   SUCCESS,
   FAILED,
-  SKIPPED
+  SKIPPED,
+  /**
+   * The step hit its deadline and was aborted. A deadline is not a script's verdict, so it does not
+   * share {@code FAILED}.
+   */
+  TIMED_OUT
 }

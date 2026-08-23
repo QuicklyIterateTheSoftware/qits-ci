@@ -423,7 +423,10 @@ public class CiPipelineBoundaryTest {
       // Everything the suite finished earlier is terminal, so nothing terminal may be here.
       assertTrue(
           active.stream()
-              .noneMatch(run -> List.of("SUCCESS", "FAILED", "CONFIG_ERROR").contains(run.get("status"))),
+              .noneMatch(
+                  run ->
+                      List.of("SUCCESS", "FAILED", "CONFIG_ERROR", "TIMED_OUT")
+                          .contains(run.get("status"))),
           "a finished run has no business in the active listing");
       // The list shape excludes step output, exactly as the run listing does.
       assertNull(queued.get("steps"), "the active listing must not carry step output");

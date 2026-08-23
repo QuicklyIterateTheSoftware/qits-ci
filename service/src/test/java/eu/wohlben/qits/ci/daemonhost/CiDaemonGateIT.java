@@ -380,7 +380,7 @@ public class CiDaemonGateIT {
     String runId = awaitRunId(repoId);
     JsonPath detail = awaitTerminalRun(runId);
 
-    assertEquals("FAILED", detail.getString("status"), detail.prettify());
+    assertEquals("TIMED_OUT", detail.getString("status"), detail.prettify());
     List<Map<String, Object>> steps = detail.getList("steps");
     String output = steps.get(0).get("output").toString();
     // The whole point of the timedOut flag: a killed child reports the KILL's exit code, which a
@@ -388,10 +388,10 @@ public class CiDaemonGateIT {
     assertTrue(output.contains("[step timed out]"), output);
     assertFalse(output.contains("cancelled"), "a timeout is not a cancellation");
     assertTrue(output.contains("before-the-hang"), output);
-    assertEquals("FAILED", steps.get(0).get("status"));
+    assertEquals("TIMED_OUT", steps.get(0).get("status"));
     assertEquals("SKIPPED", steps.get(1).get("status"));
 
-    // It really was the DECLARED five seconds and not the deployment default, which is 900.
+    // It really was the DECLARED five seconds and not the deployment default, which is 1800.
     Instant startedAt = Instant.parse(steps.get(0).get("startedAt").toString());
     Instant finishedAt = Instant.parse(steps.get(0).get("finishedAt").toString());
     assertTrue(

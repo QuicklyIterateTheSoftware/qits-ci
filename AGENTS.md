@@ -479,7 +479,7 @@ covers them.
 
 **The two run listings are complements, and the predicate is written that way on purpose.**
 `/active` is `status in (QUEUED, RUNNING)` and `/finished` is `status NOT in (QUEUED, RUNNING)` —
-not `in (SUCCESS, FAILED, CANCELLED, CONFIG_ERROR)`, which reads the same today and rots silently: a new
+not `in (SUCCESS, FAILED, CANCELLED, CONFIG_ERROR, TIMED_OUT)`, which reads the same today and rots silently: a new
 value added to `ck_ci_run_status` would be finished in fact and invisible to both lists, so a run
 would leave one and never arrive in the other. Written as a complement they partition the table by
 construction. `/finished` carries `?limit=` where `/active` does not, and the asymmetry is the whole

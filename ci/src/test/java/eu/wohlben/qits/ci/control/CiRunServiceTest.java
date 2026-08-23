@@ -139,19 +139,59 @@ public class CiRunServiceTest extends CiTestSupport {
   }
 
   @Test
-  public void timedOutStepFailsTheRunWithAMarkedOutput() {
+  public void timedOutStepEndsTheRunTimedOutWithAMarkedOutput() {
     seedConfig(CONFIG_TWO_STEPS);
     fakeRunner.script(0, new StepResult(143, true, StepOutcome.OK, "partial output"));
     service.execute(repoId, "main", sha);
 
     CiRun run = soleRun();
-    assertEquals(CiRunStatus.FAILED, run.status);
-    CiStep first = service.stepsFor(run.id).get(0);
-    assertEquals(CiStepStatus.FAILED, first.status);
+    // A deadline is not a pipeline verdict, so neither the step nor the run is FAILED.
+    assertEquals(CiRunStatus.TIMED_OUT, run.status);
+    List<CiStep> recorded = service.stepsFor(run.id);
+    CiStep first = recorded.get(0);
+    assertEquals(CiStepStatus.TIMED_OUT, first.status);
     // Recorded as a timeout, not as a script that happened to exit 143.
     assertTrue(first.output.contains("[step timed out]"), first.output);
     assertTrue(first.output.contains("partial output"), first.output);
     assertEquals(143, first.exitCode);
+    // And it stops the run exactly as a failure does.
+    assertEquals(CiStepStatus.SKIPPED, recorded.get(1).status);
+    assertEquals(1, fakeRunner.executed().size());
+  }
+
+  @Test
+  public void aCancelledStepThatAlsoTimedOutIsRecordedCancelled() throws Exception {
+    // Both flags can be true: the host aborts a cancelled container the same way it aborts one that
+    // ran out of time, so the terminal frame can carry timedOut. A cancellation is a user decision,
+    // so it wins over the clock — neither the step nor the run may read TIMED_OUT. Staged like the
+    // cancellation test above, because that is the only way the flag is really set.
+    seedConfig(CONFIG_TWO_STEPS);
+    CompletableFuture<String> reachedStepZero = new CompletableFuture<>();
+    CountDownLatch cancelled = new CountDownLatch(1);
+    fakeRunner.during(
+        0,
+        spec -> {
+          reachedStepZero.complete(spec.runId());
+          try {
+            cancelled.await(10, TimeUnit.SECONDS);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        });
+    fakeRunner.script(0, new StepResult(143, true, StepOutcome.OK, "half a line"));
+
+    announcePush(repoId, "main", sha);
+    String runId = reachedStepZero.get(10, TimeUnit.SECONDS);
+    service.cancel(runId);
+    cancelled.countDown();
+    service.awaitIdle();
+
+    forgetLoadedEntities();
+    CiRun run = soleRun();
+    assertEquals(CiRunStatus.CANCELLED, run.status);
+    CiStep first = service.stepsFor(run.id).get(0);
+    assertEquals(CiStepStatus.FAILED, first.status);
+    assertTrue(first.output.contains("cancelled"), first.output);
   }
 
   @Test
@@ -168,8 +208,8 @@ public class CiRunServiceTest extends CiTestSupport {
     service.execute(repoId, "main", sha);
 
     assertEquals(30, fakeRunner.executed().get(0).timeoutSeconds());
-    // An absent field means exactly the behaviour before the key existed: the shipped default.
-    assertEquals(900, fakeRunner.executed().get(1).timeoutSeconds());
+    // An absent field means the shipped default: 30 minutes.
+    assertEquals(1800, fakeRunner.executed().get(1).timeoutSeconds());
   }
 
   @Test
@@ -198,7 +238,7 @@ public class CiRunServiceTest extends CiTestSupport {
     assertTrue(fakeRunner.executed().get(1).docker(), "the publish step's declaration must arrive");
     // And a publish step is an ordinary step in every other respect — same image handling, same
     // recorded row, same deployment-default deadline unless it said otherwise.
-    assertEquals(900, fakeRunner.executed().get(1).timeoutSeconds());
+    assertEquals(1800, fakeRunner.executed().get(1).timeoutSeconds());
     assertEquals(CiStepStatus.SUCCESS, service.stepsFor(soleRun().id).get(1).status);
   }
 
