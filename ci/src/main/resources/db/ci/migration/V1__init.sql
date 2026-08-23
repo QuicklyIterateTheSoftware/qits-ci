@@ -56,8 +56,7 @@ create table ci_run (
     repo_id varchar(255) not null,
     branch varchar(255) not null,
     commit_sha varchar(64) not null,
-    -- QUEUED, RUNNING, SUCCESS, FAILED, CANCELLED, CONFIG_ERROR or TIMED_OUT. Not checked here;
-    -- see the header.
+    -- QUEUED, RUNNING, SUCCESS, FAILED, CANCELLED or CONFIG_ERROR. Not checked here; see the header.
     status varchar(32) not null,
     created_at timestamp(6) with time zone not null,
     finished_at timestamp(6) with time zone,
@@ -131,9 +130,9 @@ create table ci_step (
     run_id varchar(255) not null,
     step_index int not null,
     image varchar(512) not null,
-    -- PENDING, RUNNING, SUCCESS, FAILED, SKIPPED or TIMED_OUT. Not checked here; see the header.
-    -- PENDING and RUNNING are never written any more — the row appears terminal — but the startup
-    -- sweep still has to be able to read them.
+    -- PENDING, RUNNING, SUCCESS, FAILED or SKIPPED. Not checked here; see the header. PENDING and
+    -- RUNNING are never written any more — the row appears terminal — but the startup sweep still
+    -- has to be able to read them.
     status varchar(32) not null,
     exit_code int,
     -- Both HOST-stamped: started_at is when qits-ci sent the step to the container's daemon,
