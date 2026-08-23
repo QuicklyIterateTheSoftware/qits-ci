@@ -77,8 +77,8 @@ public class CiRunRepository implements PanacheRepositoryBase<CiRun, String> {
    *
    * <p><b>The predicate is the complement of {@link #listActiveNewestFirst}'s, and that is the
    * point.</b> Naming the terminal statuses instead ({@code in (SUCCESS, FAILED, CANCELLED,
-   * CONFIG_ERROR)})
-   * would read the same today and rot silently: a sixth status added to {@code ck_ci_run_status}
+   * CONFIG_ERROR, TIMED_OUT)})
+   * would read the same today and rot silently: another status added to {@code ck_ci_run_status}
    * would be finished in fact and invisible here, so a run would leave the active list and never
    * arrive in this one. Written as a complement, the two lists partition the table by construction
    * and a new status is finished by default — which is also how {@code isTerminal} is defined on both

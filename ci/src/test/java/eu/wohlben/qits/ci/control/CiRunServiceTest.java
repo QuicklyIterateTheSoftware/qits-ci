@@ -18,8 +18,10 @@ import eu.wohlben.qits.ci.entity.CiTriggerType;
 import eu.wohlben.qits.ci.error.BadRequestException;
 import eu.wohlben.qits.ci.error.ConflictException;
 import eu.wohlben.qits.ci.error.NotFoundException;
+import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -139,19 +141,59 @@ public class CiRunServiceTest extends CiTestSupport {
   }
 
   @Test
-  public void timedOutStepFailsTheRunWithAMarkedOutput() {
+  public void timedOutStepEndsTheRunTimedOutWithAMarkedOutput() {
     seedConfig(CONFIG_TWO_STEPS);
     fakeRunner.script(0, new StepResult(143, true, StepOutcome.OK, "partial output"));
     service.execute(repoId, "main", sha);
 
     CiRun run = soleRun();
-    assertEquals(CiRunStatus.FAILED, run.status);
-    CiStep first = service.stepsFor(run.id).get(0);
-    assertEquals(CiStepStatus.FAILED, first.status);
+    // A deadline is not a pipeline verdict, so neither the step nor the run is FAILED.
+    assertEquals(CiRunStatus.TIMED_OUT, run.status);
+    List<CiStep> recorded = service.stepsFor(run.id);
+    CiStep first = recorded.get(0);
+    assertEquals(CiStepStatus.TIMED_OUT, first.status);
     // Recorded as a timeout, not as a script that happened to exit 143.
     assertTrue(first.output.contains("[step timed out]"), first.output);
     assertTrue(first.output.contains("partial output"), first.output);
     assertEquals(143, first.exitCode);
+    // And it stops the run exactly as a failure does.
+    assertEquals(CiStepStatus.SKIPPED, recorded.get(1).status);
+    assertEquals(1, fakeRunner.executed().size());
+  }
+
+  @Test
+  public void aCancelledStepThatAlsoTimedOutIsRecordedCancelled() throws Exception {
+    // Both flags can be true: the host aborts a cancelled container the same way it aborts one that
+    // ran out of time, so the terminal frame can carry timedOut. A cancellation is a user decision,
+    // so it wins over the clock — neither the step nor the run may read TIMED_OUT. Staged like the
+    // cancellation test above, because that is the only way the flag is really set.
+    seedConfig(CONFIG_TWO_STEPS);
+    CompletableFuture<String> reachedStepZero = new CompletableFuture<>();
+    CountDownLatch cancelled = new CountDownLatch(1);
+    fakeRunner.during(
+        0,
+        spec -> {
+          reachedStepZero.complete(spec.runId());
+          try {
+            cancelled.await(10, TimeUnit.SECONDS);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        });
+    fakeRunner.script(0, new StepResult(143, true, StepOutcome.OK, "half a line"));
+
+    announcePush(repoId, "main", sha);
+    String runId = reachedStepZero.get(10, TimeUnit.SECONDS);
+    service.cancel(runId);
+    cancelled.countDown();
+    service.awaitIdle();
+
+    forgetLoadedEntities();
+    CiRun run = soleRun();
+    assertEquals(CiRunStatus.CANCELLED, run.status);
+    CiStep first = service.stepsFor(run.id).get(0);
+    assertEquals(CiStepStatus.FAILED, first.status);
+    assertTrue(first.output.contains("cancelled"), first.output);
   }
 
   @Test
@@ -168,8 +210,8 @@ public class CiRunServiceTest extends CiTestSupport {
     service.execute(repoId, "main", sha);
 
     assertEquals(30, fakeRunner.executed().get(0).timeoutSeconds());
-    // An absent field means exactly the behaviour before the key existed: the shipped default.
-    assertEquals(900, fakeRunner.executed().get(1).timeoutSeconds());
+    // An absent field means the shipped default: 30 minutes.
+    assertEquals(1800, fakeRunner.executed().get(1).timeoutSeconds());
   }
 
   @Test
@@ -198,7 +240,7 @@ public class CiRunServiceTest extends CiTestSupport {
     assertTrue(fakeRunner.executed().get(1).docker(), "the publish step's declaration must arrive");
     // And a publish step is an ordinary step in every other respect — same image handling, same
     // recorded row, same deployment-default deadline unless it said otherwise.
-    assertEquals(900, fakeRunner.executed().get(1).timeoutSeconds());
+    assertEquals(1800, fakeRunner.executed().get(1).timeoutSeconds());
     assertEquals(CiStepStatus.SUCCESS, service.stepsFor(soleRun().id).get(1).status);
   }
 
@@ -677,6 +719,79 @@ public class CiRunServiceTest extends CiTestSupport {
     forgetLoadedEntities();
 
     assertEquals("No longer needed", soleRun().cancellationReason);
+  }
+
+  @Test
+  public void cancellingARunningRunNoWorkerOwnsSettlesItCancelledAndFailsItsIncompleteSteps() {
+    // What a dead predecessor leaves behind. On 2026-08-23 a start-first successor swept, and the
+    // dying process then claimed a queued row and died holding it RUNNING — a row past every sweep,
+    // executed by nobody. Cancel used to record a reason on it and ask a runner that owns nothing to
+    // stop, so the row stayed RUNNING and had to be flipped by hand in SQL.
+    seedConfig(CONFIG_TWO_STEPS);
+    String runId = seedOrphanedRunningRun();
+
+    service.cancel(runId, "the process that was running it is gone");
+
+    forgetLoadedEntities();
+    CiRun settled = soleRun();
+    assertEquals(CiRunStatus.CANCELLED, settled.status);
+    assertNotNull(settled.finishedAt, "an unowned run is finished here, not left for a worker");
+    assertEquals("the process that was running it is gone", settled.cancellationReason);
+    assertNull(settled.supersededByRunId);
+    List<CiStep> recorded = service.stepsFor(runId);
+    assertEquals(CiStepStatus.FAILED, recorded.get(0).status, "its in-flight step died with it");
+    assertEquals(CiStepStatus.SKIPPED, recorded.get(1).status);
+    // And nothing was asked to stop, because there is nothing here to ask.
+    assertEquals(List.of(), fakeRunner.cancelled());
+  }
+
+  @Test
+  public void cancellingAnUnownedRunTwiceIsAConflictTheSecondTime() {
+    // The settle is terminal like every other cancellation, so it closes the row rather than leaving
+    // a door a retry keeps walking through.
+    seedConfig(CONFIG_TWO_STEPS);
+    String runId = seedOrphanedRunningRun();
+
+    service.cancel(runId);
+
+    assertEquals(CiRunService.USER_CANCELLED, soleRun().cancellationReason);
+    assertThrows(ConflictException.class, () -> service.cancel(runId));
+  }
+
+  /**
+   * A {@code RUNNING} row with one running and one pending step, and no worker anywhere behind it —
+   * exactly what a process killed mid-step leaves for its successor.
+   */
+  private String seedOrphanedRunningRun() {
+    String runId = UUID.randomUUID().toString();
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              CiRun run = new CiRun();
+              run.id = runId;
+              run.repoId = repoId;
+              run.branch = "main";
+              run.commitSha = sha;
+              run.status = CiRunStatus.RUNNING;
+              run.triggerType = CiTriggerType.POST_RECEIVE;
+              run.configPath = CiConfigParser.CONFIG_PATH;
+              run.createdAt = Instant.now();
+              run.startedAt = Instant.now();
+              runs.persist(run);
+              steps.persist(orphanedStep(runId, 0, CiStepStatus.RUNNING));
+              steps.persist(orphanedStep(runId, 1, CiStepStatus.PENDING));
+            });
+    return runId;
+  }
+
+  private static CiStep orphanedStep(String runId, int index, CiStepStatus status) {
+    CiStep step = new CiStep();
+    step.id = UUID.randomUUID().toString();
+    step.runId = runId;
+    step.stepIndex = index;
+    step.image = "alpine:3";
+    step.status = status;
+    return step;
   }
 
   @Test

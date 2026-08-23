@@ -354,6 +354,13 @@ Two more things live in this package and belong to it rather than to `ci/`:
   worker, so if the worker won the race and turned the row `RUNNING` in between, the flag is what
   stops the run before its first container. Neither thread has to win for the answer to be right.
 
+  **A `RUNNING` run this process does not own is settled by `CiRunService.cancel` and never reaches
+  this package either.** `CiStepRunner.owns` is what tells the two apart — `CiDaemonStepRunner`
+  answers from its in-flight map — because `cancel(runId)` is a no-op and a cancellation coming back
+  the same way. Such a row is what a dead predecessor leaves: its worker went with its container, so
+  asking this runner to stop it asks nothing of nobody and nothing would ever write the terminal
+  row. Cancel fails the incomplete steps and finishes the run `CANCELLED` itself.
+
 ## Reading a repository's pipeline config
 
 `service/…/githost/HttpGitConfigSource` is the only implementation of `CiConfigSource`, and it is
@@ -444,6 +451,16 @@ safe to repeat. A `RUNNING` event row is reset and restarted from its snapshot. 
 are therefore an at-least-once boundary and must be idempotent. Nothing here adds durability beyond
 the row.
 
+**A dying process claims nothing, and the deployment is stop-first so it does not have to race.**
+`CiRunService.draining` is raised by a `ShutdownEvent` observer — which Quarkus fires before it
+destroys beans, so the flag is up before `@PreDestroy` stops the worker pool — and both `enqueue`
+and the claim inside `startQueued` read it. A queued row is then left `QUEUED` for the successor's
+boot sweep rather than flipped. **Measured 2026-08-23**: qits-ci deployed start-first, the successor
+booted and swept, and only *then* did the predecessor claim a row and die holding it `RUNNING` —
+past every sweep, executed by nobody, unsettleable through the API. `.config/qits/deployments.yml`
+now says `update_order: stop-first` for the same incident; the flag is what makes the shutdown
+itself correct, the key is what keeps two processes from overlapping at all.
+
 **The row is still the recovery, and durable consumption did not change that.** The reason used to be
 that the bus is at-most-once and could not redeliver; it can now (see "The event bus"), and the row
 is still what recovers a `RUNNING` event run — because the event has already been *claimed* by the
@@ -479,7 +496,7 @@ covers them.
 
 **The two run listings are complements, and the predicate is written that way on purpose.**
 `/active` is `status in (QUEUED, RUNNING)` and `/finished` is `status NOT in (QUEUED, RUNNING)` —
-not `in (SUCCESS, FAILED, CANCELLED, CONFIG_ERROR)`, which reads the same today and rots silently: a new
+not `in (SUCCESS, FAILED, CANCELLED, CONFIG_ERROR, TIMED_OUT)`, which reads the same today and rots silently: a new
 value added to `ck_ci_run_status` would be finished in fact and invisible to both lists, so a run
 would leave one and never arrive in the other. Written as a complement they partition the table by
 construction. `/finished` carries `?limit=` where `/active` does not, and the asymmetry is the whole

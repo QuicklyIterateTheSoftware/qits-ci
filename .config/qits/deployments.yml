@@ -27,3 +27,7 @@ navigation: CI:1
 # name carries this repository, because every consumer of that jar declares a resource called
 # `eventstream` and they must not collide on one postgres.
 resources: postgresql:db, postgresql:eventstream:qits_ci_eventstream
+
+# STOP-FIRST: one CI process at a time. A start-first successor swept while the predecessor was
+# still claiming queued rows, and left a RUNNING run no worker owned (2026-08-23).
+update_order: stop-first

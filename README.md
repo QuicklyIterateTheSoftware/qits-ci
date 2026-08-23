@@ -202,8 +202,8 @@ configures no address for the deployer at all, and presents a credential to nobo
 **A green run is announced to nobody in particular.** The transition publishes a
 `BuildSuccessful` event to [qits-events](https://github.com/QuicklyIterateTheSoftware/qits-events),
 through the `RunAnnouncer` seam in `ci/control`, implemented by
-`service/…/bus/BuildSuccessfulAnnouncer`. Only `SUCCESS` announces — a red run, a `CONFIG_ERROR` and
-a discarded run announce nothing. It is a *statement* anything on the platform may subscribe to
+`service/…/bus/BuildSuccessfulAnnouncer`. Only `SUCCESS` announces — a red run, a `TIMED_OUT` run, a
+`CONFIG_ERROR` and a discarded run announce nothing. It is a *statement* anything on the platform may subscribe to
 rather than a request addressed to one service, which is exactly why the deployer could move behind
 it without qits-ci learning anything about deploying. It is a
 `PUT` at a UUID the publisher picks, so a retry is a replay rather than a duplicate; a delivery that
@@ -284,7 +284,7 @@ steps:
     script: ./mvnw -B -ntp verify              # required — bash, run in the checkout
   - image: qits/build-images/ci-base:latest
     docker: true                               # optional, default false — see the warning below
-    timeout-seconds: 3600                      # optional — else qits.ci.step-timeout-seconds
+    timeout-seconds: 3600                      # optional — else 30 minutes (qits.ci.step-timeout-seconds)
     branches:                                  # optional — else the step runs on every branch
       - exact: main
     script: |
@@ -1193,4 +1193,6 @@ throwaway containers; a workspace is never involved.
 Retries, a non-advisory gate, and clone/dependency caching across the per-step containers are
 follow-ups, not omissions of the extraction. Per-step timeouts are not: a step may declare
 `timeout-seconds:` in `.config/qits/ci-post-receive.yml`, and one that declares none gets
-`qits.ci.step-timeout-seconds`.
+`qits.ci.step-timeout-seconds` — **30 minutes**. A step that hits its deadline is aborted, recorded
+`TIMED_OUT` rather than `FAILED`, and the rest are `SKIPPED`; the run finishes `TIMED_OUT` too,
+because running out of time is not a pipeline verdict.

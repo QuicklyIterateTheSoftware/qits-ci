@@ -155,6 +155,17 @@ public interface CiStepRunner {
    */
   void cancel(String runId);
 
+  /**
+   * Whether a worker of <b>this</b> process is executing the run — the question {@link #cancel}
+   * cannot answer, because a no-op and a cancellation come back the same way.
+   *
+   * <p>It exists for the row a dead process left behind. A {@code RUNNING} run whose worker died
+   * with the previous container has no in-flight step here, so asking this one to stop it is asking
+   * nothing of nobody; the caller settles the row itself instead of waiting for a worker that will
+   * never report back.
+   */
+  boolean owns(String runId);
+
   /** The run reached a terminal state: release everything still held for it. */
   void runClosed(String runId);
 }

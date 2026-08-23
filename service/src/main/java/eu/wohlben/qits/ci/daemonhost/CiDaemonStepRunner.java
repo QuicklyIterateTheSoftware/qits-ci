@@ -224,6 +224,13 @@ public class CiDaemonStepRunner implements CiStepRunner {
     launcher.reap(current.containerName());
   }
 
+  @Override
+  public boolean owns(String runId) {
+    // The in-flight map is this process's own: it is written when a step launches and cleared when
+    // it ends, so a row left RUNNING by a previous container is absent from it.
+    return inFlight.containsKey(runId);
+  }
+
   /**
    * Everything one run holds outside its own rows, given back — the relay's buffer, the in-flight
    * record, and the credential qits-idp commissioned for it.

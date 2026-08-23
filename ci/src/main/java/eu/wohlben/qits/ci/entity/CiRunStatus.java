@@ -13,8 +13,9 @@ package eu.wohlben.qits.ci.entity;
  * re-enqueues it instead of losing it.
  *
  * <p>The two <b>active</b> states are {@code QUEUED} and {@code RUNNING}; the terminal ones are
- * {@code SUCCESS}, {@code FAILED}, {@code CANCELLED} and {@code CONFIG_ERROR}. A cancellation is a
- * user decision rather than a failed pipeline verdict, so it has its own terminal state.
+ * {@code SUCCESS}, {@code FAILED}, {@code CANCELLED}, {@code CONFIG_ERROR} and {@code TIMED_OUT}. A
+ * cancellation is a user decision rather than a failed pipeline verdict, so it has its own terminal
+ * state, and a deadline is not a verdict either — {@link #TIMED_OUT} says the run ran out of time.
  */
 public enum CiRunStatus {
   QUEUED,
@@ -22,5 +23,7 @@ public enum CiRunStatus {
   SUCCESS,
   FAILED,
   CANCELLED,
-  CONFIG_ERROR
+  CONFIG_ERROR,
+  /** A step hit its deadline and was aborted, so the run ended on the clock, not on a verdict. */
+  TIMED_OUT
 }
