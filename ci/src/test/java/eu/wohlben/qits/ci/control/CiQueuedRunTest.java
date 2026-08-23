@@ -56,6 +56,9 @@ public class CiQueuedRunTest extends CiTestSupport {
 
   @AfterEach
   void releaseTheWorker() throws Exception {
+    // The flag outlives a test method — one CDI instance serves the whole suite — so it is put back
+    // down here rather than in the two methods that raise it.
+    service.draining(false);
     release.countDown();
     service.awaitIdle();
   }
@@ -253,6 +256,56 @@ public class CiQueuedRunTest extends CiTestSupport {
         launchedBefore, fakeRunner.executed().size(), "the cancelled run must launch no container");
     // A second cancellation has nothing left to stop.
     assertThrows(ConflictException.class, () -> service.cancel(queuedId));
+  }
+
+  // --- the shutdown that must claim nothing ---
+
+  @Test
+  public void aDrainingServiceLeavesAQueuedRunQueuedForTheSuccessorToPickUp() throws Exception {
+    // The 2026-08-23 incident, staged: a start-first successor had already swept when the dying
+    // process claimed a queued row and died holding it RUNNING — past every sweep, owned by nobody.
+    // A draining process must hand its backlog on instead.
+    occupyTheWorker();
+    String repoId = seedRepo();
+    announcePush(repoId, shaOf(repoId));
+    String queuedId = soleRun(repoId).id;
+    int launchedBefore = fakeRunner.executed().size();
+
+    service.draining(true);
+    release.countDown();
+    service.awaitIdle();
+
+    CiRun stillQueued = soleRun(repoId);
+    assertEquals(queuedId, stillQueued.id);
+    assertEquals(CiRunStatus.QUEUED, stillQueued.status, "a draining process must claim nothing");
+    assertNull(stillQueued.startedAt, "the row was never flipped to RUNNING");
+    assertNull(stillQueued.finishedAt, "and it was not finished either — it is the successor's");
+    assertEquals(
+        launchedBefore, fakeRunner.executed().size(), "no container for a run nobody claimed");
+
+    // And the sweep a successor runs picks exactly this row back up.
+    service.draining(false);
+    service.sweepInterrupted();
+    service.awaitIdle();
+    assertEquals(CiRunStatus.SUCCESS, soleRun(repoId).status);
+  }
+
+  @Test
+  public void aDrainingServiceAcceptsARunAndPutsItOnNoWorker() throws Exception {
+    // The other half of the guard: the row is still written, because losing an accepted push is the
+    // failure QUEUED exists to close. It simply never reaches this process's worker.
+    occupyTheWorker();
+    String repoId = seedRepo();
+    service.draining(true);
+
+    announcePush(repoId, shaOf(repoId));
+
+    CiRun accepted = soleRun(repoId);
+    assertEquals(CiRunStatus.QUEUED, accepted.status);
+    release.countDown();
+    service.awaitIdle();
+    forgetLoadedEntities();
+    assertEquals(CiRunStatus.QUEUED, soleRun(repoId).status, "the worker was never handed it");
   }
 
   // --- the dedupe, which now fires at accept ---

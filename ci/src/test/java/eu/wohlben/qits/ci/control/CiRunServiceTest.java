@@ -18,8 +18,10 @@ import eu.wohlben.qits.ci.entity.CiTriggerType;
 import eu.wohlben.qits.ci.error.BadRequestException;
 import eu.wohlben.qits.ci.error.ConflictException;
 import eu.wohlben.qits.ci.error.NotFoundException;
+import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -717,6 +719,79 @@ public class CiRunServiceTest extends CiTestSupport {
     forgetLoadedEntities();
 
     assertEquals("No longer needed", soleRun().cancellationReason);
+  }
+
+  @Test
+  public void cancellingARunningRunNoWorkerOwnsSettlesItCancelledAndFailsItsIncompleteSteps() {
+    // What a dead predecessor leaves behind. On 2026-08-23 a start-first successor swept, and the
+    // dying process then claimed a queued row and died holding it RUNNING — a row past every sweep,
+    // executed by nobody. Cancel used to record a reason on it and ask a runner that owns nothing to
+    // stop, so the row stayed RUNNING and had to be flipped by hand in SQL.
+    seedConfig(CONFIG_TWO_STEPS);
+    String runId = seedOrphanedRunningRun();
+
+    service.cancel(runId, "the process that was running it is gone");
+
+    forgetLoadedEntities();
+    CiRun settled = soleRun();
+    assertEquals(CiRunStatus.CANCELLED, settled.status);
+    assertNotNull(settled.finishedAt, "an unowned run is finished here, not left for a worker");
+    assertEquals("the process that was running it is gone", settled.cancellationReason);
+    assertNull(settled.supersededByRunId);
+    List<CiStep> recorded = service.stepsFor(runId);
+    assertEquals(CiStepStatus.FAILED, recorded.get(0).status, "its in-flight step died with it");
+    assertEquals(CiStepStatus.SKIPPED, recorded.get(1).status);
+    // And nothing was asked to stop, because there is nothing here to ask.
+    assertEquals(List.of(), fakeRunner.cancelled());
+  }
+
+  @Test
+  public void cancellingAnUnownedRunTwiceIsAConflictTheSecondTime() {
+    // The settle is terminal like every other cancellation, so it closes the row rather than leaving
+    // a door a retry keeps walking through.
+    seedConfig(CONFIG_TWO_STEPS);
+    String runId = seedOrphanedRunningRun();
+
+    service.cancel(runId);
+
+    assertEquals(CiRunService.USER_CANCELLED, soleRun().cancellationReason);
+    assertThrows(ConflictException.class, () -> service.cancel(runId));
+  }
+
+  /**
+   * A {@code RUNNING} row with one running and one pending step, and no worker anywhere behind it —
+   * exactly what a process killed mid-step leaves for its successor.
+   */
+  private String seedOrphanedRunningRun() {
+    String runId = UUID.randomUUID().toString();
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              CiRun run = new CiRun();
+              run.id = runId;
+              run.repoId = repoId;
+              run.branch = "main";
+              run.commitSha = sha;
+              run.status = CiRunStatus.RUNNING;
+              run.triggerType = CiTriggerType.POST_RECEIVE;
+              run.configPath = CiConfigParser.CONFIG_PATH;
+              run.createdAt = Instant.now();
+              run.startedAt = Instant.now();
+              runs.persist(run);
+              steps.persist(orphanedStep(runId, 0, CiStepStatus.RUNNING));
+              steps.persist(orphanedStep(runId, 1, CiStepStatus.PENDING));
+            });
+    return runId;
+  }
+
+  private static CiStep orphanedStep(String runId, int index, CiStepStatus status) {
+    CiStep step = new CiStep();
+    step.id = UUID.randomUUID().toString();
+    step.runId = runId;
+    step.stepIndex = index;
+    step.image = "alpine:3";
+    step.status = status;
+    return step;
   }
 
   @Test

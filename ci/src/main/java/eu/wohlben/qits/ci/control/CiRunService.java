@@ -19,6 +19,7 @@ import eu.wohlben.qits.ci.persistence.CiStepRepository;
 import eu.wohlben.qits.db.DbRetry;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.runtime.LaunchMode;
+import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -280,6 +281,24 @@ public class CiRunService {
   private final Set<String> cancelled = ConcurrentHashMap.newKeySet();
 
   /**
+   * Raised once this process is on its way out, and read by everything that would otherwise take
+   * new work: {@link #enqueue} and the claim in {@link #startQueued}.
+   *
+   * <p><b>A dying process must claim nothing.</b> On 2026-08-23 a start-first successor booted, ran
+   * its sweep, and only then did the predecessor claim a {@code QUEUED} row and die holding it
+   * {@code RUNNING} — a row past every sweep, owned by no worker anywhere, which had to be flipped
+   * by hand. Leaving the row {@code QUEUED} instead costs nothing: the successor's boot sweep
+   * re-enqueues it.
+   *
+   * <p><b>The order is what makes the flag work.</b> {@link #onStop} observes {@code ShutdownEvent},
+   * which Quarkus fires before it destroys beans — so the flag is up before {@link #shutdown}
+   * stops the worker pool, and no worker can start a claim after it. A claim already past the read
+   * commits and runs as normal in-flight work; that window is one transaction wide, and the run it
+   * produces is an owned one.
+   */
+  private volatile boolean draining;
+
+  /**
    * How long the worker keeps re-asking an unreachable git host for a pushed commit's config before
    * it decides. The schedule has to outlast a git-host <em>redeploy</em>, not a blip: the deploy
    * train bounces the git host and the next push's config read lands seconds later on a dead pooled
@@ -329,6 +348,23 @@ public class CiRunService {
           t.setDaemon(true);
           return t;
         });
+  }
+
+  /**
+   * Stops this process taking new work, and runs <b>before</b> {@link #shutdown} — see {@link
+   * #draining} for why the pair has to be in that order.
+   */
+  void onStop(@Observes ShutdownEvent event) {
+    draining(true);
+  }
+
+  /**
+   * A method rather than a bare field, for {@link #unreachableRetryDelays}'s reason: this bean is
+   * normal-scoped, so a test holds a client proxy and a field write would land on the proxy. It is
+   * also how a suite puts the flag back down — a real process never does.
+   */
+  void draining(boolean draining) {
+    this.draining = draining;
   }
 
   @PreDestroy
@@ -476,8 +512,20 @@ public class CiRunService {
     return new CiRepoRef(run.repoId, run.projectId, run.repoName);
   }
 
+  /** What a run left behind for the successor is told, in one wording, from both places. */
+  private static void logLeftQueuedWhileDraining(String runId) {
+    LOG.infof(
+        "CI run %s left QUEUED: this process is shutting down, the successor's boot sweep"
+            + " re-enqueues it",
+        runId);
+  }
+
   /** Puts an already-accepted (QUEUED) run on the worker. */
   private void enqueue(String runId) {
+    if (draining) {
+      logLeftQueuedWhileDraining(runId);
+      return;
+    }
     worker.submit(
         () -> {
           try {
@@ -692,9 +740,9 @@ public class CiRunService {
   void runQueued(String runId) {
     CiRun run = startQueued(runId);
     if (run == null) {
-      // Somebody reached the row first — today that is only a cancellation of a still-queued run,
-      // which has already written the terminal row. Nothing to run and nothing to clean up but the
-      // flag that cancellation raced us with.
+      // Somebody reached the row first — a cancellation of a still-queued run, which has already
+      // written the terminal row, or this process draining, which left the row QUEUED for the
+      // successor. Nothing to run and nothing to clean up but the flag a cancellation raced us with.
       cancelled.remove(runId);
       return;
     }
@@ -1194,6 +1242,10 @@ public class CiRunService {
    * claiming transaction is what makes "the worker must never pick up a run that was cancelled while
    * it waited" a property of the database rather than of the order two threads happened to run in.
    *
+   * <p>It is also <b>null while this process is {@link #draining}</b>, and then the row is left
+   * {@code QUEUED} rather than finished: a shutting-down process must hand its backlog on, not claim
+   * it.
+   *
    * <p>Flipping here rather than at accept is what keeps {@code QUEUED} honest: the config read
    * below is an HTTP read against a host that can take seconds, and a run doing that has
    * started. It also fixes what a crash during it costs — a {@code RUNNING} row, swept to {@code
@@ -1205,6 +1257,13 @@ public class CiRunService {
             () -> {
               CiRun run = runs.findById(runId);
               if (run == null || run.status != CiRunStatus.QUEUED) {
+                return null;
+              }
+              // Read as late as it can be — after the row, immediately before the flip, inside the
+              // claiming transaction. A dying process leaves the row QUEUED for the successor's
+              // boot sweep rather than claiming it and dying holding it RUNNING.
+              if (draining) {
+                logLeftQueuedWhileDraining(runId);
                 return null;
               }
               run.status = CiRunStatus.RUNNING;
@@ -1529,6 +1588,14 @@ public class CiRunService {
    * between the read and the write, the flag is what stops the run before its first container — so
    * neither thread has to win for the answer to be right.
    *
+   * <p><b>A {@code RUNNING} row no worker of this process owns is settled here, in one write.</b>
+   * That row is what a dead predecessor leaves: its worker went with its container, so
+   * {@link CiStepRunner#cancel} would ask nothing of nobody and nothing would ever write the
+   * terminal row. So the incomplete steps are failed and the run is finished {@code CANCELLED} with
+   * the caller's reason, and the runner is not called at all. Measured 2026-08-23, when a
+   * start-first successor swept and the dying predecessor then claimed a queued row: the survivor
+   * had to be flipped by hand in SQL, because cancel only ever recorded a reason on it.
+   *
    * <p>Cancelling anything already terminal is a 409 rather than a quiet success: a finished run has
    * nothing to stop, and telling the caller it does would be a lie it cannot check.
    */
@@ -1565,6 +1632,30 @@ public class CiRunService {
             retryDeadline());
     if (neverStarted) {
       LOG.infof("CI run %s cancelled on request before it started (%s)", runId, reason);
+      return;
+    }
+    if (!runner.owns(runId)) {
+      // Nobody here is running it, so there is nothing to ask to stop and nothing that will ever
+      // write the terminal row. Settle it in one write instead of recording a reason on a row that
+      // would stay RUNNING forever.
+      DbRetry.runInNewTx(
+          "settle a running run no worker owns",
+          () -> {
+            CiRun current = runs.findById(runId);
+            if (current == null) {
+              return;
+            }
+            failIncompleteSteps(runId);
+            current.status = CiRunStatus.CANCELLED;
+            current.finishedAt = Instant.now();
+            current.cancellationReason = reason;
+            current.supersededByRunId = null;
+            runs.flush();
+          },
+          retryDeadline());
+      LOG.infof(
+          "CI run %s was RUNNING with no worker in this process — settled as CANCELLED on request",
+          runId);
       return;
     }
     DbRetry.runInNewTx(

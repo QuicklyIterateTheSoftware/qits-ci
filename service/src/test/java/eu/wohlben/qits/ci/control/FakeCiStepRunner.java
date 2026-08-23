@@ -7,6 +7,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 /**
@@ -52,6 +54,10 @@ public class FakeCiStepRunner implements CiStepRunner {
   private final Map<Integer, Consumer<StepSpec>> during = new HashMap<>();
   private final List<String> cancelled = new ArrayList<>();
 
+  // Written on the worker thread and read on the request thread — the same crossing the real
+  // runner's in-flight map makes, and the reason this one is concurrent.
+  private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
+
   public List<StepSpec> executed() {
     return executed;
   }
@@ -82,6 +88,7 @@ public class FakeCiStepRunner implements CiStepRunner {
     scripted.clear();
     during.clear();
     cancelled.clear();
+    inFlight.clear();
   }
 
   @Override
@@ -91,6 +98,15 @@ public class FakeCiStepRunner implements CiStepRunner {
 
   @Override
   public StepResult run(StepSpec spec, StepListener listener) {
+    inFlight.add(spec.runId());
+    try {
+      return runStep(spec, listener);
+    } finally {
+      inFlight.remove(spec.runId());
+    }
+  }
+
+  private StepResult runStep(StepSpec spec, StepListener listener) {
     executed.add(spec);
     Script script = scripted.getOrDefault(spec.stepIndex(), green(spec.stepIndex()));
     listener.onStarted();
@@ -108,6 +124,12 @@ public class FakeCiStepRunner implements CiStepRunner {
   @Override
   public void cancel(String runId) {
     cancelled.add(runId);
+  }
+
+  /** True exactly while a step of the run is executing here — what the real runner answers. */
+  @Override
+  public boolean owns(String runId) {
+    return inFlight.contains(runId);
   }
 
   @Override
