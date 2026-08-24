@@ -40,3 +40,8 @@ resources: postgresql:db, postgresql:eventstream:qits_ci_eventstream
 # STOP-FIRST: one CI process at a time. A start-first successor swept while the predecessor was
 # still claiming queued rows, and left a RUNNING run no worker owned (2026-08-23).
 update_order: stop-first
+
+# Where the browsable API document lives: swagger-ui under this service's non-application
+# root, which sits under the primary route above. The shell's Api Docs viewer reads it off
+# /main-navigation and frames it for this repository.
+api-docs: /ci/q/swagger-ui
