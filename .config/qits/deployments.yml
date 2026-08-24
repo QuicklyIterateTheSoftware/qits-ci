@@ -11,8 +11,17 @@
 # whichever tier listens to the built branch.
 deployment_target: environment
 
+# The path prefix the edge routes here on EVERY host, browser and machine alike. The client itself
+# is served at `/` on this service's own host (ci.<env>.<domain>), so this covers the machine surface
+# only: /ci/api, /ci/q and /ci/daemon.
 routes: /ci
-navigation: CI:1
+
+# Where this application appears in the chrome's navigation tree. `<slot>.<Label>:<position>`, and
+# the slot is what places it: `<category>.details` is a child of a repository in scope, so CI shows
+# up under every repository whatever kind it is — a library has runs exactly like a service does.
+# Position 2 is per slot, and it is the platform's fixed order of the per-repository applications
+# (Docs 1, CI 2, Artifacts 3, Configuration 4, Workspaces 5).
+navigation-entries: services.details.CI:2, daemons.details.CI:2, libs.details.CI:2, frontends.details.CI:2, cli.details.CI:2, images.details.CI:2
 
 # TWO DATABASES, because this deployable joins two jars that each own a store, and each one maps the
 # generic contract in its own shipped defaults. qits-platform-deployments creates a role and a

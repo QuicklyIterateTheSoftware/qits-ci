@@ -27,7 +27,7 @@ recorded, with the event that caused it, on the run and in the event log.
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary:
 
     ./mvnw verify
-    java -jar service/target/quarkus-app/quarkus-run.jar   # :8080, reads under /ci/api, client at /ci
+    java -jar service/target/quarkus-app/quarkus-run.jar   # :8080, reads under /ci/api, client at /
 
     ./mvnw package -Dnative
     ./service/target/qits-ci                              # same routes, ~0.2s to listening
@@ -53,33 +53,36 @@ anchored to them; the maven coordinates are `eu.wohlben.qits:qits-ci-domain` and
 
 ## Addressing
 
-Every route this service serves lives under **`/ci`**, its gateway segment — the service name
-without the `qits-` prefix. qits-gateway routes *verbatim by prefix*, `/ci/*` → qits-ci with the
-path untouched, so the prefix is not decoration the gateway strips: the service has to serve it,
-and there is no unprefixed form. Service-to-service calls on `qits-net` bypass the gateway and
-address the same paths.
+This service has **a host of its own** — `ci.<env>.<domain>` — and it serves two things on it. The
+**client is at `/`**, and every **machine** route stays under **`/ci`**, its segment: the service
+name without the `qits-` prefix. The edge routes `/ci/*` *verbatim by prefix* on that host and on
+every other one, so the prefix is not decoration the edge strips: the service has to serve it, and
+there is no unprefixed form. Service-to-service calls on `qits-net` bypass the edge and address the
+same paths, and a browser page served here reads `/projects/api/…` same-origin for the same reason.
 
 Beneath the segment sits the kind of surface: `/ci/api/…` for the JSON API
 (`quarkus.rest.path`), `/ci/q/…` for what Quarkus itself serves —
 `/ci/q/openapi`, `/ci/q/swagger-ui` (`quarkus.http.non-application-root-path`, which is outside
 `quarkus.rest.path` and so has to carry the segment separately).
 
-`/ci/` itself is the **Angular client**: the
+`/` is the **Angular client**: the
 [qits-spa-ci](https://github.com/QuicklyIterateTheSoftware/qits-spa-ci) submodule at
 `service/src/main/webui`, built by Quinoa into the packaged artifact and served from it, with deep
-links under `/ci/` falling back to `index.html` so the client's own router handles them. Bare `/ci`
-(no trailing slash) is a 301 to `/ci/` (`WebUiRedirect`, GET/HEAD only, query preserved) — Quinoa
-mounts the SPA at `/ci/*`, which does not match the bare segment on its own.
+links falling back to `index.html` so the client's own router handles them — `/runs/<id>` and the
+scoped `/<projectSlug>/<category>/<repoName>/runs/<id>` alike. `/ci` and `/ci/` are **404** now: the
+client moved off the segment and nothing else serves the bare prefix (`WebUiRedirect`, which used to
+301 one to the other, is gone with it).
 
-That fallback is a catch-all, and what it must **not** swallow is named in
-`quarkus.quinoa.ignored-path-prefixes=/api,/q,/daemon` — relative to the UI root, and repeating
-`/api` and `/q` because setting the key *replaces* Quinoa's own derivation (which reads
-`quarkus.rest.path` and `quarkus.http.non-application-root-path`, and nothing else) rather than
-extending it. The third entry is why the key is set at all: `ws://…/ci/daemon` is a `@WebSocket`
-literal outside that derivation, and websockets-next claims only the upgrade — so before this key
-existed a plain `GET /ci/daemon` answered `200 text/html` with `index.html`, which the machine
-client on the far side parses as data. With it, a mistyped machine path answers 404 and the upgrade
-is untouched. Add a literal route, add its prefix.
+That fallback is a catch-all over the whole port, so what it must **not** swallow is named in
+`quarkus.quinoa.ignored-path-prefixes=/ci`. The values are **absolute** — Quinoa strips the UI root
+before matching, and stripping `/` changes nothing — and one entry is the whole list: a prefix match
+on `/ci` covers `/ci/api`, `/ci/q` and `/ci/daemon`. The key is not optional here and cannot become
+so: Quinoa derives its skip list from `quarkus.rest.path` and `quarkus.http.non-application-root-path`
+only, and with the client at the root the derivation would still leave `/ci/daemon` — a `@WebSocket`
+literal — exposed. websockets-next claims only the upgrade, so before this key existed a plain
+`GET /ci/daemon` answered `200 text/html` with `index.html`, which the machine client on the far
+side parses as data. With it, a mistyped machine path answers 404 and the upgrade is untouched. Add
+a **root-level** wire route, add its prefix.
 
 Nothing under `/ci/api` repeats `ci` again: the segment already said it. That is the one shape
 change here beyond the prefix, along with runs becoming their own entity (below).

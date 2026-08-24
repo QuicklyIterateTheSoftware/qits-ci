@@ -81,11 +81,14 @@ import org.junit.jupiter.api.Test;
 public class CiPackagedSurfaceIT {
 
   /**
-   * The client's own spelling of the segment, from qits-spa-ci's {@code angular.json}. It is the
+   * The client's own spelling of its root, from qits-spa-ci's {@code angular.json}. It is the
    * fingerprint every SPA probe here uses: "did this response come from the client" is a question
    * about the page, and the status code alone cannot answer it.
+   *
+   * <p>It is {@code /} because this service has a host of its own: the client is what
+   * {@code ci.<env>.<domain>} answers with, and {@code /ci} is left to the machine surface.
    */
-  private static final String BASE_HREF = "<base href=\"/ci/\">";
+  private static final String BASE_HREF = "<base href=\"/\">";
 
   /**
    * Hands the launched artifact its two databases the way a deployment does — as the generic
@@ -171,14 +174,14 @@ public class CiPackagedSurfaceIT {
   }
 
   @Test
-  public void theClientIsServedAtTheSegmentWithItsOwnBaseHref() {
+  public void theClientIsServedAtTheRootWithItsOwnBaseHref() {
     // The baseHref is set in qits-spa-ci's angular.json — another repository, where no build here
     // can check it. Disagree with quarkus.quinoa.ui-root-path and the page loads and then fetches
     // its own JavaScript from the wrong place, which is a failure with no error in it.
     String html =
         given()
             .when()
-            .get("/ci/")
+            .get("/")
             .then()
             .statusCode(200)
             .contentType(ContentType.HTML)
@@ -192,34 +195,37 @@ public class CiPackagedSurfaceIT {
 
   @Test
   public void aDeepLinkFallsBackToTheClientSoItsRouterOwnsIt() {
-    // /ci/runs/<runId> is a real route in the client and must survive a hard reload — that is what
-    // quarkus.quinoa.enable-spa-routing buys, and it only exists in the packaged process.
-    String deepLink =
-        given()
-            .when()
-            .get("/ci/runs/anything")
-            .then()
-            .statusCode(200)
-            .contentType(ContentType.HTML)
-            .extract()
-            .asString();
-    assertTrue(
-        deepLink.contains(BASE_HREF),
-        "a deep link must answer with index.html, not with a differently-shaped page");
+    // /runs/<runId> is a real route in the client and must survive a hard reload — that is what
+    // quarkus.quinoa.enable-spa-routing buys, and it only exists in the packaged process. The
+    // scoped spelling is the same page reached through a repository, and it has to fall back too:
+    // it is three segments the server knows nothing about.
+    for (String deep : List.of("/runs/anything", "/qits/services/qits-ci/runs/anything")) {
+      String deepLink =
+          given()
+              .when()
+              .get(deep)
+              .then()
+              .statusCode(200)
+              .contentType(ContentType.HTML)
+              .extract()
+              .asString();
+      assertTrue(
+          deepLink.contains(BASE_HREF),
+          deep + " must answer with index.html, not with a differently-shaped page");
+    }
   }
 
   @Test
-  public void theBareSegmentRedirectsRatherThanFourOhFouring() {
-    // Quinoa mounts at /ci/*, which does not match the bare segment — WebUiRedirect is this
-    // service's answer, and a raw Vert.x route only exists on the artifact's real router.
-    given()
-        .redirects()
-        .follow(false)
-        .when()
-        .get("/ci")
-        .then()
-        .statusCode(301)
-        .header("Location", "/ci/");
+  public void theSegmentIsTheMachineSurfaceAndNotTheClient() {
+    // The bare segment used to redirect to /ci/, where the client lived. It does not live there any
+    // more: /ci is the machine prefix, nothing serves it, and the SPA fallback is told to keep off
+    // it — so the honest answer is a 404 rather than a web page. WebUiRedirect is gone with it.
+    String bare = given().when().get("/ci").then().statusCode(404).extract().asString();
+    assertFalse(bare.contains(BASE_HREF), "the bare segment must not be answered with the client");
+
+    String slashed = given().when().get("/ci/").then().statusCode(404).extract().asString();
+    assertFalse(
+        slashed.contains(BASE_HREF), "the old client address must not be answered with the client");
   }
 
   @Test
