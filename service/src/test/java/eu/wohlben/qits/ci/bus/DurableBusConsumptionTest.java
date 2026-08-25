@@ -109,7 +109,7 @@ public class DurableBusConsumptionTest {
   @Test
   public void aBuildSuccessfulWithAnUnreadablePayloadIsSettledRatherThanOwed() {
     EventFrame frame =
-        new EventFrame(anId(), "BuildSuccessful", T0, "this is not json {", null, null);
+        new EventFrame(anId(), "BuildSuccessful", T0, "this is not json {", null, null, null);
 
     assertEquals(DurableFunnel.Result.HANDLED, funnel.offer(builds, frame));
   }
@@ -148,7 +148,7 @@ public class DurableBusConsumptionTest {
    */
   @Test
   public void aFrameWithNoNameIsSettledRatherThanOwed() {
-    EventFrame nameless = new EventFrame(anId(), null, T0, "{}", null, null);
+    EventFrame nameless = new EventFrame(anId(), null, T0, "{}", null, null, null);
 
     assertEquals(DurableFunnel.Result.HANDLED, funnel.offer(triggers, nameless));
   }
@@ -190,7 +190,7 @@ public class DurableBusConsumptionTest {
   @Test
   public void aPushThisServiceCannotActOnIsSettledRatherThanOwed() {
     EventFrame unreadable =
-        new EventFrame(anId(), "SCMPublishCommit", T0, "this is not json {", null, null);
+        new EventFrame(anId(), "SCMPublishCommit", T0, "this is not json {", null, null, null);
     assertEquals(DurableFunnel.Result.HANDLED, funnel.offer(pushes, unreadable));
 
     EventFrame refused =
@@ -268,7 +268,7 @@ public class DurableBusConsumptionTest {
             "{\"packageName\":\"qits/qits-stt\",\"packageType\":\"docker\",\"repository\":\"some-repo\""
                 + ",\"version\":\"1.4.0\"}",
             null,
-            null);
+            null, null);
 
     assertFalse(daemon.selects(image));
     assertEquals(DurableFunnel.Result.SKIPPED, funnel.offer(daemon, image));
@@ -285,7 +285,7 @@ public class DurableBusConsumptionTest {
   @Test
   public void aSoftwareReleaseWithAnUnreadablePayloadIsDeclinedRatherThanOwed() throws Exception {
     EventFrame broken =
-        new EventFrame(anId(), "SoftwareRelease", T0, "not json at all", null, null);
+        new EventFrame(anId(), "SoftwareRelease", T0, "not json at all", null, null, null);
 
     assertFalse(daemon.selects(broken), "a predicate that throws leaves the event owed forever");
     assertEquals(DurableFunnel.Result.SKIPPED, funnel.offer(daemon, broken));
@@ -352,17 +352,17 @@ public class DurableBusConsumptionTest {
   public void anScmReleaseWithNoKeyToJoinOnIsSettledRatherThanOwed() {
     assertEquals(
         DurableFunnel.Result.HANDLED,
-        funnel.offer(scmReleases, new EventFrame(anId(), "SCMRelease", T0, "not json", null, null)));
+        funnel.offer(scmReleases, new EventFrame(anId(), "SCMRelease", T0, "not json", null, null, null)));
     assertEquals(
         DurableFunnel.Result.HANDLED,
         funnel.offer(
             scmReleases,
-            new EventFrame(anId(), "SCMRelease", T0, "{\"version\":\"1.0.0\"}", null, null)));
+            new EventFrame(anId(), "SCMRelease", T0, "{\"version\":\"1.0.0\"}", null, null, null)));
     assertEquals(
         DurableFunnel.Result.HANDLED,
         funnel.offer(
             scmReleases,
-            new EventFrame(anId(), "SCMRelease", T0, "{\"repository\":\"r\"}", null, null)));
+            new EventFrame(anId(), "SCMRelease", T0, "{\"repository\":\"r\"}", null, null, null)));
   }
 
   /**
@@ -396,7 +396,7 @@ public class DurableBusConsumptionTest {
         T0,
         "{\"branch\":\"main\",\"commitSha\":\"cafebabe\",\"repoId\":\"" + repoId + "\"}",
         null,
-        null);
+        null, null);
   }
 
   private static EventFrame releaseFrame(String eventId, String repository, String version) {
@@ -417,7 +417,7 @@ public class DurableBusConsumptionTest {
         occurredAt,
         ScmReleaseContractTest.canonicalPayload(repository, repository, version),
         null,
-        null);
+        null, null);
   }
 
   private static EventFrame daemonFrame(String eventId, String version, Instant occurredAt) {
@@ -430,6 +430,6 @@ public class DurableBusConsumptionTest {
             + version
             + "\"}",
         null,
-        null);
+        null, null);
   }
 }

@@ -88,6 +88,6 @@ public final class ScmPushFrames {
         commit.occurredAt(),
         CanonicalJson.payload(commit),
         null,
-        null);
+        null, null);
   }
 }

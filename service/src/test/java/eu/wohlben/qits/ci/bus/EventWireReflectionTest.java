@@ -168,7 +168,7 @@ public class EventWireReflectionTest {
                     envelope.occurredAt(),
                     envelope.payload(),
                     null,
-                    envelope.parentId())));
+                    envelope.parentId(), null)));
     BuildSuccessful back = CanonicalJson.payloadTo(frame.payload(), BuildSuccessful.class);
 
     assertEquals(out.runId(), back.runId());

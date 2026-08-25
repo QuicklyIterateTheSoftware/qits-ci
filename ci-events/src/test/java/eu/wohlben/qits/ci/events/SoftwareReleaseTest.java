@@ -59,7 +59,7 @@ class SoftwareReleaseTest {
     JsonNode json = CanonicalJson.parse(CanonicalJson.envelope(envelope));
 
     assertEquals(
-        List.of("description", "name", "occurredAt", "parentId", "payload"),
+        List.of("description", "environment", "name", "occurredAt", "parentId", "payload"),
         json.properties().stream().map(Map.Entry::getKey).toList());
     assertEquals("SoftwareRelease", json.get("name").asText());
     assertEquals("2026-08-01T09:14:22Z", json.get("occurredAt").asText());
