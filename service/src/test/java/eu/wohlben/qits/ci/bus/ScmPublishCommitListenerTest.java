@@ -202,7 +202,7 @@ public class ScmPublishCommitListenerTest {
     String repoId = seedOrigin();
     EventFrame broken =
         new EventFrame(
-            UUID.randomUUID().toString(), "SCMPublishCommit", null, "not json at all", null, null);
+            UUID.randomUUID().toString(), "SCMPublishCommit", null, "not json at all", null, null, null);
 
     listener.onFrame(broken);
 
