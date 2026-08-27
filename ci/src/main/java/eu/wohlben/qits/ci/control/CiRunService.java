@@ -1368,8 +1368,45 @@ public class CiRunService {
     runs.persist(run);
     runs.flush();
     supersedeByVersion(run, request);
+    supersedeByCheckoutBranch(run, request);
     runs.flush();
     return run;
+  }
+
+  /**
+   * <b>A burst of pushes to one branch is one build, of the newest tip.</b> The event path's
+   * <em>third</em> collapse, and the checkout feature's twin of the per-branch push supersede in
+   * {@link #acceptPostReceive}: a trigger following the event's own branch gets one run per push,
+   * so N pushes in a burst would queue N builds behind the single run worker where only the newest
+   * matters.
+   *
+   * <p><b>The {@code checkout != null} gate is correctness, not tidiness.</b> Without {@code
+   * checkout:} every event run's branch is {@code main} by convention, so a branch-keyed collapse
+   * would dedupe runs of <em>distinct events</em> that merely share the convention — which the
+   * {@code (trigger_event_id, …)} contract forbids.
+   *
+   * <p>Accepted always wins, {@code QUEUED} rows only, convergence not minimality — {@link
+   * #acceptPostReceive}'s exact rules, including the out-of-order-redelivery exposure the push path
+   * already accepts. Called inside {@link #acceptEventRun}'s transaction, after the flush, beside
+   * {@link #supersedeByVersion} (the two cannot both fire: one is gated on {@code SCMPublishTag},
+   * whose payload names no branch and therefore parses into no checkout).
+   */
+  private void supersedeByCheckoutBranch(CiRun accepted, EventRun request) {
+    if (request.trigger().checkout() == null) {
+      return;
+    }
+    for (CiRun queued :
+        runs.listQueuedEventRunsOnBranch(
+            accepted.repoId,
+            accepted.configPath,
+            request.eventName(),
+            accepted.branch,
+            accepted.id)) {
+      LOG.infof(
+          "Push run %s at %s@%s supersedes queued %s — a burst builds the newest tip only",
+          accepted.id, accepted.repoId, accepted.branch, queued.id);
+      dedupe(queued, accepted);
+    }
   }
 
   /**

@@ -343,7 +343,8 @@ public class CiQueuedRunTest extends CiTestSupport {
             new CiPipeline(
                 List.of(
                     new CiPipeline.CiStepDecl("alpine:3", "echo bump", null, false, "", List.of()))),
-            List.of()), // declares no artifact: this run announces a build and nothing more
+            List.of(), // declares no artifact: this run announces a build and nothing more
+            null), // no checkout: builds main's head, as every trigger did before the key
         eventId,
         "BuildSuccessful",
         Instant.parse("2026-07-31T12:46:03Z"),

@@ -360,9 +360,10 @@ The two kinds of `SKIPPED` are told apart **by the step's output**:
 | *empty* | the loop never reached it — an earlier step failed, or the run was cancelled |
 
 `branches:` on a step in a **`ci-event-*.yml` is a parse error**, naming the file and the reason:
-an event-triggered run always builds the head of `main`, so `exact: main` there is decoration and
-anything else is a step that can never run, which reads exactly like one that never got its turn.
-A condition over the *event* is what `when:` already is.
+the run's branch is the trigger's single decision — `main` by convention, or the payload's via
+`checkout:`, resolved once before any step exists — so a per-step filter over it is decoration or a
+step that can never run, which reads exactly like one that never got its turn. A condition over the
+*event's* branch is what `when:` already spells.
 
 **Publishing an image is not a feature here, it is a step.** Steps are sequential, so a push runs
 only after the build steps went green; a failed push is a failed step is a **failed run**, so the
@@ -513,8 +514,10 @@ steps:                          # exactly the schema ci-post-receive.yml uses
 - **The `*` is yours and is completely ignored.** It names the trigger for humans. A repository may
   have any number of these files; each is an independent trigger with its own pipeline, and two of
   them matching one event are two runs by design.
-- **They are read from the head of `main`**, not from a commit — an event names no push, so the
-  platform's one tracked branch supplies the ref. The run records the head sha it built.
+- **They are read from the head of `main`**, not from a commit — the trigger DECIDES at `main`, so
+  a pushed branch cannot alter the CI that gates it. What the run *builds* is also `main`'s head,
+  unless the file declares **`checkout:`** (below), in which case the run builds the commit the
+  event names. Either way the run records the branch and sha it built.
 - **Which repositories an event is evaluated against**: the union of what the git host lists (`GET
   <qits.ci.git-host-url>/git` → `{"repositories": [...]}`) and what qits-ci already knows — the
   repositories it has runs for. So a repository seeded straight onto the
@@ -529,6 +532,47 @@ steps:                          # exactly the schema ci-post-receive.yml uses
   error here — see "Binding a step to branches" for why refusing it beats ignoring it.
 - The one key it **adds** is **`artifacts:`**, optional, which turns the file into a *release
   pipeline* — see below. It is a parse error in `ci-post-receive.yml`.
+- The other added key is **`checkout:`**, optional, which makes the run build the event's own
+  commit — see "Building the commit the event names". Also a parse error in `ci-post-receive.yml`,
+  where the checkout IS the push.
+
+### Building the commit the event names — `checkout:`
+
+```yaml
+event: SCMPublishCommit
+when:
+  - repoId: { exact: qits-githost }
+    suppressCi: { exact: "false" }   # -o qits.no-ci pushes stay dark; the engine adds no flag
+checkout:
+  branch: branch                     # payload dot-path — the run's branch
+  sha: sha                           # payload dot-path — the commit the run checks out
+steps:
+  - image: qits/build-images/maven-base:latest
+    script: ./mvnw -B -ntp verify
+```
+
+- **Both keys are mandatory.** The run row's branch is load-bearing everywhere (the step daemon
+  clones `--branch $QITS_CI_BRANCH` and checks out `$QITS_CI_SHA`, `BuildSuccessful` carries the
+  pair, the queue collapse keys on it), so an event with no branch in its payload —
+  `SCMPublishTag` — cannot use `checkout:`; tag pipelines keep their script-level
+  `git fetch refs/tags/…` dance.
+- **Decide at main, build at the event's commit.** Discovery, parsing and `when:` still read
+  `main`'s head — a branch cannot change its own event pipeline until merged. Repositories that
+  need per-commit pipeline self-description keep `ci-post-receive.yml`, which reads config at the
+  pushed sha.
+- **A payload the paths do not resolve in is one WARN and no run** — there is no truthful
+  (branch, sha) pair to record — and only that file's: the repository's other triggers still
+  evaluate. Resolved values are validated as identifiers before they reach a row, a clone URL or an
+  argv; garbage is refused the same way.
+- **A burst collapses per branch.** Queued runs of the same file, event name and branch are
+  superseded by the newest accepted one (`DEDUPED`, exactly the push path's per-branch collapse);
+  a run already `RUNNING` keeps running. Runs of triggers *without* `checkout:` are never
+  branch-collapsed — their "main" is a convention shared by distinct events.
+- **Not available in platform pipelines** (`ci-platform-event-*.yml`): a platform run's head comes
+  from the candidate pass, and a checkout there would build an arbitrary sha of a repository a
+  third repository's file named. Declared anyway, it is one WARN per event and no run.
+- `suppressCi` stays a `when:` condition, not engine knowledge: matchers compare JSON literals, so
+  `exact: "false"` matches the boolean. Every `SCMPublishCommit` trigger should carry it.
 
 ### The selection
 
@@ -594,6 +638,12 @@ repository's others.**
 > post-receive — a loop with no event, no trigger file and no dedupe anywhere near it. The release
 > train's own step cannot: it pushes only through qits-workspaces' release door, which targets
 > `main`.
+>
+> **`checkout:` recreates that second shape with no post-receive file in sight.** A
+> `ci-event-*.yml` on `SCMPublishCommit` whose step pushes a commit re-triggers itself through the
+> very event its own push publishes — the per-branch collapse thins a burst, it does not break the
+> cycle (each hop is a new event id). A checkout trigger whose steps push nothing — an image build,
+> a docs publish — closes no circle.
 >
 > **Review is the only guard for both.** Cycle and self-reference detection is a separate future
 > feature that builds the graph of trigger declarations across repositories and finds cycles there,
@@ -839,7 +889,9 @@ The bus is the primary trigger and stays that way. `POST /ci/api/events/trigger`
 in: it runs the same evaluation against an event the **caller** supplies, for any domain-event
 pipeline type. It is for the two things the bus cannot do — reruns ("run that release train again")
 and bootstrapping ("this platform was seeded without ever publishing the events its pipelines wait
-for").
+for"). A hand-supplied payload feeds `checkout:` exactly as a frame's does — the same identifier
+validation applies, and the run builds whatever commit the payload names, so a rerun of a
+`SCMPublishCommit` pipeline rebuilds that push's own sha rather than today's head.
 
 ```
 POST /ci/api/events/trigger

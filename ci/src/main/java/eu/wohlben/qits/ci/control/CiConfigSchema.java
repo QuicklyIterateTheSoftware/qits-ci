@@ -50,6 +50,18 @@ final class CiConfigSchema {
    */
   static final String ARTIFACTS_KEY = "artifacts";
 
+  /**
+   * Where a triggered run checks out — two payload dot-paths, {@code branch} and {@code sha}. A
+   * fourth member of the two-way rule (trigger files only): a push run's checkout IS the push, so
+   * the key could only ever be inert in {@code ci-post-receive.yml}. Absent, an event run builds
+   * the head of {@code main}, exactly as every trigger always has.
+   */
+  static final String CHECKOUT_KEY = "checkout";
+
+  static final String CHECKOUT_BRANCH = "branch";
+
+  static final String CHECKOUT_SHA = "sha";
+
   /** The per-step branch filter — legal in a pipeline file, an error in a trigger file. */
   static final String BRANCHES_KEY = "branches";
 

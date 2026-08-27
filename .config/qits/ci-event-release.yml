@@ -46,6 +46,7 @@ when:
   - repository: { exact: qits-ci }
 artifacts:
   - { type: docker, name: qits/qits-ci }
+  - { type: docs, name: "@apidocs/qits-ci" }
 steps:
     # node-docker-base, the image ci-post-receive.yml already uses: node, npm and git for half one,
     # the docker CLI for half two — and node is also what reads the event payload, which is JSON.
@@ -126,3 +127,21 @@ steps:
       # cache either way — while under the containerd image store it drops the last reference to
       # content a concurrent build of this same Dockerfile may still be resolving, which is the
       # race that broke the release of 2026-08-11.
+
+      # --- the API document ---------------------------------------------------------------------
+      # docs/openapi.yml is committed (OpenApiSchemaExportTest regenerates it), so publishing the
+      # release's API surface is one tar and one PUT. The @apidocs scope is what the docs client
+      # renders with swagger-ui; the file sits at the bundle root under the name that scope's
+      # reader looks for first. Publish-if-absent: releases can replay and docs versions are
+      # immutable, so 409 is success (qits-spa-ui-components' discipline).
+      tar -czf apidocs.tgz -C docs openapi.yml
+      status=$(curl -sS -o /tmp/docs-publish.out -w '%{http_code}' \
+        -X PUT --data-binary @apidocs.tgz \
+        -H "X-Artifacts-Meta-git.commit.hash: $QITS_CI_SHA" \
+        -H "X-Artifacts-Meta-git.repository.name: qits-ci" \
+        "$QITS_DOCS_URL/@apidocs/qits-ci/-/$version")
+      case "$status" in
+        201) echo "published apidocs for qits-ci@$version" ;;
+        409) echo "apidocs for qits-ci@$version already published — skipping" ;;
+        *)   echo "apidocs publish failed: HTTP $status"; cat /tmp/docs-publish.out; exit 1 ;;
+      esac

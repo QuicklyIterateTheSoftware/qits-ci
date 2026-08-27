@@ -142,6 +142,26 @@ public class CiRunRepository implements PanacheRepositoryBase<CiRun, String> {
   }
 
   /**
+   * {@link #listQueuedEventRuns} narrowed to one branch — the checkout collapse's question, which
+   * only makes sense for runs whose branch came out of the payload (the caller gates on that): a
+   * burst of pushes to one branch is one pipeline per file per branch, {@link #listQueuedPushes}'
+   * question on the event path.
+   */
+  public List<CiRun> listQueuedEventRunsOnBranch(
+      String repoId, String configPath, String eventName, String branch, String exceptRunId) {
+    return list(
+        "repoId = ?1 and configPath = ?2 and status = ?3 and triggerType = ?4"
+            + " and triggerEventName = ?5 and branch = ?6 and id <> ?7",
+        repoId,
+        configPath,
+        CiRunStatus.QUEUED,
+        eu.wohlben.qits.ci.entity.CiTriggerType.EVENT,
+        eventName,
+        branch,
+        exceptRunId);
+  }
+
+  /**
    * Every repository this instance has ever recorded a run for — half of what {@code KnownCiRepos}
    * offers the trigger engine as candidates, and the whole of what {@code GET /ci/api/repositories}
    * answers.

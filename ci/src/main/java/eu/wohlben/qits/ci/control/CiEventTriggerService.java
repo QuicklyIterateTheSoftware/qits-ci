@@ -91,8 +91,12 @@ public class CiEventTriggerService {
   private static final Logger LOG = Logger.getLogger(CiEventTriggerService.class);
 
   /**
-   * The branch an event trigger reads. The platform's one tracked branch — every submodule follows
-   * it — and it has to be supplied by convention because, unlike a push, an event names no ref.
+   * The branch an event trigger reads, and — unless the file declares {@code checkout:} — the one
+   * its run builds. The platform's one tracked branch, supplied by convention because most events
+   * name no ref. A trigger with {@code checkout:} still <b>decides</b> here ("decide at main, build
+   * at the event's commit"): discovery, parsing and selection read this branch's head, so a pushed
+   * branch cannot alter the CI that gates it; only the recorded run's branch/sha come from the
+   * payload.
    */
   public static final String TRIGGER_BRANCH = "main";
 
@@ -365,15 +369,49 @@ public class CiEventTriggerService {
             repoId, file.path(), trigger.eventName(), arrival.eventId());
         continue;
       }
+      // Absent checkout: today's behavior byte-for-byte — the run builds main's head. Declared,
+      // the branch and sha come out of the payload instead; the trigger DECIDED at main above.
+      String branch = TRIGGER_BRANCH;
+      String sha = lookup.headSha();
+      if (trigger.checkout() != null) {
+        branch = checkoutField(payload, trigger.checkout().branchPath());
+        sha = checkoutField(payload, trigger.checkout().shaPath());
+        if (branch == null || sha == null) {
+          // One WARN and no run: there is no truthful (branch, sha) pair to record a row against,
+          // and a read failure is not a run. Per file — the repository's other triggers still
+          // evaluate.
+          LOG.warnf(
+              "%s: %s declares checkout { %s, %s } but event %s (%s) does not carry both — no run",
+              repoId,
+              file.path(),
+              trigger.checkout().branchPath(),
+              trigger.checkout().shaPath(),
+              arrival.eventId(),
+              arrival.eventName());
+          continue;
+        }
+        // The payload is attacker-shaped (the untrusted-input doctrine): both values reach a clone
+        // URL and an argv, so they are validated HERE, inside the per-file containment — letting
+        // the refusal escape would trip the per-repo catch and mark the whole repository skipped.
+        try {
+          CiIdentifiers.requireBranch(branch);
+          CiIdentifiers.requireSha(sha);
+        } catch (RuntimeException refused) {
+          LOG.warnf(
+              "%s: %s checkout refused for event %s: %s",
+              repoId, file.path(), arrival.eventId(), refused.getMessage());
+          continue;
+        }
+      }
       LOG.infof(
-          "Event %s (%s) matched %s in %s — enqueuing a run at %s",
-          arrival.eventId(), arrival.eventName(), file.path(), repoId, lookup.headSha());
+          "Event %s (%s) matched %s in %s — enqueuing a run at %s@%s",
+          arrival.eventId(), arrival.eventName(), file.path(), repoId, branch, sha);
       String runId =
           runService.onEventTrigger(
               new CiRunService.EventRun(
                   repo,
-                  TRIGGER_BRANCH,
-                  lookup.headSha(),
+                  branch,
+                  sha,
                   trigger,
                   arrival.eventId(),
                   arrival.eventName(),
@@ -385,6 +423,16 @@ public class CiEventTriggerService {
       }
     }
     return true;
+  }
+
+  /** A checkout path resolved against the payload; null when the path leads nowhere or to blank. */
+  private static String checkoutField(JsonNode payload, String path) {
+    JsonNode node = CiEventSelectionEvaluator.resolve(payload, path);
+    if (node == null) {
+      return null;
+    }
+    String value = CiEventSelectionEvaluator.asString(node);
+    return value == null || value.isBlank() ? null : value;
   }
 
   /**
@@ -455,6 +503,17 @@ public class CiEventTriggerService {
         LOG.debugf(
             "%s: %s declares %s but its selection did not match event %s",
             configured, file.path(), trigger.eventName(), arrival.eventId());
+        continue;
+      }
+      if (trigger.checkout() != null) {
+        // Refused, for now: the platform pass's contract is "the head comes from the candidate
+        // pass; no head, no run", and checkout: would build an arbitrary sha of a repository a
+        // THIRD repository's file named, with no current use case. Loud, per file, reversible —
+        // granting symmetry later is additive.
+        LOG.warnf(
+            "%s: %s declares 'checkout:', which is not supported in platform pipelines — the run"
+                + " builds the named repository's %s head; no run for event %s",
+            configured, file.path(), TRIGGER_BRANCH, arrival.eventId());
         continue;
       }
       String named = payloadRepository(payload);
