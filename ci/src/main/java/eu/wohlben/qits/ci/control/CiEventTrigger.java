@@ -16,10 +16,19 @@ import java.util.List;
  * it is recorded on the run and it is one third of the unique constraint that makes a triggered run
  * at-most-once. Two different trigger files in one repository matching the same event are two runs
  * by design; they are two declared pipelines.
+ *
+ * <p>{@code checkout} is null for every file that declares none — the run then builds the head of
+ * {@code main}, as every event trigger always has. Declared, the run builds <b>the commit the
+ * event names</b>: the two components are dot-paths into the payload, resolved per event.
  */
 public record CiEventTrigger(
     String configPath,
     String eventName,
     CiEventSelection selection,
     CiPipeline pipeline,
-    List<CiArtifact> artifacts) {}
+    List<CiArtifact> artifacts,
+    Checkout checkout) {
+
+  /** Where a run of this trigger checks out: two payload dot-paths. Null = main's head. */
+  public record Checkout(String branchPath, String shaPath) {}
+}

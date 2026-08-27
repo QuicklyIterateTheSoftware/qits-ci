@@ -78,9 +78,11 @@ import java.util.Set;
  *
  * <p>The step list keeps its own leniency unchanged, because it is the same pipeline schema and a
  * step must not mean different things in the two files. <b>The one key it subtracts is {@code
- * branches:}</b>, and subtracting is the point: an event-triggered run always builds the head of
- * {@code main}, so a branch filter there is either inert decoration or a step that can never run,
- * and both of those are silent. See {@link CiConfigSchema#stepsRejectingBranches}.
+ * branches:}</b>, and subtracting is still the point now that {@code checkout:} can name a branch:
+ * the run's branch is the trigger's single decision — resolved once, from the payload, before any
+ * step exists — so a per-step filter over it is either inert decoration or a step that can never
+ * run, and a condition over the event's branch is what {@code when:} already spells. See {@link
+ * CiConfigSchema#stepsRejectingBranches}.
  *
  * <h2>Failures are per file</h2>
  *
@@ -118,10 +120,21 @@ public class CiEventTriggerParser {
           CiConfigSchema.EVENT_KEY,
           CiConfigSchema.WHEN_KEY,
           CiConfigSchema.STEPS_KEY,
-          CiConfigSchema.ARTIFACTS_KEY);
+          CiConfigSchema.ARTIFACTS_KEY,
+          CiConfigSchema.CHECKOUT_KEY);
 
   /** The whole of an artifact declaration. Anything else in that mapping is an error. */
   private static final Set<String> ARTIFACT_KEYS = Set.of("type", "name");
+
+  /** The whole of a checkout declaration. Anything else in that mapping is an error. */
+  private static final Set<String> CHECKOUT_KEYS =
+      Set.of(CiConfigSchema.CHECKOUT_BRANCH, CiConfigSchema.CHECKOUT_SHA);
+
+  /**
+   * What a payload dot-path may spell — one rule for {@code when:}'s keys and {@code checkout:}'s
+   * values, extracted so the two grammars cannot drift.
+   */
+  private static final String DOT_PATH = "[A-Za-z_][A-Za-z0-9_-]*(\\.[A-Za-z_][A-Za-z0-9_-]*)*";
 
   /**
    * The whole matcher vocabulary, spelled in {@link CiConfigSchema} because a step's {@code
@@ -183,7 +196,8 @@ public class CiEventTriggerParser {
         // CiConfigSchema#stepsRejectingBranches. A step means one thing in both files, and where it
         // cannot mean anything it is an error rather than a second meaning.
         CiConfigSchema.stepsRejectingBranches(root, configPath),
-        parseArtifacts(root.get(CiConfigSchema.ARTIFACTS_KEY), configPath));
+        parseArtifacts(root.get(CiConfigSchema.ARTIFACTS_KEY), configPath),
+        parseCheckout(root.get(CiConfigSchema.CHECKOUT_KEY), configPath));
   }
 
   private static void rejectUnknownTopLevelKeys(Map<?, ?> root, String configPath) {
@@ -193,9 +207,76 @@ public class CiEventTriggerParser {
             configPath
                 + ": unknown top-level key '"
                 + key
-                + "' — an event trigger declares only 'event', 'when', 'steps' and 'artifacts'");
+                + "' — an event trigger declares only 'event', 'when', 'steps', 'artifacts' and"
+                + " 'checkout'");
       }
     }
+  }
+
+  /**
+   * Where a run of this trigger checks out — {@code checkout: { branch: <path>, sha: <path> }},
+   * both dot-paths into the payload, both mandatory. Null (the key absent) is today's behavior
+   * byte-for-byte: the run builds the head of {@code main}.
+   *
+   * <p><b>Both keys, not one.</b> The run row's branch is load-bearing everywhere (the daemon's
+   * clone is {@code --branch $QITS_CI_BRANCH} + checkout {@code $QITS_CI_SHA}, the announcement
+   * carries it, the queue collapse keys on it), and a sha with no branch whose history holds it is
+   * not something the daemon can fetch. So an event with no branch in its payload —
+   * {@code SCMPublishTag} — cannot use {@code checkout:} yet; its pipelines keep the script-level
+   * tag-fetch dance. Loosening later is additive; a fallback shipped now would be behavior we must
+   * keep.
+   *
+   * <p>Strict in every direction, on this file's standing reason: a checkout that silently parsed
+   * to nothing would build main's head while claiming the event's commit.
+   */
+  private static CiEventTrigger.Checkout parseCheckout(Object raw, String configPath) {
+    if (raw == null) {
+      return null;
+    }
+    if (!(raw instanceof Map<?, ?> map)) {
+      throw new CiConfigException(
+          configPath
+              + ": 'checkout' must be a mapping of { branch: <payload path>, sha: <payload path>"
+              + " }, got: "
+              + CiConfigSchema.typeOf(raw));
+    }
+    for (Object key : map.keySet()) {
+      if (!(key instanceof String name) || !CHECKOUT_KEYS.contains(name)) {
+        throw new CiConfigException(
+            configPath
+                + ": 'checkout' declares an unknown key '"
+                + key
+                + "' — it is exactly { branch, sha }");
+      }
+    }
+    return new CiEventTrigger.Checkout(
+        requireCheckoutPath(map.get(CiConfigSchema.CHECKOUT_BRANCH), configPath, "branch"),
+        requireCheckoutPath(map.get(CiConfigSchema.CHECKOUT_SHA), configPath, "sha"));
+  }
+
+  private static String requireCheckoutPath(Object value, String configPath, String member) {
+    if (value == null) {
+      throw new CiConfigException(
+          configPath
+              + ": 'checkout' declares no '"
+              + member
+              + "' — it is the payload dot-path the run checks out, e.g. '"
+              + member
+              + ": "
+              + member
+              + "'");
+    }
+    if (!(value instanceof String path) || path.isBlank() || !path.matches(DOT_PATH)) {
+      throw new CiConfigException(
+          configPath
+              + ": checkout."
+              + member
+              + " '"
+              + value
+              + "' is not a dot-path into the payload — navigation only, no wildcards, filters or"
+              + " indexing");
+    }
+    return path;
   }
 
   /**
@@ -283,7 +364,7 @@ public class CiEventTriggerParser {
               + " has a non-string path key: "
               + CiConfigSchema.typeOf(key));
     }
-    if (!path.matches("[A-Za-z_][A-Za-z0-9_-]*(\\.[A-Za-z_][A-Za-z0-9_-]*)*")) {
+    if (!path.matches(DOT_PATH)) {
       throw new CiConfigException(
           configPath
               + ": '"

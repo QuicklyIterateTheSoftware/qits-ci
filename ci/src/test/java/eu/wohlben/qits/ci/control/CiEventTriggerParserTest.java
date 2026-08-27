@@ -569,4 +569,71 @@ public class CiEventTriggerParserTest {
     assertFalse(CiTriggerScope.PLATFORM.matches(".config/qits/ci-platform-event-.yml"));
     assertFalse(CiTriggerScope.PLATFORM.matches(".config/qits/ci-platform-event-a b.yml"));
   }
+
+  // --- checkout: -------------------------------------------------------------------------------
+
+  @Test
+  public void checkoutParsesItsTwoDotPathsAndAbsenceIsNull() {
+    CiEventTrigger withCheckout =
+        parser.parse(
+            PATH,
+            """
+            event: SCMPublishCommit
+            when:
+              - repoId: { exact: qits-githost }
+            checkout:
+              branch: branch
+              sha: sha
+            steps:
+              - image: alpine:3
+                script: "true"
+            """);
+    assertEquals("branch", withCheckout.checkout().branchPath());
+    assertEquals("sha", withCheckout.checkout().shaPath());
+
+    CiEventTrigger without =
+        parser.parse(PATH, "event: X\nsteps:\n  - image: alpine:3\n    script: \"true\"\n");
+    assertEquals(null, without.checkout(), "absent checkout is today's main-head behavior");
+  }
+
+  @Test
+  public void aCheckoutMissingEitherPathOrCarryingAnythingElseIsAParseErrorNamingTheFile() {
+    // Missing sha, missing branch, unknown key, non-map, non-string value, non-dot-path value —
+    // strict in every direction: a checkout that silently parsed to nothing would build main's
+    // head while claiming the event's commit.
+    for (String broken :
+        new String[] {
+          "checkout:\n  branch: branch\n",
+          "checkout:\n  sha: sha\n",
+          "checkout:\n  branch: branch\n  sha: sha\n  ref: also\n",
+          "checkout: branch\n",
+          "checkout:\n  branch: branch\n  sha: [sha]\n",
+          "checkout:\n  branch: branch\n  sha: \"payload[0]\"\n",
+        }) {
+      CiConfigException refused =
+          assertThrows(
+              CiConfigException.class,
+              () ->
+                  parser.parse(
+                      PATH,
+                      "event: X\n"
+                          + broken
+                          + "steps:\n  - image: alpine:3\n    script: \"true\"\n"),
+              broken);
+      assertTrue(refused.getMessage().contains(PATH), refused.getMessage());
+    }
+  }
+
+  @Test
+  public void checkoutIsNoLongerAnUnknownTopLevelKeyAndTheRejectionNamesIt() {
+    CiConfigException refused =
+        assertThrows(
+            CiConfigException.class,
+            () ->
+                parser.parse(
+                    PATH,
+                    "event: X\ncheckut: {branch: b, sha: s}\n"
+                        + "steps:\n  - image: alpine:3\n    script: \"true\"\n"));
+    assertTrue(refused.getMessage().contains("'checkout'"), refused.getMessage());
+  }
 }

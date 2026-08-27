@@ -922,9 +922,19 @@ client half costs the image nothing. `quarkus-undertow` stays absent — check i
 There are **two** trigger types now, and the second one is the reason a frame-shaped consuming seam
 is needed at all.
 A repository commits `.config/qits/ci-event-<anything>.yml` naming a domain event and a selection
-over its payload; a matching event on the bus runs that file's pipeline against the head of `main`.
-The design is the superproject's `ci-event-triggers-plan.md`, the format is `README.md`, and what
-follows is what biting it feels like.
+over its payload; a matching event on the bus runs that file's pipeline — against the head of
+`main`, or, when the file declares `checkout: { branch: <path>, sha: <path> }`, against the commit
+the event's payload names ("decide at main, build at the event's commit" — discovery, parsing and
+`when:` still read `main`'s head, so a pushed branch cannot alter the CI that gates it; only the
+recorded run's branch/sha come from the payload, validated through `CiIdentifiers` because a
+payload is attacker-shaped). Recording the payload pair on the row is the whole of the mechanism:
+the clone env, the restart snapshot and `announceRun`'s `BuildSuccessful` all read those two
+columns. A checkout run's burst collapses per branch (`supersedeByCheckoutBranch`, the run queue's
+third supersede — gated on the trigger declaring checkout, because non-checkout event runs share
+"main" as a convention and must never be branch-collapsed across distinct events). Platform
+triggers refuse the key (WARN + no run). The design is the superproject's
+`ci-event-triggers-plan.md`, the format is `README.md` (see "Building the commit the event
+names"), and what follows is what biting it feels like.
 
 - **`ci/` stays free of the bus's SEAMS, in both directions.** `service/…/bus/CiEventTriggerListener`
   is the `QitsDurableEventListener` bean; it turns an `EventFrame` into

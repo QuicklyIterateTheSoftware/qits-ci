@@ -91,10 +91,13 @@ import org.jboss.logging.Logger;
  * <h2>Late delivery needs no tip check here</h2>
  *
  * <p>Catch-up delivers out of order, and a handler whose effect is last-writer-wins has to collapse
- * for itself. This one's is not: it appends a run per (event, repository, trigger file), and an event
- * trigger has always built the head of {@code main} rather than anything the event names. A minutes-old
- * event evaluated now runs today's head, which is what an event trigger means; running it is not a
- * write over anything a newer event did.
+ * for itself. This one's is not: it appends a run per (event, repository, trigger file). A trigger
+ * without {@code checkout:} builds the head of {@code main}, so a minutes-old event evaluated now
+ * runs today's head — which is what such a trigger means, and not a write over anything a newer
+ * event did. A trigger <b>with</b> {@code checkout:} builds the commit its event names, so a late
+ * event builds an old commit — equally correct (the run says something true about that commit),
+ * and the burst case is collapsed downstream by the accept-time branch supersede, which this
+ * listener neither knows nor needs to.
  *
  * <p>That hand-off is also why the frame's id is carried as <b>data</b>. {@code onFrame} runs inside
  * {@code CausationScope} of this frame's id, and that scope does not follow work onto another thread
