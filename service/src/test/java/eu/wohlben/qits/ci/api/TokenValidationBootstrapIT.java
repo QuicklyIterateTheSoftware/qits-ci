@@ -128,6 +128,24 @@ public class TokenValidationBootstrapIT {
       // its patience window with one WARN, and boot proceeds — which is the documented behaviour of
       // an orchestrator that is not up yet.
       overrides.put("qits.containers.url", "http://127.0.0.1:1");
+      // …and the patience must SHRINK with it, because the two 60-second windows collide exactly:
+      // the reap holds through "nothing answering" for its full PT60S on a StartupEvent observer,
+      // the "Listening on" line prints only after observers return, and failsafe's launcher waits
+      // 60s for precisely that line — so at the shipped patience the launcher declares the process
+      // dead moments before boot would have proceeded. Measured on this IT's first CI run
+      // (2026-08-29): Flyway done at second ten, then sixty silent seconds, then "Unable to
+      // determine the status of the running process". One second against a port that refuses
+      // instantly is still the documented give-up-and-boot path, just reached in time to be seen.
+      overrides.put("qits.ci.containers.boot-reap-patience", "PT1S");
+      // A configured daemon pin, so /ci/q/health/ready is UP. The ci-daemon-pin @Readiness check is
+      // DOWN whenever the pin ladder has SOURCE_NONE — no adopted release AND no configured version
+      // — which is exactly an isolated boot with no qits-events to adopt from. A deployment carries a
+      // pin (autoadopted or configured); this is the configured arm, which is what turns the pin's
+      // source away from NONE and the check UP without dialling anything. The value is a plausible
+      // CalVer and never resolved — no image is pulled here — it only has to be non-blank. Without
+      // it the story's own readiness beat (and cd's health gate, in prod) reads the service as not
+      // ready, which is true and beside the point of an auth story.
+      overrides.put("qits.ci.daemon-version", "2026.101.000000");
       return overrides;
     }
   }
