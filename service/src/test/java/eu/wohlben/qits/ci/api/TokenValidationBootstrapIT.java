@@ -137,6 +137,15 @@ public class TokenValidationBootstrapIT {
       // determine the status of the running process". One second against a port that refuses
       // instantly is still the documented give-up-and-boot path, just reached in time to be seen.
       overrides.put("qits.ci.containers.boot-reap-patience", "PT1S");
+      // A configured daemon pin, so /ci/q/health/ready is UP. The ci-daemon-pin @Readiness check is
+      // DOWN whenever the pin ladder has SOURCE_NONE — no adopted release AND no configured version
+      // — which is exactly an isolated boot with no qits-events to adopt from. A deployment carries a
+      // pin (autoadopted or configured); this is the configured arm, which is what turns the pin's
+      // source away from NONE and the check UP without dialling anything. The value is a plausible
+      // CalVer and never resolved — no image is pulled here — it only has to be non-blank. Without
+      // it the story's own readiness beat (and cd's health gate, in prod) reads the service as not
+      // ready, which is true and beside the point of an auth story.
+      overrides.put("qits.ci.daemon-version", "2026.101.000000");
       return overrides;
     }
   }
