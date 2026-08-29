@@ -1,7 +1,13 @@
 # The per-commit userflow run: `mvn verify` at the pushed commit — which regenerates
-# service/target/userstories/ through TokenValidationBootstrapIT — and the reports published as one
-# docs bundle, site @userflows/qits-ci, version = the bare commit sha, branch riding as artifacts
-# metadata for discovery.
+# service/target/userstories/ through the three story IT classes named below — and the reports
+# published as one docs bundle, site @userflows/qits-ci, version = the bare commit sha, branch
+# riding as artifacts metadata for discovery.
+#
+# Six stories in three categories today: `authentication` (the packaged boot's JWKS fetch and a
+# stranger's refusal), `builds` (a release event triggering a run, an event nobody selected building
+# nothing, and a step container's daemon running a step over the control socket) and `operations`
+# (an operator reading a finished build's transcript). They all drive ONE launched qits-ci, because
+# they all share one @TestProfile.
 #
 # NON-GATING BY DESIGN, which is why it is a separate file from ci-post-receive.yml: this run going
 # red must not cost the branch its image while "quality gate before merging" is still a decision to
@@ -41,8 +47,16 @@
 # them by their `extended` tag, but it is EMPTY by default on purpose (only the `native` profile
 # sets it), so that `-DskipITs=false` keeps meaning "run everything" as AGENTS.md documents. Naming
 # the class is therefore the opt-in that is correct here, and it also keeps CiPackagedSurfaceIT —
-# which is not extended-tagged and would otherwise run — out of a pipeline that is about one story:
-# `-DskipITs=false "-Dit.test=TokenValidationBootstrapIT"`.
+# which is not extended-tagged and would otherwise run — out of a pipeline that is about the stories:
+# `-DskipITs=false "-Dit.test=TokenValidationBootstrapIT,BuildExecutionIT,BuildTriggerIT"`.
+#
+# THE SEPARATOR IS A COMMA. `-Dit.test=A+B` is not a union, and failsafe silently matches nothing —
+# a pipeline that regenerates an EMPTY bundle and goes green is the failure this line exists to
+# prevent. The three classes share one @TestProfile on purpose, so all of them together cost one
+# launched qits-ci for the whole failsafe phase; adding a fourth with a profile of its own would
+# double the phase. TokenValidationBootstrapIT must stay FIRST in the list and first in the run:
+# its class name sorts ahead of the story packages, and the startup JWKS fetch it documents lands
+# in whichever story drains first.
 #
 # Loop review: this pipeline PUTs a docs bundle and pushes no commit — no cycle. Publish-if-absent:
 # events redeliver and docs versions are immutable, so 409 is success (the qits-spa-ui-components
@@ -67,7 +81,7 @@ steps:
       ./mvnw -B -ntp -s .qits-maven-settings.xml verify \
         -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
         -Dquarkus.quinoa=false \
-        -DskipITs=false "-Dit.test=TokenValidationBootstrapIT"
+        -DskipITs=false "-Dit.test=TokenValidationBootstrapIT,BuildExecutionIT,BuildTriggerIT"
 
       # `-C … .` so the story directories are the bundle's roots — nesting one directory deep would
       # put it in every served URL.

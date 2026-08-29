@@ -68,6 +68,28 @@ public class StubGitHost implements QuarkusTestResourceLifecycleManager {
   public static final Path ROOT =
       Path.of(System.getProperty("user.dir"), "target", "ci-svc-test-git-host");
 
+  /**
+   * Every request this stub answered, one {@code %m %U %s} line per request — method, raw URI
+   * (query included), answered status.
+   *
+   * <p><b>It is the only place qits-ci's outbound reads exist.</b> The consumer under test is a
+   * launched process on the far side of a socket, so nothing in this JVM is on the path of a
+   * pipeline-config read; a story's diagram gets its {@code qits-ci -> qits-githost} arrows from
+   * this file and from nowhere else (see {@code stories/support/StoryGitHost}).
+   *
+   * <p><b>A file rather than an in-memory list, deliberately.</b> This class is started by the test
+   * resource lifecycle and read by a story method, and those need not be the same classloader — a
+   * static list written by one copy is not the list the other reads, while a path is a constant
+   * both resolve identically. It also survives the surefire→failsafe JVM boundary, which is what
+   * lets a story register a <b>floor</b> and own only what happened after it.
+   *
+   * <p>It sits beside {@link #ROOT} rather than inside it, because {@link #start()} wipes that
+   * directory and a wiped recording would silently move every story's cursor.
+   */
+  public static Path requestLog() {
+    return Path.of(System.getProperty("user.dir"), "target", "story-git-host.log");
+  }
+
   private static Server shared;
 
   /** One running stub: the port it took, the base a caller configures, and what it last read. */
@@ -246,6 +268,7 @@ public class StubGitHost implements QuarkusTestResourceLifecycleManager {
 
   private static void send(HttpExchange exchange, int status, byte[] body, String sha)
       throws Exception {
+    record(exchange, status);
     if (sha != null) {
       exchange.getResponseHeaders().add(COMMIT_SHA_HEADER, sha);
     }
@@ -255,6 +278,40 @@ public class StubGitHost implements QuarkusTestResourceLifecycleManager {
       try (OutputStream out = exchange.getResponseBody()) {
         out.write(body);
       }
+    }
+  }
+
+  /**
+   * Append one answered request to {@link #requestLog()}. Called from {@link #send} rather than
+   * from the handler, so the line carries the status this stub really answered with — which is the
+   * half a method and a path cannot supply, and the whole difference between "ci asked for the
+   * config" and "ci was told there is none".
+   *
+   * <p>Never throws: a recording that could not be written must not turn a served read into a 500.
+   * A missing line costs a diagram an arrow; a thrown one would cost the suite a run.
+   */
+  private static synchronized void record(HttpExchange exchange, int status) {
+    String line =
+        exchange.getRequestMethod()
+            + " "
+            + exchange.getRequestURI().getRawPath()
+            + (exchange.getRequestURI().getRawQuery() == null
+                ? ""
+                : "?" + exchange.getRequestURI().getRawQuery())
+            + " "
+            + status
+            + "\n";
+    try {
+      Path log = requestLog();
+      Files.createDirectories(log.getParent());
+      Files.writeString(
+          log,
+          line,
+          StandardCharsets.UTF_8,
+          java.nio.file.StandardOpenOption.CREATE,
+          java.nio.file.StandardOpenOption.APPEND);
+    } catch (Exception unwritable) {
+      // See the javadoc: a recording is documentation, never a precondition of serving.
     }
   }
 

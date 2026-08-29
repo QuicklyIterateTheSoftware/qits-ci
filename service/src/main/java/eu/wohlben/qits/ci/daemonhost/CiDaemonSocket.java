@@ -26,6 +26,17 @@ import org.jboss.logging.Logger;
  * correct rather than an oversight: this socket's callers are step containers holding no idp client,
  * and its authentication is the per-container secret below.
  *
+ * <p><b>The {@code @RolesAllowed} above is not that guard, and it shuts one door earlier than the
+ * secret does.</b> websockets-next enforces it at the HTTP <em>upgrade</em>, so a dial with no
+ * identity is answered <b>401 and never reaches {@link #onOpen}</b>. The step container's daemon
+ * satisfies it by asserting the forward-auth pair itself — {@code X-Qits-User: qits-ci-daemon},
+ * {@code X-Qits-Roles: qits:system}, see {@code qits-ci-daemon}'s {@code ControlSocket.connect} —
+ * which it may because it dials this service directly on {@code qits.ci.network} and never crosses
+ * the edge that strips the {@code X-Qits-*} namespace. So the two credentials do different jobs and
+ * both are required: the role opens the route, and the secret says <em>which launch</em> this is.
+ * That is also the one thing a caller of this endpoint must not forget — a client sending only the
+ * two {@code X-Qits-Ci-Daemon-*} headers gets a 401 that looks nothing like the 1008 below.
+ *
  * <p><b>The address is a cross-repo contract.</b> {@code CiDaemonLauncher} injects {@code
  * qits.ci.container-daemon-url} (default {@code ws://qits-ci:8080/ci/daemon}) as {@code
  * $QITS_CI_DAEMON_URL} into every step container, and qits-ci-daemon dials exactly that string

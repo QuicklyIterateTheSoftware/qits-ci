@@ -230,8 +230,8 @@
         </dependency>
         <dependency>
             <!-- The user-story framework: TokenValidationBootstrapIT is written as a @UserStory,
-                 so the packaged-boot proof doubles as documentation — steps, interactions and a
-                 sequence diagram emitted under target/userstories/. Both stories are browserless
+                 so the packaged-boot proof doubles as documentation — steps, notes and an
+                 observed network diagram emitted under target/userstories/. Both stories are browserless
                  (no Flow parameter), so the transitive Playwright never launches anything. -->
             <groupId>${project.groupId}</groupId>
             <artifactId>qits-userflows</artifactId>

@@ -87,16 +87,17 @@
         <qits.arch-rules.version>2026.817.175344</qits.arch-rules.version>
         <!-- The user-story framework (test scope): TokenValidationBootstrapIT is written as a
              @UserStory, so a run of that IT also regenerates service/target/userstories/ — the
-             story's documentation, sequence diagram included. It carries its OWN version rather
-             than riding the three above, because it is released out of libs/qits-userflows and not
-             out of the qits-integrations-quarkus reactor. -->
-        <qits.userflows.version>2026.828.153026</qits.userflows.version>
+             story's documentation, network diagram included — OBSERVED rather than narrated, since
+             this version is the one that dropped Interactions.happened. It carries its OWN version
+             rather than riding the three above, because it is released out of libs/qits-userflows
+             and not out of the qits-integrations-quarkus reactor. -->
+        <qits.userflows.version>2026.829.201516</qits.userflows.version>
         <!-- The recording service mocks the same IT boots against (the generic MockService plus
              idp.MockIdp), released out of libs/qits-integrations-quarkus like qits-auth-core,
              qits-db-core and qits-arch-rules above — so the same-string policy applies the day this
              repo consumes a newer reactor, and until then it names the release the mock idp
              actually shipped in. -->
-        <qits.service-mock.version>2026.827.71232</qits.service-mock.version>
+        <qits.service-mock.version>2026.829.201505</qits.service-mock.version>
         <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
