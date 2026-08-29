@@ -1,0 +1,111 @@
+# The image build, per push — moved from ci-post-receive.yml when this repo went domain-event-only,
+# the switch qits-githost and qits-artifacts already made. `checkout:` makes it a move rather than a
+# rewrite: the run builds the pushed branch at the pushed sha, but the pipeline is DISCOVERED at main,
+# so a pushed branch can no longer alter the CI that gates it. suppressCi restates what the
+# post-receive convention did with `-o qits.no-ci`. Separate from ci-event-userflows.yml on purpose:
+# that run is non-gating, a red verify must not cost the image.
+event: SCMPublishCommit
+when:
+  - repoId: { exact: qits-ci }
+    suppressCi: { exact: "false" }
+checkout:
+  branch: branch
+  sha: sha
+steps:
+  - image: qits/build-images/node-docker-base:latest
+    docker: true
+    timeout-seconds: 3600
+    script: |
+      # The daemon runs this with `bash -c` and no -e, so without this a failed docker build is
+      # swallowed: the push fails, `docker rmi || true` answers 0, the run reports SUCCESS, and cd
+      # is told an image exists that does not (the exact shape of the qits-workspaces
+      # IMAGE_MISSING incident). -u is load-bearing too: an unset registry variable must stop the
+      # step, not quietly resolve the @qits scope against npmjs.org, where those packages do not
+      # exist and never will.
+      set -eu
+
+      # The daemon's clone does not recurse, so initialise the Angular client explicitly.
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-ci"
+      git -c submodule.qits-spa-ci.url="$frontend_url" submodule update --init service/src/main/webui
+
+      # THE LOCKFILE is the one file this step edits, and npm leaves no alternative. Same problem
+      # and same fix as qits-spa-ci's own pipeline — that repo's recipe is where this pattern is
+      # maintained, and the two should keep matching.
+      #
+      # npm pins a full resolved URL per package, and qits-spa-ci's lockfile is generated on the
+      # deployment host, so every entry names a localhost port — an address that does not exist in
+      # this container. `npm ci` fetches tarballs by that URL and never asks the configured registry
+      # for them, so the environment below does not reach them: without this swap the install dies
+      # on connection refused. The paths are identical on every address, so replacing the ORIGIN and
+      # keeping the path is all it takes, and the integrity hashes are what make that safe — bytes
+      # from the other address must still hash the same. The checkout is this step's own; nothing is
+      # edited that anyone will ever read again.
+      #
+      # THE BYTE PLANE IS TWO SERVICES SINCE THE SPLIT, WHICH IS WHY THE SWAP READS THE PATH.
+      # qits-platform-mirror holds the npmjs pull-through cache; qits-artifacts hosts the @qits
+      # scope. No single origin serves both, so the path is what tells them apart: an entry under
+      # the hosted registry's own pathname — $QITS_NPM_REGISTRY_URL's, /artifacts/npm/npm/ — is a
+      # @qits tarball and gets the hosted origin, and every other entry gets the proxy's. One sed
+      # covered both roots while they shared an origin; since the split it sends every @qits tarball
+      # to the mirror, which has never held one: 404, on every run.
+      #
+      # THE ORDER OF THE TWO EXPRESSIONS IS THE WHOLE TRICK. sed applies -e in sequence per line, so
+      # the broad proxy swap runs FIRST and the narrow path-anchored one corrects the @qits entries
+      # after it. The other order lets the broad expression undo the narrow one.
+      #
+      # npm's own knob for exactly this, `--replace-registry-host=always`, cannot do it against a
+      # registry mounted under a path, and could not have told two registries apart either.
+      # @npmcli/arborist glues rather than resolves (reify.js:
+      # `registry.slice(0, -1) + resolvedURL.pathname`), so
+      # http://qits-platform-mirror:8080/artifacts/npm/npmjs/ + /artifacts/npm/npmjs/zone.js/-/…tgz
+      # comes out as …/artifacts/npm/npmjs/artifacts/npm/npmjs/zone.js/-/…tgz and every tarball
+      # 404s. Measured on npm 10.9.4.
+      #
+      # Every address is derived from the injected env rather than spelled here: no repository
+      # states a deployment's addresses, and the two qits-spa-ci does state (in its .npmrc, for a
+      # developer on the host: registry.dev.localhost:8080 for the @qits scope and
+      # mirror.dev.localhost:8080 for npmjs) are the ones being replaced.
+      cd service/src/main/webui
+      npm_hosted_origin=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).origin')
+      npm_proxy_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
+      npm_hosted_path=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).pathname')
+      sed -i -E \
+        -e "s#(\"resolved\": \")https?://[^/\"]+#\1$npm_proxy_origin#" \
+        -e "s#(\"resolved\": \")https?://[^/\"]+($npm_hosted_path)#\1$npm_hosted_origin\2#" \
+        package-lock.json
+
+      # ENVIRONMENT, not a file. qits-spa-ci COMMITS an .npmrc (registry.dev.localhost:8080 for
+      # @qits and mirror.dev.localhost:8080 for npmjs, right for a developer on the host), and npm
+      # ranks a project .npmrc ABOVE ~/.npmrc — so a `cat > ~/.npmrc` preamble would be written and
+      # silently ignored. `npm_config_*` environment outranks both files, so it wins without
+      # touching the submodule's tree.
+      env npm_config_registry="$QITS_NPM_PROXY_URL" \
+          "npm_config_@qits:registry=$QITS_NPM_REGISTRY_URL" \
+          npm ci --no-audit --no-fund
+
+      # dist/qits-spa-ci/browser — the bundle the image build consumes (it is
+      # quarkus.quinoa.build-dir in service/src/main/resources/application.properties), and the ONE
+      # artifact this half exists to produce. Lint and test are qits-spa-ci's own pipeline's job;
+      # repeating them here would only make this repo red for someone else's commit.
+      npm run build
+      cd -
+
+      # THE CREDENTIAL IS A SECRET MOUNT AND NEVER A BUILD ARG — an arg is recorded in the image
+      # history, and this image is pullable. The launcher injects the run's commissioned idp client
+      # as $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET; these two flags hand that
+      # pair to the mounts on the Dockerfile's mvnw RUN, which is the only place it exists.
+      # Unconditional on purpose: a missing env source is NOT an error — measured on buildx v0.36.1,
+      # `--secret id=x,env=DOES_NOT_EXIST` builds green and the mounted variable is simply unset —
+      # so these lines do nothing at all until a run carries the pair.
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-ci:$QITS_CI_SHA"
+      docker build --network host \
+        --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
+        --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
+        --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
+        -t "$ref" -f docker/Dockerfile .
+      docker push "$ref"
+      # NO `docker rmi "$ref"`: on a CI host it frees nothing — the layers stay in the builder's
+      # cache either way — while under the containerd image store it drops the last reference to
+      # content a concurrent build of this same Dockerfile may still be resolving. Two builds of
+      # this one Dockerfile do run concurrently, main's and environment/dev's, which is the race
+      # that broke the release of 2026-08-11.
