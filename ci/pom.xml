@@ -5,7 +5,7 @@
     <parent>
         <groupId>eu.wohlben.qits</groupId>
         <artifactId>qits-ci</artifactId>
-        <version>2026.827.72045</version>
+        <version>2026.829.101034</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -143,6 +143,16 @@
         <dependency>
             <groupId>io.zonky.test.postgres</groupId>
             <artifactId>embedded-postgres-binaries-linux-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- A fourth, and the pipeline is what added it: the CI step containers are Alpine
+                 (musl), .config/qits/ci-event-userflows.yml runs `mvn verify` in maven-base as
+                 `user: build`, and THIS module's suite starts an embedded postgres there too — one
+                 per surefire JVM, and the reactor gives every module its own. An unnamed arch fails
+                 in the middle of that suite rather than during resolution. -->
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64-alpine</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

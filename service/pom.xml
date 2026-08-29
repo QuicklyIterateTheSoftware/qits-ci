@@ -7,7 +7,7 @@
     <parent>
         <groupId>eu.wohlben.qits</groupId>
         <artifactId>qits-ci</artifactId>
-        <version>2026.827.72045</version>
+        <version>2026.829.101034</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -229,6 +229,24 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <!-- The user-story framework: TokenValidationBootstrapIT is written as a @UserStory,
+                 so the packaged-boot proof doubles as documentation — steps, interactions and a
+                 sequence diagram emitted under target/userstories/. Both stories are browserless
+                 (no Flow parameter), so the transitive Playwright never launches anything. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-userflows</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The recording service mocks. That IT points quarkus.oidc at idp.MockIdp — a
+                 MockService plus key material: it serves the JWKS for a generated keypair, mints
+                 RS256 bearers signed by it, and records what it answered, which is what makes "the
+                 keys were fetched at startup" an assertion rather than an inference. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-service-mock</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <!-- The two stores every @QuarkusTest here boots against: this repo's own `ci`
                  datasource and the qits-eventstream jar's `eventstream` outbox, both postgres now.
                  Zonky spawns real postgres binaries as a child process — a maven dependency rather
@@ -251,6 +269,16 @@
         <dependency>
             <groupId>io.zonky.test.postgres</groupId>
             <artifactId>embedded-postgres-binaries-linux-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- A fourth, and the pipeline is what added it: the CI step containers are Alpine
+                 (musl), .config/qits/ci-event-userflows.yml runs `mvn verify` in maven-base as
+                 `user: build`, and zonky picks the -alpine binaries there at run time. An unnamed
+                 arch fails in the middle of that suite rather than during resolution, which is the
+                 whole reason the list is spelled out. -->
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64-alpine</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
