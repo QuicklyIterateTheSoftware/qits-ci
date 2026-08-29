@@ -1,0 +1,88 @@
+# The per-commit userflow run: `mvn verify` at the pushed commit — which regenerates
+# service/target/userstories/ through TokenValidationBootstrapIT — and the reports published as one
+# docs bundle, site @userflows/qits-ci, version = the bare commit sha, branch riding as artifacts
+# metadata for discovery.
+#
+# NON-GATING BY DESIGN, which is why it is a separate file from ci-post-receive.yml: this run going
+# red must not cost the branch its image while "quality gate before merging" is still a decision to
+# be taken — when it is, these per-commit runs are what the gate reads. One run per push per branch,
+# collapsed to the newest tip under burst.
+#
+# THIS REPOSITORY IS ALSO THE ENGINE, so read the file that way: the run below is executed by a
+# qits-ci that this repository's own release pipeline replaces. Nothing here publishes an image or
+# an event, so a redeploy landing mid-run costs this run and nothing else — which is another way of
+# saying non-gating.
+#
+# IT DOES NOT DISTURB ci-event-release.yml. That file publishes @apidocs/qits-ci at the released
+# VERSION off an SCMRelease; this one publishes @userflows/qits-ci at the SHA off every commit.
+# Different event, different scope, different version coordinate — and the dedupe is
+# (trigger_event_id, repo_id, config_path), so the two trigger files are two runs by construction
+# even when one event could match both.
+#
+# `user: build`, and NOT a switch inside the script: both surefire suites start zonky's embedded
+# postgres, initdb refuses to run as root and calls getpwuid, so the step needs a passwd-backed
+# non-root user — maven-base carries one (uid 1001). The step containers are Alpine, which is why
+# both poms that name zonky architectures (ci, service) carry the -alpine binaries as a fourth arch.
+# qits-eventstream's pipeline is the measured precedent for all of it.
+#
+# Quinoa is off (`-Dquarkus.quinoa=false` — the extension's root toggle; `.enabled` is silently
+# ignored and npm runs anyway): the Angular client is ci-post-receive.yml's business, where the
+# qits-spa-ci submodule is initialised and its lockfile origins are swapped, and none of that ritual
+# belongs here — the IT asserts nothing about the SPA. It is also what keeps this step from needing
+# the submodule at all: the daemon's clone does not recurse, so service/src/main/webui arrives empty
+# and Quinoa treats an empty directory as a misconfiguration and fails the build on exactly that.
+# The packaged fast-jar failsafe boots is otherwise exactly what ships.
+#
+# THE TWO IT FLAGS ARE THE OTHER HALF, and they are why this repository does NOT opt its service
+# module back into ITs wholesale. `skipITs` is true in the root pom because three docker-backed
+# gates bind to the same failsafe run — CiDaemonHandshakeIT, CiDaemonGateIT and
+# CiDaemonContainerProbeIT, which need real docker, a published step image, a built qits-ci-daemon
+# binary and a container route back to the JVM. The root pom's `qits.it.excluded-groups` would drop
+# them by their `extended` tag, but it is EMPTY by default on purpose (only the `native` profile
+# sets it), so that `-DskipITs=false` keeps meaning "run everything" as AGENTS.md documents. Naming
+# the class is therefore the opt-in that is correct here, and it also keeps CiPackagedSurfaceIT —
+# which is not extended-tagged and would otherwise run — out of a pipeline that is about one story:
+# `-DskipITs=false "-Dit.test=TokenValidationBootstrapIT"`.
+#
+# Loop review: this pipeline PUTs a docs bundle and pushes no commit — no cycle. Publish-if-absent:
+# events redeliver and docs versions are immutable, so 409 is success (the qits-spa-ui-components
+# release file's discipline, and ci-event-release.yml's beside it).
+event: SCMPublishCommit
+when:
+  - repoId: { exact: qits-ci }
+    suppressCi: { exact: "false" }
+checkout:
+  branch: branch
+  sha: sha
+steps:
+  - image: qits/build-images/maven-base:latest
+    user: build
+    timeout-seconds: 2400
+    script: |
+      set -eu
+      # The platform registry, exactly as qits-eventstream's step derives it: the pom's default
+      # names a host-published address unreachable from a step container, and the exact-id mirror
+      # in .qits-maven-settings.xml is what passes Maven's HTTP blocker.
+      export QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL"
+      ./mvnw -B -ntp -s .qits-maven-settings.xml verify \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
+        -Dquarkus.quinoa=false \
+        -DskipITs=false "-Dit.test=TokenValidationBootstrapIT"
+
+      # `-C … .` so the story directories are the bundle's roots — nesting one directory deep would
+      # put it in every served URL.
+      tar -czf userstories.tgz -C service/target/userstories .
+
+      # Branch and commit ride as metadata (the docs store's exact-match discovery keys); the
+      # version is the sha itself, so a bundle URL never changes meaning.
+      status=$(curl -sS -o /tmp/docs-publish.out -w '%{http_code}' \
+        -X PUT --data-binary @userstories.tgz \
+        -H "X-Artifacts-Meta-git.branch.name: $QITS_CI_BRANCH" \
+        -H "X-Artifacts-Meta-git.commit.hash: $QITS_CI_SHA" \
+        -H "X-Artifacts-Meta-git.repository.name: qits-ci" \
+        "$QITS_DOCS_URL/@userflows/qits-ci/-/$QITS_CI_SHA")
+      case "$status" in
+        201) echo "published userflows for qits-ci@$QITS_CI_SHA ($QITS_CI_BRANCH)" ;;
+        409) echo "userflows for qits-ci@$QITS_CI_SHA already published — skipping" ;;
+        *)   echo "docs publish failed: HTTP $status"; cat /tmp/docs-publish.out; exit 1 ;;
+      esac

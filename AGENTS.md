@@ -1598,6 +1598,41 @@ contract, tested where it lives.
   "never registered" with nothing in any log to say why. It dials with credentials no registry can
   know and asserts the **upgrade succeeds and the server then closes 1008** — a missing route fails
   the upgrade with a 404 instead.
+- **`api/TokenValidationBootstrapIT` is the second test against the artifact, and it is the only
+  place the OIDC tenant is ever ON.** The shipped tenant is gated —
+  `quarkus.oidc.tenant-enabled=${qits.auth.machine.required:false}` — and every suite here leaves
+  that gate shut, so the block this service deploys with (auth-server-url + `jwks-path=jwks` against
+  a real listener, audience enforcement, the `groups` claim becoming roles) is exercised nowhere
+  else. `MachineGuardTest` comes closest and stops exactly where this one starts: it flips the same
+  gate but installs its identity with `@TestSecurity` + `@OidcSecurity` claims, so nothing there
+  fetches a key or validates a signature. The far side is qits-service-mock's `MockIdp`, which
+  serves a real JWKS for a generated keypair, mints RS256 bearers against it and **records what it
+  answered** — so "the service fetched the keys at startup" is an assertion and not an inference.
+  <br>Its `@TestProfile` **extends `CiPackagedSurfaceIT.PackagedUnderTarget`** rather than copying
+  it — what a launched qits-ci needs in order to boot is one answer, and the two `QITS_RESOURCE_*`
+  triples with their system-property parking are written out over there — and adds only the gate,
+  the mock idp's address, and the four keys a host-run process needs because it has no deployment
+  behind it: otel dark, the bus dark, the daemon autoadopt discovery off (its own separate dial to
+  `qits.events.url`), and `qits.containers.url` at an address nothing answers, because the boot reap
+  is a `StartupEvent` observer that skips TEST mode and a launched artifact really would ask a
+  reachable orchestrator to delete this owner's containers.
+  <br>The guarded route both stories present a bearer to is `GET /ci/api/runs/active`: a plain read
+  of ci's own rows that dials no other service, class-level `{qits:admin, qits:system}` so the
+  machine role a platform peer holds is enough, and parameterless — so an empty answer is still a
+  200 and the story stays about who may read.
+  <br>It is also this repo's first **userflow**: two `@UserStory` methods in category
+  `authentication`, browserless (an `Interactions` parameter and no `Flow`, so the transitive
+  Playwright launches nothing), emitting `service/target/userstories/` — the proof doubling as
+  documentation, sequence diagram included. The class orderer is installed the one way Quarkus
+  permits, `junit.quarkus.orderer.secondary-orderer` in this module's test properties; a local
+  `junit-platform.properties` hard-fails surefire. `.config/qits/ci-event-userflows.yml` is the
+  non-gating per-commit pipeline that regenerates and publishes them as the docs bundle
+  `@userflows/qits-ci`.
+  <br>**`skipITs` stays `true` and this IT does not flip it.** The three docker-backed gates bind to
+  the same failsafe run, and `qits.it.excluded-groups` — which would drop them by their `extended`
+  tag — is empty by default on purpose. So the opt-in is per-run and per-class,
+  `-DskipITs=false "-Dit.test=TokenValidationBootstrapIT"`, which is exactly what the pipeline
+  passes and what also keeps `CiPackagedSurfaceIT` out of a run that is about one story.
 - `CiDaemonSocketTest` drives the real socket with a real WebSocket from `FakeCiDaemon`, an in-JVM
   dialler framing the real protocol exactly as the binary does. The host cannot tell it from a
   container, which is the point: admission, framing, dispatch and the blocking bridge are all
