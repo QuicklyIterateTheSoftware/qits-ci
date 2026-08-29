@@ -1613,17 +1613,32 @@ contract, tested where it lives.
   triples with their system-property parking are written out over there — and adds only the gate,
   the mock idp's address, and the four keys a host-run process needs because it has no deployment
   behind it: otel dark, the bus dark, the daemon autoadopt discovery off (its own separate dial to
-  `qits.events.url`), and `qits.containers.url` at an address nothing answers, because the boot reap
-  is a `StartupEvent` observer that skips TEST mode and a launched artifact really would ask a
-  reachable orchestrator to delete this owner's containers.
+  `qits.events.url`), and `qits.containers.url` — which used to be an address nothing answers on,
+  because the boot reap is a `StartupEvent` observer that skips TEST mode and a launched artifact
+  really would ask a reachable orchestrator to delete this owner's containers, and is now the
+  **recording stand-in** the build stories need (below).
+  <br>**That profile is now shared by every story class in this repository, and that is the rule
+  rather than an accident.** A `@TestProfile` is what decides whether failsafe launches another
+  process, so one profile is one launched qits-ci for the whole failsafe phase; every seam any story
+  class needs — the mock idp, the orchestrator stand-in, the gate — lives in this one file. Adding a
+  story class with a profile of its own would double the phase and give the second process a
+  different port, a different database and an empty run history.
   <br>The guarded route both stories present a bearer to is `GET /ci/api/runs/active`: a plain read
   of ci's own rows that dials no other service, class-level `{qits:admin, qits:system}` so the
   machine role a platform peer holds is enough, and parameterless — so an empty answer is still a
   200 and the story stays about who may read.
-  <br>It is also this repo's first **userflow**: two `@UserStory` methods in category
+  <br>It is also this repo's **first** userflow: two `@UserStory` methods in category
   `authentication`, browserless (an `Interactions` parameter and no `Flow`, so the transitive
   Playwright launches nothing), emitting `service/target/userstories/` — the proof doubling as
-  documentation, sequence diagram included. The class orderer is installed the one way Quarkus
+  documentation, network diagram included. **The diagram is observed, not narrated**: `Interactions`
+  records notes only, the framework's `NetworkTaps.restAssured` taps what a story sends *into* this
+  service, and `MockIdp`'s recording is registered as a cumulative `NetworkCapture.source` for what
+  this service sent *out*. That tap was a hand-copied `StoryNetworkFilter` beside the IT until
+  2026-08-29; the framework ships it now, idempotent per service, so the local copy is **deleted**
+  and every story class installs the same one from its own `@BeforeAll`. The framework drains both
+  at story end, which is why the two stories are `@Order`ed — a cursor attributes each recorded
+  request to exactly one story, so the startup JWKS fetch lands in whichever story drains first and
+  that must be the story about it. The class orderer is installed the one way Quarkus
   permits, `junit.quarkus.orderer.secondary-orderer` in this module's test properties; a local
   `junit-platform.properties` hard-fails surefire. `.config/qits/ci-event-userflows.yml` is the
   non-gating per-commit pipeline that regenerates and publishes them as the docs bundle
@@ -1631,13 +1646,76 @@ contract, tested where it lives.
   <br>**`skipITs` stays `true` and this IT does not flip it.** The three docker-backed gates bind to
   the same failsafe run, and `qits.it.excluded-groups` — which would drop them by their `extended`
   tag — is empty by default on purpose. So the opt-in is per-run and per-class,
-  `-DskipITs=false "-Dit.test=TokenValidationBootstrapIT"`, which is exactly what the pipeline
-  passes and what also keeps `CiPackagedSurfaceIT` out of a run that is about one story.
+  `-DskipITs=false "-Dit.test=TokenValidationBootstrapIT,BuildExecutionIT,BuildTriggerIT"`, which is
+  exactly what the pipeline passes (note **commas**, never a plus) and what also keeps
+  `CiPackagedSurfaceIT` out of a run that is about the stories.
+- **`stories/` is the rest of the userflow catalogue, and it is where this service's own domain
+  flows are documented.** Four stories in three categories, all against the same launched artifact
+  and all browserless:
+
+  | class | story | category |
+  |---|---|---|
+  | `stories/build/BuildTriggerIT` | A release event triggers a build | `builds` |
+  | | An event nobody declared an interest in builds nothing | `builds` |
+  | `stories/build/BuildExecutionIT` | A build step connects to qits-ci and streams its output | `builds` |
+  | | An operator reads a finished build's transcript | `operations` |
+
+  Five things about them are worth knowing before adding a sixth:
+
+  - **Four planes are tapped and every one of them is passive.** `NetworkTaps.restAssured` draws
+    what a story sent in; `stories/support/StoryGitHost` reads the stub git host's own request log
+    back as `qits-ci -> qits-githost` edges; `stories/support/MockContainers` does the same for the
+    orchestrator; and the control socket — for which the framework ships no tap — is instrumented at
+    the call sites in `stories/support/StoryDaemon` with `NetworkCapture.observe`, `socket` for the
+    dial the container makes and `event` per frame in whichever direction it was pushed. Both
+    file-backed taps register a **floor** at their first `install()` and are cumulative and
+    prefix-stable, which is what the framework's per-source cursor requires: a skipped line is never
+    in the list, so skipping cannot shift an earlier story's slice while moving a floor would.
+  - **The story learns the daemon's secret the way a container learns it.** `MockContainers` records
+    request **bodies** (which `MockService` does not, deliberately: it records what a diagram needs
+    and nothing a credential lives in), so `StoryDaemon` reads `QITS_CI_DAEMON_ID` and
+    `QITS_CI_DAEMON_SECRET` out of the workload spec qits-ci actually sent. Nothing reads the host's
+    launch table, which is what makes an admitted dial a measurement of the whole path rather than a
+    fixture with privileged access.
+  - **The handshake carries two credentials and forgetting the second costs the whole plane.**
+    `CiDaemonSocket` is `@RolesAllowed("qits:system")`, enforced at the HTTP *upgrade*, so the
+    per-container secret alone gets a **401 before `@OnOpen` runs**. The real binary asserts
+    `X-Qits-User: qits-ci-daemon` / `X-Qits-Roles: qits:system` itself (`ControlSocket.connect`),
+    which it may because the dial is intra-network and never crosses the edge that strips that
+    namespace. `FakeCiDaemon` now sends both pairs; it did not, and no suite could see it, because
+    every test that dials it in TEST mode inherits the forward-auth `dev` identity, which already
+    holds `qits:system`. Measured against a deployed qits-ci on 2026-08-29 as a raw
+    `HTTP/1.1 401 Unauthorized` on the upgrade. **`CiPackagedSurfaceIT`'s socket probe was red on
+    exactly this** and nothing noticed, because CI names its IT classes and never named that one.
+  - **Fixture setup is invisible to both taps by construction.** `stories/support/StoryOrigin`
+    writes a bare repository onto the stub git host's disk with a plain `ProcessBuilder` `git` — no
+    RestAssured call and no HTTP to the stub — so nothing a story did *not* do appears in its
+    diagram. It also waits out `HttpGitHostRepoListing`'s five-second candidate cache after
+    publishing: a repository created inside that window is one the engine has not heard of, and the
+    event that should have matched it comes back `runIds: []` with nothing skipped, which reads
+    exactly like a correct verdict.
+  - **The repository ids are fixed and readable, never UUIDs.** `Labels` rewrites a whole UUID path
+    segment to `{id}`, so a generated id would make every git-host label read
+    `GET /git/{id}/tree/main` and say nothing about which repository ci went to. `StoryOrigin`
+    deletes and recreates, so fixed still means known. The same rule drives `MockContainers`
+    templating the step container's name to `{container}` by hand: `qits-ci-<run>-<hash>-<index>` is
+    not a shape the default scrubber recognises, so a raw name would move the story's `networkHash`
+    on every run and the only symptom is a hash that never settles.
+
+  What is out of reach here and stays with the `extended` gates: a real step image, a real
+  `qits-ci-daemon` binary and a real docker daemon. `CiDaemonGateIT` owns those. What these stories
+  add is that they need none of them, so the flow is documented on every ordinary build.
 - `CiDaemonSocketTest` drives the real socket with a real WebSocket from `FakeCiDaemon`, an in-JVM
   dialler framing the real protocol exactly as the binary does. The host cannot tell it from a
   container, which is the point: admission, framing, dispatch and the blocking bridge are all
   provable with no docker and no published binary, and only the round trip through a real image is
   left to the gate.
+  <br>**Its handshake carries four headers, not two.** The two `X-Qits-Ci-Daemon-*` are the launch
+  credential `@OnOpen` checks; `X-Qits-User: qits-ci-daemon` / `X-Qits-Roles: qits:system` are what
+  gets past `CiDaemonSocket`'s `@RolesAllowed`, which websockets-next enforces at the **upgrade**.
+  A `@QuarkusTest` cannot see the difference — the forward-auth `%test` `dev` identity already holds
+  `qits:system` — so this was invisible until a packaged story dialled and got a 401. Never drop
+  them, and never assume a socket assertion that passes in TEST mode passes against the artifact.
 - `CiDaemonHandshakeIT` is the **phase-B gate**: a real container from `buildpack-deps:scm` (verified
   to carry git, bash, wget *and* curl — the whole image contract), a real download of the daemon
   binary from a file-served stand-in, a real dial back, a real step. Tagged `extended`, run with

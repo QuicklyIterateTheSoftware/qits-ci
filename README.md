@@ -103,7 +103,7 @@ rest of qits it reaches over a URL it is configured with:
 | in | `GET /ci/api/repositories/summary` → `{"repositories": [{repositoryId, projectId, repoName, lastRun, lastMainRun}]}` — ascending by id, full run objects, `lastMainRun` null when there is none, and the name pair null for a repository whose pushes were id-addressed | same; it is the id listing plus the two runs a client would otherwise make a request per repository to find |
 | in | `GET /ci/api/daemon` → `{"daemonName", "daemonVersion", "previousDaemonVersion", "source"}` — the pin ladder's top rung (an adopted release, else the configured pin), never a run row; blank `daemonVersion` and `source: "none"` mean this deployment has pinned none | same; read fail-closed by qits-artifacts' daemon GC and readable by the client |
 | in | `POST /ci/api/runs/{runId}/cancel` → 202, 409 on a run that has already finished | same: no machine guard, behind the deployment's auth policy |
-| in | `ws://…/ci/daemon` — the socket each step container's daemon dials **out** to | authenticated by a host-minted per-container secret, not by a machine token |
+| in | `ws://…/ci/daemon` — the socket each step container's daemon dials **out** to | two credentials and no machine token: the daemon asserts `X-Qits-User`/`X-Qits-Roles: qits:system` to get past the endpoint's `@RolesAllowed` at the **upgrade**, and the host-minted per-container secret is what `@OnOpen` checks |
 | out | where the git host answers: ci reads a commit's pipeline config off its content routes — `<base>/git/<projectId>/<repoName>/blob/<rev>/<path>` and `…/tree/<rev>[/<path>]` for a run whose push carried the public pair, `<base>/git/<repoId>/…` for one that did not — and, with no `qits.ci.projects-url` set, its candidate listing off `GET <base>/git` → `{"repositories": [...]}` | `qits.ci.git-host-url` |
 | out | `GET <base>/projects/api/repositories` → `{"repositories": [{id, projectId, name, mainBranch}]}` — the candidate list an arriving event is evaluated against, and the only place the public `(projectId, name)` pair can be read. **Unset by default**: with no value ci falls back to the git host's storage listing, which is what a pre-cutover platform and a clone-alone build need | `qits.ci.projects-url` |
 | out | the same, as reachable **from a step container** on the shared network | `qits.ci.container-git-url` |
@@ -980,7 +980,9 @@ completion starts the next one, and no state crosses steps. Per step:
    `$QITS_CI_DAEMON_BINARY_URL`, `chmod +x`, `exec`. Nothing about the repository is interpolated
    into that text — the whole contract rides as environment. The image contract is therefore `git`,
    `bash`, and a downloader (`wget` **or** `curl`).
-2. **Register.** The daemon **dials out** to `ws://…/ci/daemon` presenting its id and secret.
+2. **Register.** The daemon **dials out** to `ws://…/ci/daemon` presenting its id and secret — plus
+   the `X-Qits-*` role pair the endpoint's `@RolesAllowed` demands at the upgrade, without which the
+   dial is a 401 that never reaches admission.
    qits-ci never dials in and never learns an address from a container.
 3. **Initialize.** The daemon does its own shallow clone and checks out the pushed sha, then says so
    — or reports a structured failure. A checkout that cannot find the commit is how a force-push
