@@ -1,7 +1,6 @@
 event: SoftwareRelease
 when:
-  - repository: { exact: qits-integrations-quarkus }
-    packageType: { exact: maven }
+  - packageType: { exact: maven }
     packageName: { exact: "eu.wohlben.qits:qits-auth-core" }
 steps:
   - image: qits/build-images/maven-base:latest

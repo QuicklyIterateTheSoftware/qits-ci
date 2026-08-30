@@ -1,7 +1,6 @@
 event: SoftwareRelease
 when:
-  - repository: { exact: qits-eventstream }
-    packageType: { exact: maven }
+  - packageType: { exact: maven }
     packageName: { exact: "eu.wohlben.qits:qits-eventstream" }
 steps:
   - image: qits/build-images/maven-base:latest
