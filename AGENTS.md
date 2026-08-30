@@ -122,7 +122,7 @@ because that module is published to no registry and the clone-alone rule is not 
 **Never edit this copy.** The daemon repo owns the contract; a change lands there, bumps
 `CiDaemonProtocol.CAPABILITY_VERSION`, and is re-copied whole:
 
-    diff -r ../../daemons/qits-ci-daemon/ci-daemon-protocol/src ci-daemon-protocol/src
+    diff -r ../qits-ci-daemon/ci-daemon-protocol/src ci-daemon-protocol/src
 
 must be silent. `CiDaemonCodecTest` travels with the copy and runs on both sides, so a drift fails a
 build rather than a socket. A "small fix" applied here instead is how the workspace pair drifted once
@@ -215,9 +215,9 @@ behind the edge it is both vhosts, and every entry carries the same commissioned
 one identity at one idp whatever hostname fronts it.
 
 **`DOCKER_BUILDKIT=1` and `BUILDX_NO_DEFAULT_ATTESTATIONS=1` ride along on the same docker-only
-scope.** Every step image ships buildx as of qits-oci 2026.814.110556, so a legacy build here is a
-*silent fallback* rather than an image with no choice — and a silent fallback is what quietly drops a
-`--secret` mount. The first flag turns that into a loud error; the second keeps a push a single
+scope.** Every step image ships buildx as of qits-build-images-oci 2026.814.110556, so a legacy
+build here is a *silent fallback* rather than an image with no choice — and a silent fallback is
+what quietly drops a `--secret` mount. The first flag turns that into a loud error; the second keeps a push a single
 manifest, because buildx attaches provenance and SBOM attestations by default and the platform
 registry expects one manifest per tag. Neither is a credential, so both reach a docker step on a
 deployment that commissions nothing.
@@ -540,7 +540,8 @@ class-level one rather than adding to it; a route both a person and a machine re
 
 ## The Angular client
 
-`service/src/main/webui` is the [qits-spa-ci](https://github.com/QuicklyIterateTheSoftware/qits-spa-ci)
+`service/src/main/webui` is the
+[qits-ci-frontend](https://github.com/QuicklyIterateTheSoftware/qits-ci-frontend)
 submodule, built and served by Quinoa. The path is Quinoa's default `web-ui-dir`, so it is a
 convention rather than a setting, and the four config keys that are settings live in
 `application.properties` under "the Angular client" with their reasoning beside them.
@@ -609,7 +610,8 @@ the client). Every claim in this section is a measurement that test now repeats.
 
 ## The event bus
 
-`eventstream/` is the [qits-eventstream](https://github.com/QuicklyIterateTheSoftware/qits-eventstream)
+`eventstream/` is the
+[qits-eventstream-javalib](https://github.com/QuicklyIterateTheSoftware/qits-eventstream-javalib)
 repository, a **submodule** — the platform's event bus client (`QitsEvent`, `QitsEventBus.publish`,
 `QitsEventListener`, `QitsRawEventListener`, `QitsDurableEventListener`, `CausationScope`). It used
 to be a directory here, a
@@ -1403,8 +1405,8 @@ migration to point at. `baseline-on-migrate` is gone with the H2 file it existed
 ## Authentication
 
 **Two identity tracks, and nothing in this repo implements either.** Both arrive in the
-`qits-auth-core` jar (`integrations/qits-integrations-quarkus/`), and `service/pom.xml` says so in a
-comment beside the dependency. There is no `security` package here any more, and no filter.
+`qits-auth-core` jar (`components/qits-integrations/qits-integrations-quarkus-javalib/`), and
+`service/pom.xml` says so in a comment beside the dependency. There is no `security` package here any more, and no filter.
 
 **Users** are headers. `ForwardAuthMechanism` reads `X-Qits-User` and `X-Qits-Roles` into a
 `SecurityIdentity`; this service authenticates no person. The platform edge establishes the

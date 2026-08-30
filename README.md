@@ -66,7 +66,7 @@ Beneath the segment sits the kind of surface: `/ci/api/…` for the JSON API
 `quarkus.rest.path` and so has to carry the segment separately).
 
 `/` is the **Angular client**: the
-[qits-spa-ci](https://github.com/QuicklyIterateTheSoftware/qits-spa-ci) submodule at
+[qits-ci-frontend](https://github.com/QuicklyIterateTheSoftware/qits-ci-frontend) submodule at
 `service/src/main/webui`, built by Quinoa into the packaged artifact and served from it, with deep
 links falling back to `index.html` so the client's own router handles them — `/runs/<id>` and the
 scoped `/<projectSlug>/<category>/<repoName>/runs/<id>` alike. `/ci` and `/ci/` are **404** now: the
@@ -158,7 +158,8 @@ instant in each answer. It needs no `?limit=`: what is active is bounded by acce
 configured worker pool, not by uptime. It became answerable only when a queued run became a row
 (below).
 
-The push sender is [qits-githost](https://github.com/QuicklyIterateTheSoftware/qits-githost), which
+The push sender is
+[qits-githost-service](https://github.com/QuicklyIterateTheSoftware/qits-githost-service), which
 publishes one `SCMPublishCommit` per successfully updated branch ref through the qits-eventstream
 outbox. qits-ci consumes it durably (`bus/ScmPublishCommitListener`, consumer id `ci-push-runs`).
 
@@ -177,7 +178,7 @@ push back off the log instead. Two consequences worth stating:
   subscribe, which is why `EventstreamDarknessTest` asserts the bean exists.
 
 **The arrangement does NOT repeat one hop down, and it used to.** A green run was announced to
-[qits-platform-deployments](https://github.com/QuicklyIterateTheSoftware/qits-platform-deployments)'s
+[qits-deployments-platform-service](https://github.com/QuicklyIterateTheSoftware/qits-deployments-platform-service)'s
 `/platform-deployments/api/events/build-succeeded` by `service/…/notify/PdBuildNotifier`, behind a
 `PdNotifier` seam in `ci/control`, on every green run. **That whole idiom is retired** — the
 notifier, the `PdBearer` credential it carried, the `qits.platform.deployments.intake-url` key and
@@ -203,7 +204,7 @@ configures no address for the deployer at all, and presents a credential to nobo
 `quarkus.oidc-client` extension went with `PdBearer`.
 
 **A green run is announced to nobody in particular.** The transition publishes a
-`BuildSuccessful` event to [qits-events](https://github.com/QuicklyIterateTheSoftware/qits-events),
+`BuildSuccessful` event to [qits-events-platform-service](https://github.com/QuicklyIterateTheSoftware/qits-events-platform-service),
 through the `RunAnnouncer` seam in `ci/control`, implemented by
 `service/…/bus/BuildSuccessfulAnnouncer`. Only `SUCCESS` announces — a red run, a `TIMED_OUT` run, a
 `CONFIG_ERROR` and a discarded run announce nothing. It is a *statement* anything on the platform may subscribe to
@@ -256,7 +257,7 @@ cause and says so**: an event-triggered run's `BuildSuccessful` carries the even
 and a push-triggered run's carries the `SCMPublishCommit` that announced the push — which is what
 makes release → push → build → deploy one chain rather than two halves with a root in the middle.
 A root is what is left for a run nothing announced. The rules that bite are in AGENTS.md under "The event bus" and, for the library itself, in
-qits-eventstream's own AGENTS.md.
+qits-eventstream-javalib's own AGENTS.md.
 
 Both halves are **dark in `%dev` and `%test`** (`qits.eventstream.enabled`), the same posture the
 OTLP exporter takes, and a deployment without a qits-events is a supported configuration in exactly
