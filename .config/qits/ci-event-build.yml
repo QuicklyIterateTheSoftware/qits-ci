@@ -6,7 +6,11 @@
 # that run is non-gating, a red verify must not cost the image.
 event: SCMPublishCommit
 when:
-  - repoId: { exact: qits-ci }
+  # repoName, not repoId: the git host's own coordinate can be an opaque UUID since the
+  # identity cutover, so a name match on repoId is not dependable. The push event echoes the
+  # public name the push was addressed with, which always is; a rename updates this line in
+  # the same campaign.
+  - repoName: { exact: qits-ci-service }
     suppressCi: { exact: "false" }
 checkout:
   branch: branch
@@ -25,14 +29,14 @@ steps:
       set -eu
 
       # The daemon's clone does not recurse, so initialise the Angular client explicitly.
-      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-ci"
-      git -c submodule.qits-spa-ci.url="$frontend_url" submodule update --init service/src/main/webui
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-ci-frontend"
+      git -c submodule.qits-ci-frontend.url="$frontend_url" submodule update --init service/src/main/webui
 
       # THE LOCKFILE is the one file this step edits, and npm leaves no alternative. Same problem
-      # and same fix as qits-spa-ci's own pipeline — that repo's recipe is where this pattern is
+      # and same fix as qits-ci-frontend's own pipeline — that repo's recipe is where this pattern is
       # maintained, and the two should keep matching.
       #
-      # npm pins a full resolved URL per package, and qits-spa-ci's lockfile is generated on the
+      # npm pins a full resolved URL per package, and qits-ci-frontend's lockfile is generated on the
       # deployment host, so every entry names a localhost port — an address that does not exist in
       # this container. `npm ci` fetches tarballs by that URL and never asks the configured registry
       # for them, so the environment below does not reach them: without this swap the install dies
@@ -62,7 +66,7 @@ steps:
       # 404s. Measured on npm 10.9.4.
       #
       # Every address is derived from the injected env rather than spelled here: no repository
-      # states a deployment's addresses, and the two qits-spa-ci does state (in its .npmrc, for a
+      # states a deployment's addresses, and the two qits-ci-frontend does state (in its .npmrc, for a
       # developer on the host: registry.dev.localhost:8080 for the @qits scope and
       # mirror.dev.localhost:8080 for npmjs) are the ones being replaced.
       cd service/src/main/webui
@@ -74,7 +78,7 @@ steps:
         -e "s#(\"resolved\": \")https?://[^/\"]+($npm_hosted_path)#\1$npm_hosted_origin\2#" \
         package-lock.json
 
-      # ENVIRONMENT, not a file. qits-spa-ci COMMITS an .npmrc (registry.dev.localhost:8080 for
+      # ENVIRONMENT, not a file. qits-ci-frontend COMMITS an .npmrc (registry.dev.localhost:8080 for
       # @qits and mirror.dev.localhost:8080 for npmjs, right for a developer on the host), and npm
       # ranks a project .npmrc ABOVE ~/.npmrc — so a `cat > ~/.npmrc` preamble would be written and
       # silently ignored. `npm_config_*` environment outranks both files, so it wins without
@@ -85,7 +89,7 @@ steps:
 
       # dist/qits-spa-ci/browser — the bundle the image build consumes (it is
       # quarkus.quinoa.build-dir in service/src/main/resources/application.properties), and the ONE
-      # artifact this half exists to produce. Lint and test are qits-spa-ci's own pipeline's job;
+      # artifact this half exists to produce. Lint and test are qits-ci-frontend's own pipeline's job;
       # repeating them here would only make this repo red for someone else's commit.
       npm run build
       cd -

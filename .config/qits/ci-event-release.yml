@@ -43,7 +43,7 @@
 # not roll.
 event: SCMRelease
 when:
-  - repository: { exact: qits-ci }
+  - repository: { exact: qits-ci-service }
 artifacts:
   - { type: docker, name: qits/qits-ci }
   - { type: docs, name: "@apidocs/qits-ci" }
@@ -87,8 +87,8 @@ steps:
       # --- half one: the bundle -----------------------------------------------------------------
       # Initialise the Angular client explicitly. See ci-post-receive.yml for why the lockfile
       # origins are rewritten and why the registry is passed as environment rather than as a file.
-      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-ci"
-      git -c submodule.qits-spa-ci.url="$frontend_url" submodule update --init service/src/main/webui
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-ci-frontend"
+      git -c submodule.qits-ci-frontend.url="$frontend_url" submodule update --init service/src/main/webui
 
       cd service/src/main/webui
       # TWO SERVICES since the byte-plane split, so the swap reads the PATH: an entry under the
