@@ -10,7 +10,7 @@ import java.time.Instant;
 /**
  * Turns one published artifact into the platform's {@code SoftwareRelease} event and hands it to the
  * bus. The {@link ReleaseAnnouncer} port's sole production implementation, and the sibling of {@link
- * BuildSuccessfulAnnouncer} in every structural respect: it lives here because the {@code ci} module
+ * BuildAnnouncer} in every structural respect: it lives here because the {@code ci} module
  * knows nothing of the bus, and zero implementations is a supported configuration.
  *
  * <p><b>One artifact, one call, one event.</b> The fan-out is the caller's — {@code CiRunService}

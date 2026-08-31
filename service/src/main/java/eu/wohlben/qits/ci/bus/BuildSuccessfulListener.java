@@ -10,7 +10,7 @@ import org.jboss.logging.Logger;
 
 /**
  * Consumes {@code BuildSuccessful} off the bus and says so. The consuming end of this service's
- * event-bus wiring; {@link BuildSuccessfulAnnouncer} is the other, and the fact that they are the
+ * event-bus wiring; {@link BuildAnnouncer} is the other, and the fact that they are the
  * <b>same service</b> is the point rather than an oddity: qits-ci publishes an event, qits-events
  * records and broadcasts it, and qits-ci receives its own announcement back. That round trip is the
  * acceptance test for the whole bus, and this bean is where it becomes visible.

@@ -1,5 +1,6 @@
 package eu.wohlben.qits.ci.bus;
 
+import eu.wohlben.qits.ci.events.BuildFailed;
 import eu.wohlben.qits.ci.events.BuildSuccessful;
 import eu.wohlben.qits.ci.events.SoftwareRelease;
 import eu.wohlben.qits.eventstream.control.EventEnvelope;
@@ -91,6 +92,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 @RegisterForReflection(
     targets = {
       BuildSuccessful.class,
+      BuildFailed.class,
       SoftwareRelease.class,
       SCMPublishCommit.class,
       EventEnvelope.class,

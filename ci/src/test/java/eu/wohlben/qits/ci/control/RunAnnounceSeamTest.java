@@ -15,8 +15,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The {@link RunAnnouncer} seam's semantics: exactly one announcement per green run, carrying the
- * run's own coordinates, and <b>nothing</b> for a red run or a config error.
+ * The {@link RunAnnouncer} seam's semantics: exactly one announcement per finished run that says
+ * something true about its commit — the green kind for a green run, the failure kind (with the
+ * terminal status's own word) for a red run or a config error — and <b>nothing</b> for a cancelled
+ * one.
  *
  * <p>It is the whole of what a green run announces. There was a second port beside it —
  * {@code PdNotifier}, a direct POST to qits-platform-deployments' intake — and this file used to say
@@ -29,8 +31,9 @@ import org.junit.jupiter.api.Test;
  * to be the timestamp on the run's own row — what the announcement says happened is the run
  * finishing, not the announcement being made.
  *
- * <p>What the production implementation does with the announcement (build a {@code BuildSuccessful},
- * hand it to the bus, land a PUT) is {@code BuildSuccessfulPublishTest}'s job in the service module.
+ * <p>What the production implementation does with the announcement (build a {@code BuildSuccessful}
+ * or {@code BuildFailed}, hand it to the bus, land a PUT) is {@code BuildSuccessfulPublishTest}'s
+ * job in the service module.
  */
 @QuarkusTest
 public class RunAnnounceSeamTest extends CiTestSupport {
@@ -66,6 +69,7 @@ public class RunAnnounceSeamTest extends CiTestSupport {
 
     CiRun run = service.runsFor(repoId).get(0);
     assertEquals(1, announcer.announced().size());
+    assertEquals(List.of(), announcer.failed(), "green and red are exclusive verdicts");
     FakeRunAnnouncer.Announced announced = announcer.announced().get(0);
     assertEquals(run.id, announced.runId());
     assertEquals(repoId, announced.repoId());
@@ -84,23 +88,34 @@ public class RunAnnounceSeamTest extends CiTestSupport {
   }
 
   @Test
-  public void aRedRunAnnouncesNothing() {
+  public void aRedRunAnnouncesItsFailureAndNeverTheGreenEvent() {
     seedConfig(CONFIG_ONE_STEP);
     fakeRunner.script(
         0, new CiStepRunner.StepResult(1, false, CiStepRunner.StepOutcome.OK, "boom"));
     service.execute(repoId, "main", sha);
 
+    CiRun run = service.runsFor(repoId).get(0);
     assertEquals(List.of(), announcer.announced());
+    assertEquals(1, announcer.failed().size());
+    FakeRunAnnouncer.AnnouncedFailure failure = announcer.failed().get(0);
+    assertEquals(run.id, failure.runId());
+    assertEquals(repoId, failure.repoId());
+    assertEquals("main", failure.branch());
+    assertEquals(sha, failure.commitSha());
+    assertEquals("FAILED", failure.outcome());
+    assertNotNull(failure.finishedAt(), "an event with no occurredAt is a 400 on the wire");
   }
 
   @Test
-  public void aConfigErrorAnnouncesNothing() {
-    // A CONFIG_ERROR run never reaches the terminal transition this port hangs off — nothing built,
-    // so nothing built successfully.
+  public void aConfigErrorAnnouncesItsFailureWithItsOwnWord() {
+    // A CONFIG_ERROR run never reaches the step loop, but it is a terminal verdict about the
+    // commit — a pipeline that cannot be parsed cannot be built — so the ledger hears about it.
     seedConfig("steps: [unclosed\n");
     service.execute(repoId, "main", sha);
 
     assertEquals(List.of(), announcer.announced());
+    assertEquals(1, announcer.failed().size());
+    assertEquals("CONFIG_ERROR", announcer.failed().get(0).outcome());
   }
 
   @Test

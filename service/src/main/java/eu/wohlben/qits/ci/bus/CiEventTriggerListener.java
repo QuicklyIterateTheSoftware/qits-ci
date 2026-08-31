@@ -14,7 +14,7 @@ import org.jboss.logging.Logger;
  * plain strings.
  *
  * <p>It is the third bean in this package and the same shape as the other two — {@code
- * BuildSuccessfulAnnouncer} adapts a {@code ci/control} port outward, this adapts the bus inward, and
+ * BuildAnnouncer} adapts a {@code ci/control} port outward, this adapts the bus inward, and
  * both exist so the {@code ci} module never imports {@code eu.wohlben.qits.eventstream}. Registration
  * is "be a bean": {@code EventDispatcher} injects {@code Instance<QitsDurableEventListener>}, which
  * is what ArC counts as a use, so no {@code @Unremovable} and no annotation beyond the scope.

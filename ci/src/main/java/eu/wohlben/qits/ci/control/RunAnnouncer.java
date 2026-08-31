@@ -22,7 +22,7 @@ import java.time.Instant;
  * is never null: the wire contract makes {@code occurredAt} mandatory.
  *
  * <p>An interface rather than a call so this module stays free of the bus and its transport: the
- * sole production implementation is {@code service/…/bus/BuildSuccessfulAnnouncer}. It is resolved
+ * sole production implementation is {@code service/…/bus/BuildAnnouncer}. It is resolved
  * via {@code Instance} and absent is a supported configuration — a deployment with no qits-events
  * runs CI exactly as before, and announces nothing at all.
  *
@@ -51,7 +51,7 @@ public interface RunAnnouncer {
    * instead; it would read null, because the engine consumed the frame on the socket's dispatch
    * thread and this call happens later on {@code ci-run-worker}. A thread-local does not follow work,
    * deliberately. So the id travels durably on {@code CiRun.triggerEventId} and arrives here as an
-   * argument, and {@code BuildSuccessfulAnnouncer} hands it to {@code publish(event, parent)} — where
+   * argument, and {@code BuildAnnouncer} hands it to {@code publish(event, parent)} — where
    * an explicit non-null argument outranks the ambient context by design, precisely for this case.
    */
   void onRunSucceeded(
@@ -61,6 +61,26 @@ public interface RunAnnouncer {
       String repoName,
       String branch,
       String commitSha,
+      Instant finishedAt,
+      String triggerEventId);
+
+  /**
+   * A run went red: {@code outcome} is the terminal status's own word — {@code FAILED}, {@code
+   * TIMED_OUT} or {@code CONFIG_ERROR} — carried as a plain {@code String} for the reason every
+   * parameter here is one. What never reaches this method is as much of the contract as what does:
+   * a {@code CANCELLED} run announces nothing (a person withdrew the question), and a run
+   * superseded by a newer push announces nothing (its row is bookkeeping about the queue, not a
+   * fact about the commit). Everything else — the field meanings, the causation argument, the
+   * must-not-block caveat — is {@link #onRunSucceeded}'s, unchanged.
+   */
+  void onRunFailed(
+      String runId,
+      String repoId,
+      String projectId,
+      String repoName,
+      String branch,
+      String commitSha,
+      String outcome,
       Instant finishedAt,
       String triggerEventId);
 }
