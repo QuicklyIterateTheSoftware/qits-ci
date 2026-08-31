@@ -46,6 +46,7 @@ public record CiRunDto(
     String repoName,
     String branch,
     String commitSha,
+    boolean gating,
     CiRunStatus status,
     Instant createdAt,
     Instant startedAt,

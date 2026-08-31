@@ -58,6 +58,16 @@ final class CiConfigSchema {
    */
   static final String CHECKOUT_KEY = "checkout";
 
+  /**
+   * Whether a red run of this pipeline should stand in the way of releasing its commit — trigger
+   * files only, default {@code true}. The platform's userflow pipelines are the reason it exists:
+   * they are non-gating by design ("a red story costs a fix-forward cycle, not an image"), and the
+   * release-quality-gates build gate needs that stated as data rather than known by file name. A
+   * push run is always gating, so the key would be inert in {@code ci-post-receive.yml} — the same
+   * two-way rule as {@code checkout:}.
+   */
+  static final String GATING_KEY = "gating";
+
   static final String CHECKOUT_BRANCH = "branch";
 
   static final String CHECKOUT_SHA = "sha";

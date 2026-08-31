@@ -27,7 +27,7 @@ class BuildSuccessfulTest {
 
   private static BuildSuccessful anEvent() {
     return new BuildSuccessful(
-        "run-1", "repo-uuid", "qits", "qits-ci", "main", "0123456789abcdef", "sha256:deadbeef",
+        "run-1", "repo-uuid", "qits", "qits-ci", "main", "0123456789abcdef", "sha256:deadbeef", null,
         FINISHED);
   }
 
@@ -94,7 +94,7 @@ class BuildSuccessfulTest {
   void aPipelineThatPublishedNoImageOmitsTheDigestRatherThanNullingIt() {
     BuildSuccessful noImage =
         new BuildSuccessful(
-            "run-2", "qits-ci", "qits", "qits-ci", "main", "0123456789abcdef", null, FINISHED);
+            "run-2", "qits-ci", "qits", "qits-ci", "main", "0123456789abcdef", null, null, FINISHED);
 
     String payload = CanonicalJson.payload(noImage);
 
@@ -121,7 +121,7 @@ class BuildSuccessfulTest {
     // existed.
     BuildSuccessful idOnly =
         new BuildSuccessful(
-            "run-3", "qits-ci", null, null, "main", "0123456789abcdef", null, FINISHED);
+            "run-3", "qits-ci", null, null, "main", "0123456789abcdef", null, null, FINISHED);
 
     String payload = CanonicalJson.payload(idOnly);
 
@@ -132,6 +132,22 @@ class BuildSuccessfulTest {
         "{\"branch\":\"main\",\"commitSha\":\"0123456789abcdef\","
             + "\"finishedAt\":\"2026-07-31T12:46:03Z\",\"repoId\":\"qits-ci\",\"runId\":\"run-3\"}",
         payload);
+  }
+
+  @Test
+  void aGatingRunOmitsTheFlagAndOnlyANonGatingOneWritesIt() {
+    // Null means gating: every gating build's payload stays byte-identical to what shipped before
+    // the field existed, and a subscriber reads absent as gating.
+    assertFalse(CanonicalJson.payload(anEvent()).contains("gating"));
+
+    BuildSuccessful nonGating =
+        new BuildSuccessful(
+            "run-4", "qits-ci", null, null, "main", "0123456789abcdef", null, false, FINISHED);
+    assertEquals(
+        "{\"branch\":\"main\",\"commitSha\":\"0123456789abcdef\","
+            + "\"finishedAt\":\"2026-07-31T12:46:03Z\",\"gating\":false,"
+            + "\"repoId\":\"qits-ci\",\"runId\":\"run-4\"}",
+        CanonicalJson.payload(nonGating));
   }
 
   @Test

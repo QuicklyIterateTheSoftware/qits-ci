@@ -23,6 +23,7 @@ public class FakeRunAnnouncer implements RunAnnouncer {
       String repoName,
       String branch,
       String commitSha,
+      boolean gating,
       Instant finishedAt,
       String triggerEventId) {}
 
@@ -33,6 +34,7 @@ public class FakeRunAnnouncer implements RunAnnouncer {
       String repoName,
       String branch,
       String commitSha,
+      boolean gating,
       String outcome,
       Instant finishedAt,
       String triggerEventId) {}
@@ -61,11 +63,20 @@ public class FakeRunAnnouncer implements RunAnnouncer {
       String repoName,
       String branch,
       String commitSha,
+      boolean gating,
       Instant finishedAt,
       String triggerEventId) {
     announced.add(
         new Announced(
-            runId, repoId, projectId, repoName, branch, commitSha, finishedAt, triggerEventId));
+            runId,
+            repoId,
+            projectId,
+            repoName,
+            branch,
+            commitSha,
+            gating,
+            finishedAt,
+            triggerEventId));
   }
 
   @Override
@@ -76,6 +87,7 @@ public class FakeRunAnnouncer implements RunAnnouncer {
       String repoName,
       String branch,
       String commitSha,
+      boolean gating,
       String outcome,
       Instant finishedAt,
       String triggerEventId) {
@@ -87,6 +99,7 @@ public class FakeRunAnnouncer implements RunAnnouncer {
             repoName,
             branch,
             commitSha,
+            gating,
             outcome,
             finishedAt,
             triggerEventId));

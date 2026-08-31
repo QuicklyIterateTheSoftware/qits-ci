@@ -32,6 +32,8 @@ components:
           type: string
         commitSha:
           type: string
+        gating:
+          type: boolean
         status:
           $ref: "#/components/schemas/CiRunStatus"
         createdAt:
@@ -439,4 +441,4 @@ paths:
         - qits:admin
 info:
   title: qits-ci API
-  version: 2026.829.140445
+  version: 2026.830.143642

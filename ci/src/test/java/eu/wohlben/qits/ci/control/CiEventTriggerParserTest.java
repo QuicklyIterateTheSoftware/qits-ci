@@ -42,6 +42,31 @@ public class CiEventTriggerParserTest {
     assertEquals(1, trigger.selection().groups().size());
     Group group = trigger.selection().groups().get(0);
     assertEquals(2, group.conditions().size(), "a group's map entries are AND'd");
+    assertTrue(trigger.gating(), "absent gating is true — the conservative default");
+  }
+
+  // --- gating ---
+
+  @Test
+  public void gatingFalseParsesAndAnythingElseIsAParseError() {
+    // The userflow pipelines' key: a red story must not stand in the way of releasing the commit.
+    CiEventTrigger nonGating =
+        parser.parse(
+            PATH,
+            """
+            event: BuildSuccessful
+            gating: false
+            steps: []
+            """);
+    assertFalse(nonGating.gating());
+
+    // Strict on this file's standing reason: a gating flag that silently parsed to a default would
+    // decide who may release with nobody having said so.
+    CiConfigException e =
+        assertThrows(
+            CiConfigException.class,
+            () -> parser.parse(PATH, "event: BuildSuccessful\ngating: nope\nsteps: []\n"));
+    assertTrue(e.getMessage().contains("gating"), e.getMessage());
   }
 
   // --- the two-way rule ---

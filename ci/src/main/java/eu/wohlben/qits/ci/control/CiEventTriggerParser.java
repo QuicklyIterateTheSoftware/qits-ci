@@ -121,6 +121,7 @@ public class CiEventTriggerParser {
           CiConfigSchema.WHEN_KEY,
           CiConfigSchema.STEPS_KEY,
           CiConfigSchema.ARTIFACTS_KEY,
+          CiConfigSchema.GATING_KEY,
           CiConfigSchema.CHECKOUT_KEY);
 
   /** The whole of an artifact declaration. Anything else in that mapping is an error. */
@@ -197,6 +198,7 @@ public class CiEventTriggerParser {
         // cannot mean anything it is an error rather than a second meaning.
         CiConfigSchema.stepsRejectingBranches(root, configPath),
         parseArtifacts(root.get(CiConfigSchema.ARTIFACTS_KEY), configPath),
+        parseGating(root.get(CiConfigSchema.GATING_KEY), configPath),
         parseCheckout(root.get(CiConfigSchema.CHECKOUT_KEY), configPath));
   }
 
@@ -207,10 +209,27 @@ public class CiEventTriggerParser {
             configPath
                 + ": unknown top-level key '"
                 + key
-                + "' — an event trigger declares only 'event', 'when', 'steps', 'artifacts' and"
-                + " 'checkout'");
+                + "' — an event trigger declares only 'event', 'when', 'steps', 'artifacts',"
+                + " 'gating' and 'checkout'");
       }
     }
+  }
+
+  /**
+   * {@code gating: false} is the whole of what the key may say — absent is {@code true}, and on
+   * this file's standing rule anything that is not a YAML boolean is an error rather than a guess:
+   * a gating flag that silently parsed to a default would let a red pipeline block releases nobody
+   * meant it to block, or wave through one somebody did.
+   */
+  private static boolean parseGating(Object raw, String configPath) {
+    if (raw == null) {
+      return true;
+    }
+    if (raw instanceof Boolean gating) {
+      return gating;
+    }
+    throw new CiConfigException(
+        configPath + ": 'gating' must be true or false, got: " + raw);
   }
 
   /**

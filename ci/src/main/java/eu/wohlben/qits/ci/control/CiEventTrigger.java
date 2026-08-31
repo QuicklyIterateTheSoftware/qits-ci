@@ -20,6 +20,11 @@ import java.util.List;
  * <p>{@code checkout} is null for every file that declares none — the run then builds the head of
  * {@code main}, as every event trigger always has. Declared, the run builds <b>the commit the
  * event names</b>: the two components are dot-paths into the payload, resolved per event.
+ *
+ * <p>{@code gating} is {@code true} unless the file says {@code gating: false} — whether a red run
+ * of this pipeline should stand in the way of releasing its commit. It rides the run row onto the
+ * build events, where the release-quality-gates build gate reads it; the userflow pipelines are the
+ * ones that say false.
  */
 public record CiEventTrigger(
     String configPath,
@@ -27,6 +32,7 @@ public record CiEventTrigger(
     CiEventSelection selection,
     CiPipeline pipeline,
     List<CiArtifact> artifacts,
+    boolean gating,
     Checkout checkout) {
 
   /** Where a run of this trigger checks out: two payload dot-paths. Null = main's head. */

@@ -1073,6 +1073,7 @@ public class CiRunService {
             run.repoName,
             run.branch,
             run.commitSha,
+            run.gating,
             finishedAt,
             run.triggerEventId);
       } catch (RuntimeException e) {
@@ -1103,6 +1104,7 @@ public class CiRunService {
             run.repoName,
             run.branch,
             run.commitSha,
+            run.gating,
             outcome.name(),
             finishedAt,
             run.triggerEventId);
@@ -1416,6 +1418,7 @@ public class CiRunService {
     run.triggerEventOccurredAt = request.occurredAt();
     run.triggerEventPayload = request.payload();
     run.triggerConfig = request.triggerConfig();
+    run.gating = request.trigger().gating();
     runs.persist(run);
     runs.flush();
     supersedeByVersion(run, request);

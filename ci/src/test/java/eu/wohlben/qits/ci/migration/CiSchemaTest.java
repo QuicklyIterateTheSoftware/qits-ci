@@ -84,8 +84,8 @@ public class CiSchemaTest {
       connection.setAutoCommit(false);
       try (PreparedStatement run =
           connection.prepareStatement(
-              "insert into ci_run (id, repo_id, branch, commit_sha, status, created_at,"
-                  + " trigger_type, config_path) values (?, 'schema-probe', 'main', '0', ?,"
+              "insert into ci_run (id, repo_id, branch, commit_sha, gating, status, created_at,"
+                  + " trigger_type, config_path) values (?, 'schema-probe', 'main', '0', true, ?,"
                   + " current_timestamp, ?, '.config/qits/ci-post-receive.yml')")) {
         int i = 0;
         for (CiRunStatus status : CiRunStatus.values()) {
@@ -135,9 +135,9 @@ public class CiSchemaTest {
       connection.setAutoCommit(false);
       try (PreparedStatement run =
           connection.prepareStatement(
-              "insert into ci_run (id, repo_id, project_id, repo_name, branch, commit_sha, status,"
-                  + " created_at, trigger_type, config_path) values (?, 'schema-probe', ?, ?,"
-                  + " 'main', '0', 'QUEUED', current_timestamp, 'POST_RECEIVE',"
+              "insert into ci_run (id, repo_id, project_id, repo_name, branch, commit_sha, gating,"
+                  + " status, created_at, trigger_type, config_path) values (?, 'schema-probe', ?,"
+                  + " ?, 'main', '0', true, 'QUEUED', current_timestamp, 'POST_RECEIVE',"
                   + " '.config/qits/ci-post-receive.yml')")) {
         run.setString(1, "identity-probe-named");
         run.setString(2, "qits");

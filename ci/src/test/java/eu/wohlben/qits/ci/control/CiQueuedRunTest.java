@@ -331,7 +331,29 @@ public class CiQueuedRunTest extends CiTestSupport {
     assertEquals(CiRunStatus.SUCCESS, soleRun(repoId).status);
   }
 
+  // --- gating, as data on the row ---
+
+  @Test
+  public void aTriggersGatingFlagLandsOnTheRowAndAPushRunIsAlwaysGating() throws Exception {
+    // The userflows case: a trigger saying `gating: false` records a run whose red outcome must
+    // not stand in the way of releasing the commit. A push run has no key to say it with — it is
+    // gating by construction.
+    String eventRepo = "consumer-" + UUID.randomUUID();
+    service.onEventTrigger(eventRun(eventRepo, UUID.randomUUID().toString(), false));
+    service.awaitIdle();
+    assertFalse(soleRun(eventRepo).gating, "the trigger said gating: false");
+
+    String pushRepo = seedRepo();
+    announcePush(pushRepo, shaOf(pushRepo));
+    service.awaitIdle();
+    assertTrue(soleRun(pushRepo).gating, "a push run is always gating");
+  }
+
   private CiRunService.EventRun eventRun(String repoId, String eventId) {
+    return eventRun(repoId, eventId, true);
+  }
+
+  private CiRunService.EventRun eventRun(String repoId, String eventId, boolean gating) {
     return new CiRunService.EventRun(
         CiRepoRef.of(repoId),
         "main",
@@ -344,6 +366,7 @@ public class CiQueuedRunTest extends CiTestSupport {
                 List.of(
                     new CiPipeline.CiStepDecl("alpine:3", "echo bump", null, false, "", List.of()))),
             List.of(), // declares no artifact: this run announces a build and nothing more
+            gating,
             null), // no checkout: builds main's head, as every trigger did before the key
         eventId,
         "BuildSuccessful",
