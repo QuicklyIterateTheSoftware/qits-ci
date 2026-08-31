@@ -39,6 +39,11 @@ public interface RunAnnouncer {
    * A run went green. {@code triggerEventId} is <b>the event that caused this run</b>, or null when
    * nothing did — which is every push, and a push publishing a chain root is correct.
    *
+   * <p>{@code gating} is the run row's own flag: whether a red outcome of this pipeline should
+   * stand in the way of releasing the commit. Carried on both announcements so the release
+   * quality gate reads it as data; green-and-non-gating still announces, because a verdict is a
+   * verdict whichever way a reader weighs it.
+   *
    * <p>{@code repoId} is the storage id and is always set; {@code projectId} and {@code repoName}
    * are the public {@code (project, name)} pair off the run's own row, present when the announcing
    * push arrived name-addressed and null when it did not. They ride the event so the deployer names
@@ -61,6 +66,7 @@ public interface RunAnnouncer {
       String repoName,
       String branch,
       String commitSha,
+      boolean gating,
       Instant finishedAt,
       String triggerEventId);
 
@@ -80,6 +86,7 @@ public interface RunAnnouncer {
       String repoName,
       String branch,
       String commitSha,
+      boolean gating,
       String outcome,
       Instant finishedAt,
       String triggerEventId);

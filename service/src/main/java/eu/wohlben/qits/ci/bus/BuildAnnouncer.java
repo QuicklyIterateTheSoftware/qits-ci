@@ -59,10 +59,13 @@ public class BuildAnnouncer implements RunAnnouncer {
       String repoName,
       String branch,
       String commitSha,
+      boolean gating,
       Instant finishedAt,
       String triggerEventId) {
     bus.publish(
-        new BuildSuccessful(runId, repoId, projectId, repoName, branch, commitSha, null, finishedAt),
+        new BuildSuccessful(
+            runId, repoId, projectId, repoName, branch, commitSha, null, wireGating(gating),
+            finishedAt),
         CausingEvent.parentOf(triggerEventId, runId));
   }
 
@@ -74,11 +77,22 @@ public class BuildAnnouncer implements RunAnnouncer {
       String repoName,
       String branch,
       String commitSha,
+      boolean gating,
       String outcome,
       Instant finishedAt,
       String triggerEventId) {
     bus.publish(
-        new BuildFailed(runId, repoId, projectId, repoName, branch, commitSha, outcome, finishedAt),
+        new BuildFailed(
+            runId, repoId, projectId, repoName, branch, commitSha, wireGating(gating), outcome,
+            finishedAt),
         CausingEvent.parentOf(triggerEventId, runId));
+  }
+
+  /**
+   * Null means gating on the wire, so every gating build's canonical payload stays byte-identical
+   * to what shipped before the field existed; only a non-gating run writes {@code false}.
+   */
+  private static Boolean wireGating(boolean gating) {
+    return gating ? null : Boolean.FALSE;
   }
 }

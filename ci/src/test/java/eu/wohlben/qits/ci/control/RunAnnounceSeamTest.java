@@ -75,6 +75,7 @@ public class RunAnnounceSeamTest extends CiTestSupport {
     assertEquals(repoId, announced.repoId());
     assertEquals("main", announced.branch());
     assertEquals(sha, announced.commitSha());
+    assertTrue(announced.gating(), "a push run is always gating");
     assertNotNull(announced.finishedAt(), "an event with no occurredAt is a 400 on the wire");
 
     // The same instant as the row's, to within the microsecond H2 ROUNDS the column to — the two

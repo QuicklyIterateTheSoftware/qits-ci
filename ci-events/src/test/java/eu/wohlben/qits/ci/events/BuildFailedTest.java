@@ -25,7 +25,7 @@ class BuildFailedTest {
 
   private static BuildFailed anEvent() {
     return new BuildFailed(
-        "run-1", "repo-uuid", "qits", "qits-ci", "main", "0123456789abcdef", "FAILED", FINISHED);
+        "run-1", "repo-uuid", "qits", "qits-ci", "main", "0123456789abcdef", null, "FAILED", FINISHED);
   }
 
   @Test
@@ -87,7 +87,7 @@ class BuildFailedTest {
   void anIdAddressedPushOmitsTheNamePairRatherThanNullingIt() {
     BuildFailed idOnly =
         new BuildFailed(
-            "run-3", "qits-ci", null, null, "main", "0123456789abcdef", "TIMED_OUT", FINISHED);
+            "run-3", "qits-ci", null, null, "main", "0123456789abcdef", null, "TIMED_OUT", FINISHED);
 
     String payload = CanonicalJson.payload(idOnly);
 
@@ -98,6 +98,25 @@ class BuildFailedTest {
         "{\"branch\":\"main\",\"commitSha\":\"0123456789abcdef\","
             + "\"finishedAt\":\"2026-07-31T12:46:03Z\",\"outcome\":\"TIMED_OUT\","
             + "\"repoId\":\"qits-ci\",\"runId\":\"run-3\"}",
+        payload);
+  }
+
+  @Test
+  void aGatingRunOmitsTheFlagAndOnlyANonGatingOneWritesIt() {
+    // Null means gating: every gating build's payload stays byte-identical to what shipped before
+    // the field existed, and a subscriber reads absent as gating.
+    assertFalse(CanonicalJson.payload(anEvent()).contains("gating"));
+
+    BuildFailed nonGating =
+        new BuildFailed(
+            "run-4", "repo-uuid", "qits", "qits-ci", "main", "0123456789abcdef", false, "FAILED",
+            FINISHED);
+    String payload = CanonicalJson.payload(nonGating);
+    assertEquals(
+        "{\"branch\":\"main\",\"commitSha\":\"0123456789abcdef\","
+            + "\"finishedAt\":\"2026-07-31T12:46:03Z\",\"gating\":false,\"outcome\":\"FAILED\","
+            + "\"projectId\":\"qits\",\"repoId\":\"repo-uuid\",\"repoName\":\"qits-ci\","
+            + "\"runId\":\"run-4\"}",
         payload);
   }
 

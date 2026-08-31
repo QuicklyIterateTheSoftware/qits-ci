@@ -20,8 +20,10 @@ import java.util.UUID;
  * here: {@code occurredAt} is {@code finishedAt}; {@code eventId} is generated when absent, final
  * once set, and travels in the envelope rather than the payload; {@code repoId} is the storage id
  * and always set, while {@code projectId} and {@code repoName} ride together when the announcing
- * push arrived name-addressed and are omitted from the canonical payload when it did not. There is
- * no {@code imageDigest}: a failed run published nothing worth naming.
+ * push arrived name-addressed and are omitted from the canonical payload when it did not; {@code
+ * gating} is <b>null for a gating run</b> and an explicit {@code false} only for a non-gating one,
+ * so absent reads as gating. There is no {@code imageDigest}: a failed run published nothing worth
+ * naming.
  */
 public record BuildFailed(
     UUID eventId,
@@ -31,6 +33,7 @@ public record BuildFailed(
     String repoName,
     String branch,
     String commitSha,
+    Boolean gating,
     String outcome,
     Instant finishedAt)
     implements QitsEvent {
@@ -49,9 +52,10 @@ public record BuildFailed(
       String repoName,
       String branch,
       String commitSha,
+      Boolean gating,
       String outcome,
       Instant finishedAt) {
-    this(null, runId, repoId, projectId, repoName, branch, commitSha, outcome, finishedAt);
+    this(null, runId, repoId, projectId, repoName, branch, commitSha, gating, outcome, finishedAt);
   }
 
   @Override

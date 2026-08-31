@@ -81,6 +81,15 @@ public class CiRun extends PanacheEntityBase implements CausedRow {
   @Column(name = "commit_sha", nullable = false, length = 64)
   public String commitSha;
 
+  /**
+   * Whether a red outcome of this run should stand in the way of releasing its commit. True for
+   * every push run and for every event run whose trigger file does not say {@code gating: false} —
+   * the userflow pipelines are the ones that do. Initialized true so no writer can forget it into
+   * the primitive default, which points the wrong way.
+   */
+  @Column(nullable = false)
+  public boolean gating = true;
+
   @Enumerated(EnumType.STRING)
   @Column(nullable = false, length = 32)
   public CiRunStatus status;

@@ -35,6 +35,12 @@ import java.util.UUID;
  * tests and publishes nothing is an ordinary green build, and an id-addressed push announces no name
  * — and a null field is omitted from the canonical payload rather than written as an explicit null,
  * so an id-addressed push stays byte-identical on the wire.
+ *
+ * <p>{@code gating} rides the same convention pointed the other way: <b>null means gating</b> — a
+ * red outcome of this pipeline would have stood in the way of releasing the commit — and only a
+ * non-gating run (a trigger file saying {@code gating: false}; the userflow pipelines) writes an
+ * explicit {@code false}. So every gating build's payload is byte-identical to what shipped before
+ * the field existed, and a subscriber reads absent as gating.
  */
 public record BuildSuccessful(
     UUID eventId,
@@ -45,6 +51,7 @@ public record BuildSuccessful(
     String branch,
     String commitSha,
     String imageDigest,
+    Boolean gating,
     Instant finishedAt)
     implements QitsEvent {
 
@@ -63,8 +70,11 @@ public record BuildSuccessful(
       String branch,
       String commitSha,
       String imageDigest,
+      Boolean gating,
       Instant finishedAt) {
-    this(null, runId, repoId, projectId, repoName, branch, commitSha, imageDigest, finishedAt);
+    this(
+        null, runId, repoId, projectId, repoName, branch, commitSha, imageDigest, gating,
+        finishedAt);
   }
 
   @Override
