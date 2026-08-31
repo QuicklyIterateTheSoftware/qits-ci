@@ -405,8 +405,11 @@ public class CiRunService {
     sweepInterrupted();
   }
 
-  /** What one sweep found: work to restart and counts worth exposing in the startup log. */
-  private record Sweep(List<String> requeue, int failed, int restartedEvents) {}
+  /** What one sweep found: work to restart, and the runs it failed — announced after the commit. */
+  private record Sweep(List<String> requeue, List<FailedOrphan> failed, int restartedEvents) {}
+
+  /** One orphaned run the sweep marked FAILED, with the instant the row was stamped with. */
+  private record FailedOrphan(CiRun run, Instant finishedAt) {}
 
   /**
    * The sweep itself — package-private because {@link #onStart} skips test mode, so this is what a
@@ -424,9 +427,16 @@ public class CiRunService {
       LOG.warnf(e, "Could not sweep interrupted CI runs at startup");
       return;
     }
-    if (sweep.failed() > 0) {
+    if (!sweep.failed().isEmpty()) {
       LOG.infof(
-          "Marked %d CI run(s) left RUNNING by a previous shutdown as FAILED", sweep.failed());
+          "Marked %d CI run(s) left RUNNING by a previous shutdown as FAILED",
+          sweep.failed().size());
+      // After the commit, like the re-enqueue below and for the same reason turned outward: a
+      // consumer told the run failed must be able to read the terminal row back. An interrupted
+      // run is a real failure of a real commit, so the per-commit ledger hears about it too.
+      for (FailedOrphan orphan : sweep.failed()) {
+        announceFailedRun(orphan.run(), orphan.finishedAt(), CiRunStatus.FAILED);
+      }
     }
     if (sweep.restartedEvents() > 0) {
       LOG.infof(
@@ -441,7 +451,7 @@ public class CiRunService {
 
   private Sweep reconcile() {
     List<CiRun> orphans = runs.list("status = ?1", CiRunStatus.RUNNING);
-    int failed = 0;
+    List<FailedOrphan> failed = new ArrayList<>();
     int restartedEvents = 0;
     for (CiRun orphan : orphans) {
       if (orphan.triggerType == CiTriggerType.EVENT && orphan.triggerConfig != null) {
@@ -454,7 +464,7 @@ public class CiRunService {
         failIncompleteSteps(orphan.id);
         orphan.status = CiRunStatus.FAILED;
         orphan.finishedAt = Instant.now();
-        failed++;
+        failed.add(new FailedOrphan(orphan, orphan.finishedAt));
       }
     }
 
@@ -647,8 +657,12 @@ public class CiRunService {
     } catch (RuntimeException e) {
       LOG.errorf(e, "CI run %s failed unexpectedly", run.id);
       QuarkusTransaction.requiringNew().run(() -> failIncompleteSteps(run.id));
-      finishRun(
-          run.id, cancelled.contains(run.id) ? CiRunStatus.CANCELLED : CiRunStatus.FAILED);
+      CiRunStatus outcome =
+          cancelled.contains(run.id) ? CiRunStatus.CANCELLED : CiRunStatus.FAILED;
+      Instant finishedAt = finishRun(run.id, outcome);
+      if (outcome == CiRunStatus.FAILED) {
+        announceFailedRun(run, finishedAt, outcome);
+      }
     } finally {
       cancelled.remove(run.id);
       runner.runClosed(run.id);
@@ -791,7 +805,7 @@ public class CiRunService {
       }
       case INVALID -> {
         LOG.infof("CI config unusable at %s@%s: %s", repoId, sha, lookup.message());
-        finishRun(run.id, CiRunStatus.CONFIG_ERROR);
+        announceFailedRun(run, finishRun(run.id, CiRunStatus.CONFIG_ERROR), CiRunStatus.CONFIG_ERROR);
         return;
       }
       case FOUND -> {
@@ -804,7 +818,7 @@ public class CiRunService {
       pipeline = parser.parse(lookup.content());
     } catch (CiConfigException e) {
       LOG.infof("CI config error at %s@%s: %s", repoId, sha, e.getMessage());
-      finishRun(run.id, CiRunStatus.CONFIG_ERROR);
+      announceFailedRun(run, finishRun(run.id, CiRunStatus.CONFIG_ERROR), CiRunStatus.CONFIG_ERROR);
       return;
     }
 
@@ -819,8 +833,12 @@ public class CiRunService {
     } catch (RuntimeException e) {
       LOG.errorf(e, "CI run %s failed unexpectedly", run.id);
       QuarkusTransaction.requiringNew().run(() -> failIncompleteSteps(run.id));
-      finishRun(
-          run.id, cancelled.contains(run.id) ? CiRunStatus.CANCELLED : CiRunStatus.FAILED);
+      CiRunStatus outcome =
+          cancelled.contains(run.id) ? CiRunStatus.CANCELLED : CiRunStatus.FAILED;
+      Instant finishedAt = finishRun(run.id, outcome);
+      if (outcome == CiRunStatus.FAILED) {
+        announceFailedRun(run, finishedAt, outcome);
+      }
     } finally {
       runner.runClosed(run.id);
     }
@@ -1011,6 +1029,8 @@ public class CiRunService {
     if (outcome == CiRunStatus.SUCCESS) {
       announceRun(run, finishedAt);
       announceRelease(run, finishedAt, release);
+    } else if (outcome != CiRunStatus.CANCELLED) {
+      announceFailedRun(run, finishedAt, outcome);
     }
   }
 
@@ -1053,6 +1073,37 @@ public class CiRunService {
             run.repoName,
             run.branch,
             run.commitSha,
+            finishedAt,
+            run.triggerEventId);
+      } catch (RuntimeException e) {
+        LOG.warnf(e, "Announcing run %s failed", run.id);
+      }
+    }
+  }
+
+  /**
+   * {@link #announceRun}'s failure twin, called at every terminal write that says something true
+   * about a commit: red and timed-out runs, config errors, a crash the worker caught, and the runs
+   * a boot sweep found interrupted. What it is <b>not</b> called for is the contract's other half —
+   * a cancelled run (a person withdrew the question) and a deduped-superseded row (bookkeeping
+   * about the queue, not a fact about the commit) announce nothing, which is what lets a subscriber
+   * keeping per-commit build status read every {@code BuildFailed} as a verdict.
+   *
+   * <p>Everything else — announce after the terminal row commits, the row's own {@code finishedAt},
+   * the causation id off the row, failures being the port's and never the run's — is {@link
+   * #announceRun}'s reasoning, unchanged.
+   */
+  private void announceFailedRun(CiRun run, Instant finishedAt, CiRunStatus outcome) {
+    for (RunAnnouncer announcer : runAnnouncers) {
+      try {
+        announcer.onRunFailed(
+            run.id,
+            run.repoId,
+            run.projectId,
+            run.repoName,
+            run.branch,
+            run.commitSha,
+            outcome.name(),
             finishedAt,
             run.triggerEventId);
       } catch (RuntimeException e) {

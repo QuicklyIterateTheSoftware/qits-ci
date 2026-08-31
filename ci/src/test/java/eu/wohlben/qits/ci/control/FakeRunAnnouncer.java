@@ -26,14 +26,31 @@ public class FakeRunAnnouncer implements RunAnnouncer {
       Instant finishedAt,
       String triggerEventId) {}
 
+  public record AnnouncedFailure(
+      String runId,
+      String repoId,
+      String projectId,
+      String repoName,
+      String branch,
+      String commitSha,
+      String outcome,
+      Instant finishedAt,
+      String triggerEventId) {}
+
   private final List<Announced> announced = Collections.synchronizedList(new ArrayList<>());
+  private final List<AnnouncedFailure> failed = Collections.synchronizedList(new ArrayList<>());
 
   public List<Announced> announced() {
     return List.copyOf(announced);
   }
 
+  public List<AnnouncedFailure> failed() {
+    return List.copyOf(failed);
+  }
+
   public void reset() {
     announced.clear();
+    failed.clear();
   }
 
   @Override
@@ -49,5 +66,29 @@ public class FakeRunAnnouncer implements RunAnnouncer {
     announced.add(
         new Announced(
             runId, repoId, projectId, repoName, branch, commitSha, finishedAt, triggerEventId));
+  }
+
+  @Override
+  public void onRunFailed(
+      String runId,
+      String repoId,
+      String projectId,
+      String repoName,
+      String branch,
+      String commitSha,
+      String outcome,
+      Instant finishedAt,
+      String triggerEventId) {
+    failed.add(
+        new AnnouncedFailure(
+            runId,
+            repoId,
+            projectId,
+            repoName,
+            branch,
+            commitSha,
+            outcome,
+            finishedAt,
+            triggerEventId));
   }
 }

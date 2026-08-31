@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.JsonNode;
+import eu.wohlben.qits.ci.events.BuildFailed;
 import eu.wohlben.qits.ci.events.BuildSuccessful;
 import eu.wohlben.qits.ci.events.SoftwareRelease;
 import eu.wohlben.qits.eventstream.QitsDurableEventListener;
@@ -71,12 +72,13 @@ public class EventWireReflectionTest {
     assertEquals(
         Set.of(
             BuildSuccessful.class,
+            BuildFailed.class,
             SoftwareRelease.class,
             SCMPublishCommit.class,
             EventEnvelope.class,
             EventFrame.class),
         Set.of(registration.targets()),
-        "the two events out, the push in, the PUT body, the frame — a sixth wire type is added here");
+        "the three events out, the push in, the PUT body, the frame — a seventh wire type is added here");
   }
 
   /**
