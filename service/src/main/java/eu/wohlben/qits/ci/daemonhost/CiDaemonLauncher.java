@@ -402,6 +402,27 @@ public class CiDaemonLauncher {
   String artifactsMavenRegistryUrl;
 
   /**
+   * qits-platform-mirror's Maven Central pull-through, in both address planes, and the switch that
+   * turns the pair off whole. The build-url is consumed as a docker-build arg — the builder's mvnw
+   * runs {@code --network host}, so it needs the host-published mirror vhost, the same authority
+   * the Dockerfiles' {@code FROM} lines spell — while the step-url is dialled by the step container
+   * itself over qits-net, like the npm proxy above.
+   *
+   * <p><b>Off is injected as EMPTY, never as absence.</b> Every {@code .qits-maven-settings.xml}
+   * activates its central-proxy profile only on a non-empty {@code QITS_MAVEN_CENTRAL_URL}, so an
+   * empty pair means every build resolves Maven Central directly — the arm a deployment is on while
+   * the mirror is not reachable (a bootstrap that has not started it yet).
+   */
+  @ConfigProperty(name = "qits.mirror.maven-central.enabled")
+  boolean mavenCentralMirrorEnabled;
+
+  @ConfigProperty(name = "qits.mirror.maven-central.build-url")
+  String mavenCentralMirrorBuildUrl;
+
+  @ConfigProperty(name = "qits.mirror.maven-central.step-url")
+  String mavenCentralMirrorStepUrl;
+
+  /**
    * qits-artifacts' docs repository root, including the {@code docs} namespace segment. Dialled by
    * the step container over qits-net like the npm and maven roots, and injected so a release
    * pipeline publishing its documentation names no deployment address.
@@ -955,6 +976,14 @@ public class CiDaemonLauncher {
     env.put("QITS_NPM_REGISTRY_URL", value(artifactsNpmHostedUrl));
     env.put("QITS_NPM_PROXY_URL", value(artifactsNpmProxyUrl));
     env.put("QITS_MAVEN_REGISTRY_URL", value(artifactsMavenRegistryUrl));
+    // Maven Central through qits-platform-mirror, both address planes — see the fields' javadoc.
+    // Empty is the deliberate off state, so the ternary writes "" rather than skipping the keys:
+    // a pipeline reads "${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" either way and empty deactivates the
+    // settings profile at every consumer.
+    env.put("QITS_MAVEN_CENTRAL_MIRROR_URL",
+        mavenCentralMirrorEnabled ? value(mavenCentralMirrorBuildUrl) : "");
+    env.put("QITS_MAVEN_PROXY_URL",
+        mavenCentralMirrorEnabled ? value(mavenCentralMirrorStepUrl) : "");
     env.put("QITS_DOCS_URL", value(artifactsDocsUrl));
     // And where a step asks for its own repository to be released — same network, same reading of
     // "reachable from where" as the npm pair.
