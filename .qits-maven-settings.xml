@@ -10,6 +10,15 @@
       <mirrorOf>qits-maven</mirrorOf>
       <url>${env.QITS_MAVEN_REPOSITORY_URL}</url>
     </mirror>
+    <!-- Maven Central through qits-platform-mirror's pull-through cache. The exact repository id is
+         the same blocker exemption the entry above uses, scoped to the one repository the profile
+         below declares — so while QITS_MAVEN_CENTRAL_URL is unset or empty, nothing declares
+         qits-central, this entry matches nothing, and the unexpanded URL is never dialled. -->
+    <mirror>
+      <id>qits-central-proxy</id>
+      <mirrorOf>qits-central</mirrorOf>
+      <url>${env.QITS_MAVEN_CENTRAL_URL}</url>
+    </mirror>
   </mirrors>
   <servers>
     <!-- The credential that answers the registry's 401 once reads are gated. The id is the MIRROR's
@@ -24,4 +33,46 @@
       <password>${env.QITS_MAVEN_AUTH_PSW}</password>
     </server>
   </servers>
+  <profiles>
+    <!-- Active only while QITS_MAVEN_CENTRAL_URL is NON-EMPTY — measured on Maven 3.9: an empty
+         environment value does not activate a property-presence profile, so an injected-empty
+         variable is the off switch and no call site needs a guard. Central itself is re-declared
+         DISABLED, because repository ordering consults the stock central first and the mirror above
+         would never see a request; qits-central takes its place and the mirror reroutes it whole to
+         the pull-through. Unset means stock Maven Central, exactly as before this profile existed. -->
+    <profile>
+      <id>qits-central-proxy</id>
+      <activation>
+        <property><name>env.QITS_MAVEN_CENTRAL_URL</name></property>
+      </activation>
+      <repositories>
+        <repository>
+          <id>central</id>
+          <url>https://repo1.maven.org/maven2</url>
+          <releases><enabled>false</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+        <repository>
+          <id>qits-central</id>
+          <url>https://repo1.maven.org/maven2</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+      </repositories>
+      <pluginRepositories>
+        <pluginRepository>
+          <id>central</id>
+          <url>https://repo1.maven.org/maven2</url>
+          <releases><enabled>false</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </pluginRepository>
+        <pluginRepository>
+          <id>qits-central</id>
+          <url>https://repo1.maven.org/maven2</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </pluginRepository>
+      </pluginRepositories>
+    </profile>
+  </profiles>
 </settings>

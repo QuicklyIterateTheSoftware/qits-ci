@@ -66,6 +66,9 @@ public class CiDaemonLauncherTest {
     launcher.artifactsNpmHostedUrl = "http://qits-artifacts:8080/artifacts/npm/npm/";
     launcher.artifactsNpmProxyUrl = "http://qits-artifacts:8080/artifacts/npm/npmjs/";
     launcher.artifactsMavenRegistryUrl = "http://qits-artifacts:8080/artifacts/maven/maven";
+    launcher.mavenCentralMirrorEnabled = true;
+    launcher.mavenCentralMirrorBuildUrl = "http://mirror.dev.localhost:8080/artifacts/maven/central";
+    launcher.mavenCentralMirrorStepUrl = "http://qits-platform-mirror:8080/artifacts/maven/central";
     launcher.artifactsDocsUrl = "http://qits-artifacts:8080/artifacts/docs/docs";
     launcher.workspacesUrl = "http://qits-workspaces:8080";
     // The shipped state of the push credential: an oidc client that is off, so nothing is
@@ -156,6 +159,9 @@ public class CiDaemonLauncherTest {
     env.put("QITS_NPM_REGISTRY_URL", "http://qits-artifacts:8080/artifacts/npm/npm/");
     env.put("QITS_NPM_PROXY_URL", "http://qits-artifacts:8080/artifacts/npm/npmjs/");
     env.put("QITS_MAVEN_REGISTRY_URL", "http://qits-artifacts:8080/artifacts/maven/maven");
+    env.put(
+        "QITS_MAVEN_CENTRAL_MIRROR_URL", "http://mirror.dev.localhost:8080/artifacts/maven/central");
+    env.put("QITS_MAVEN_PROXY_URL", "http://qits-platform-mirror:8080/artifacts/maven/central");
     env.put("QITS_DOCS_URL", "http://qits-artifacts:8080/artifacts/docs/docs");
     env.put("QITS_WORKSPACES_URL", "http://qits-workspaces:8080");
     return env;
@@ -394,6 +400,38 @@ public class CiDaemonLauncherTest {
       assertEquals(
           "http://qits-artifacts:8080/artifacts/maven/maven",
           launcher().buildWorkloadSpec(each).spec().env().get("QITS_MAVEN_REGISTRY_URL"));
+    }
+  }
+
+  @Test
+  public void everyStepIsToldWhereMavenCentralIsMirrored() {
+    // Both address planes, unconditional like the pairs above: the build-url is consumed as a
+    // docker-build arg (the builder's mvnw runs --network host, so it needs the host-published
+    // mirror vhost), the step-url is dialled by the step container itself over qits-net.
+    for (LaunchSpec each : List.of(spec, publishing())) {
+      Map<String, String> env = launcher().buildWorkloadSpec(each).spec().env();
+      assertEquals(
+          "http://mirror.dev.localhost:8080/artifacts/maven/central",
+          env.get("QITS_MAVEN_CENTRAL_MIRROR_URL"));
+      assertEquals(
+          "http://qits-platform-mirror:8080/artifacts/maven/central",
+          env.get("QITS_MAVEN_PROXY_URL"));
+    }
+  }
+
+  @Test
+  public void aDeploymentThatCannotReachTheMirrorInjectsTheCentralPairEMPTY() {
+    // Empty, never absent, is the off state: every .qits-maven-settings.xml activates its
+    // central-proxy profile only on a non-empty value, so an empty pair means every build resolves
+    // Maven Central directly — the arm a bootstrap is on while the mirror is not started yet. The
+    // keys must still be PRESENT, because a pipeline reads "${QITS_MAVEN_CENTRAL_MIRROR_URL:-}"
+    // under `set -u` and one shape for a step to read is the estate's rule for optional values.
+    CiDaemonLauncher launcher = launcher();
+    launcher.mavenCentralMirrorEnabled = false;
+    for (LaunchSpec each : List.of(spec, publishing())) {
+      Map<String, String> env = launcher.buildWorkloadSpec(each).spec().env();
+      assertEquals("", env.get("QITS_MAVEN_CENTRAL_MIRROR_URL"));
+      assertEquals("", env.get("QITS_MAVEN_PROXY_URL"));
     }
   }
 
