@@ -28,9 +28,15 @@ routes: /ci
 # Where this application appears in the chrome's navigation tree. `<slot>.<Label>:<position>`, and
 # the slot is what places it: `<category>.details` is a child of a repository in scope, so CI shows
 # up under every repository whatever kind it is — a library has runs exactly like a service does.
-# Position 4 is per slot, and it is the platform's fixed order of the per-repository applications
-# (Api Docs 1, Docs 2, Code 3, CI 4, Artifacts 5, Configuration 6, Workspaces 7).
-navigation-entries: services.details.CI:4, daemons.details.CI:4, libs.details.CI:4, frontends.details.CI:4, cli.details.CI:4, images.details.CI:4
+# Position 5 is per slot, and it is the platform's fixed order of the per-repository applications
+# (Api Docs 1, Docs 2, Release Requests 3, Code 4, CI 5, Artifacts 6, Configuration 7, Workspaces 8).
+#
+# CI MOVED 4 -> 5 ON 2026-09-01, and nothing about this application changed. qits-projects put a
+# Release Requests row at position 3, above Code, and every entry from Code down moved up one in the
+# same change — this file, qits-githost, qits-artifacts, qits-configuration and qits-workspaces, one
+# line each. The order is stated in integers rather than left to the edge's position-then-label
+# tie-break so that renaming a row cannot silently reorder the group.
+navigation-entries: services.details.CI:5, daemons.details.CI:5, libs.details.CI:5, frontends.details.CI:5, cli.details.CI:5, images.details.CI:5
 
 # TWO DATABASES, because this deployable joins two jars that each own a store, and each one maps the
 # generic contract in its own shipped defaults. qits-platform-deployments creates a role and a
