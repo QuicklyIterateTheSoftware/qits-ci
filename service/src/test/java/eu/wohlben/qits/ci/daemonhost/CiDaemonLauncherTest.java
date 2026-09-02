@@ -67,7 +67,7 @@ public class CiDaemonLauncherTest {
     launcher.artifactsNpmProxyUrl = "http://qits-artifacts:8080/artifacts/npm/npmjs/";
     launcher.artifactsMavenRegistryUrl = "http://qits-artifacts:8080/artifacts/maven/maven";
     launcher.mavenCentralMirrorEnabled = true;
-    launcher.mavenCentralMirrorBuildUrl = "";
+    launcher.mavenCentralMirrorBuildUrl = java.util.Optional.empty();
     launcher.mavenCentralMirrorStepUrl = "http://qits-platform-mirror:8080/artifacts/maven/central";
     launcher.artifactsDocsUrl = "http://qits-artifacts:8080/artifacts/docs/docs";
     launcher.workspacesUrl = "http://qits-workspaces:8080";

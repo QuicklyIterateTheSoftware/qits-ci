@@ -30,6 +30,7 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.TreeMap;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
@@ -420,8 +421,12 @@ public class CiDaemonLauncher {
   @ConfigProperty(name = "qits.mirror.maven-central.enabled")
   boolean mavenCentralMirrorEnabled;
 
-  @ConfigProperty(name = "qits.mirror.maven-central.build-url", defaultValue = "")
-  String mavenCentralMirrorBuildUrl;
+  // Optional, not a defaulted String: SmallRye's String converter treats an empty property value as
+  // null and fails a non-Optional injection point at boot (SRCFG00040) — and empty is exactly the
+  // shipped value here. Optional absorbs both empty and absent as Optional.empty, which the
+  // injection below maps to an empty QITS_MAVEN_CENTRAL_MIRROR_URL (build plane resolves direct).
+  @ConfigProperty(name = "qits.mirror.maven-central.build-url")
+  Optional<String> mavenCentralMirrorBuildUrl;
 
   @ConfigProperty(name = "qits.mirror.maven-central.step-url")
   String mavenCentralMirrorStepUrl;
@@ -985,7 +990,7 @@ public class CiDaemonLauncher {
     // a pipeline reads "${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" either way and empty deactivates the
     // settings profile at every consumer.
     env.put("QITS_MAVEN_CENTRAL_MIRROR_URL",
-        mavenCentralMirrorEnabled ? value(mavenCentralMirrorBuildUrl) : "");
+        mavenCentralMirrorEnabled ? value(mavenCentralMirrorBuildUrl.orElse("")) : "");
     env.put("QITS_MAVEN_PROXY_URL",
         mavenCentralMirrorEnabled ? value(mavenCentralMirrorStepUrl) : "");
     env.put("QITS_DOCS_URL", value(artifactsDocsUrl));
