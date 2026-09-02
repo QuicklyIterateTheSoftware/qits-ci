@@ -30,6 +30,7 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.TreeMap;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
@@ -402,22 +403,30 @@ public class CiDaemonLauncher {
   String artifactsMavenRegistryUrl;
 
   /**
-   * qits-platform-mirror's Maven Central pull-through, in both address planes, and the switch that
-   * turns the pair off whole. The build-url is consumed as a docker-build arg — the builder's mvnw
-   * runs {@code --network host}, so it needs the host-published mirror vhost, the same authority
-   * the Dockerfiles' {@code FROM} lines spell — while the step-url is dialled by the step container
-   * itself over qits-net, like the npm proxy above.
+   * qits-platform-mirror's Maven Central pull-through. Only the STEP plane can reach it, and that
+   * asymmetry is the point. The step-url is dialled by the step container itself over qits-net (a
+   * userflows mvnw), like the npm proxy — it works and it populates the mirror. The build-url is a
+   * docker-build arg, and it <b>ships empty</b>: a {@code docker build}'s maven resolve runs in the
+   * host network namespace with the image's own resolv.conf, where no mirror address resolves — not
+   * the qits-net alias, not {@code 127.0.0.1:8082} (the deployed mirror publishes no host port), not
+   * {@code mirror.dev.localhost}. What it reaches is repo1.maven.org directly, which an empty
+   * build-url selects. Measured 2026-09-01: a non-empty build-url reddened every image build.
    *
    * <p><b>Off is injected as EMPTY, never as absence.</b> Every {@code .qits-maven-settings.xml}
    * activates its central-proxy profile only on a non-empty {@code QITS_MAVEN_CENTRAL_URL}, so an
-   * empty pair means every build resolves Maven Central directly — the arm a deployment is on while
-   * the mirror is not reachable (a bootstrap that has not started it yet).
+   * empty value means that build resolves Maven Central directly — which is the permanent state of
+   * the build plane, and the state {@code enabled=false} puts both planes in (a bootstrap that has
+   * not started the mirror yet).
    */
   @ConfigProperty(name = "qits.mirror.maven-central.enabled")
   boolean mavenCentralMirrorEnabled;
 
+  // Optional, not a defaulted String: SmallRye's String converter treats an empty property value as
+  // null and fails a non-Optional injection point at boot (SRCFG00040) — and empty is exactly the
+  // shipped value here. Optional absorbs both empty and absent as Optional.empty, which the
+  // injection below maps to an empty QITS_MAVEN_CENTRAL_MIRROR_URL (build plane resolves direct).
   @ConfigProperty(name = "qits.mirror.maven-central.build-url")
-  String mavenCentralMirrorBuildUrl;
+  Optional<String> mavenCentralMirrorBuildUrl;
 
   @ConfigProperty(name = "qits.mirror.maven-central.step-url")
   String mavenCentralMirrorStepUrl;
@@ -981,7 +990,7 @@ public class CiDaemonLauncher {
     // a pipeline reads "${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" either way and empty deactivates the
     // settings profile at every consumer.
     env.put("QITS_MAVEN_CENTRAL_MIRROR_URL",
-        mavenCentralMirrorEnabled ? value(mavenCentralMirrorBuildUrl) : "");
+        mavenCentralMirrorEnabled ? value(mavenCentralMirrorBuildUrl.orElse("")) : "");
     env.put("QITS_MAVEN_PROXY_URL",
         mavenCentralMirrorEnabled ? value(mavenCentralMirrorStepUrl) : "");
     env.put("QITS_DOCS_URL", value(artifactsDocsUrl));

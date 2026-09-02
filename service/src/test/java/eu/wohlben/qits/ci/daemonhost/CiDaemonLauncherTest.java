@@ -67,7 +67,7 @@ public class CiDaemonLauncherTest {
     launcher.artifactsNpmProxyUrl = "http://qits-artifacts:8080/artifacts/npm/npmjs/";
     launcher.artifactsMavenRegistryUrl = "http://qits-artifacts:8080/artifacts/maven/maven";
     launcher.mavenCentralMirrorEnabled = true;
-    launcher.mavenCentralMirrorBuildUrl = "http://mirror.dev.localhost:8080/artifacts/maven/central";
+    launcher.mavenCentralMirrorBuildUrl = java.util.Optional.empty();
     launcher.mavenCentralMirrorStepUrl = "http://qits-platform-mirror:8080/artifacts/maven/central";
     launcher.artifactsDocsUrl = "http://qits-artifacts:8080/artifacts/docs/docs";
     launcher.workspacesUrl = "http://qits-workspaces:8080";
@@ -159,8 +159,9 @@ public class CiDaemonLauncherTest {
     env.put("QITS_NPM_REGISTRY_URL", "http://qits-artifacts:8080/artifacts/npm/npm/");
     env.put("QITS_NPM_PROXY_URL", "http://qits-artifacts:8080/artifacts/npm/npmjs/");
     env.put("QITS_MAVEN_REGISTRY_URL", "http://qits-artifacts:8080/artifacts/maven/maven");
-    env.put(
-        "QITS_MAVEN_CENTRAL_MIRROR_URL", "http://mirror.dev.localhost:8080/artifacts/maven/central");
+    // The build plane ships EMPTY: a docker build cannot reach the mirror by any address, so it
+    // resolves Central directly. The step plane carries the in-network mirror alias.
+    env.put("QITS_MAVEN_CENTRAL_MIRROR_URL", "");
     env.put("QITS_MAVEN_PROXY_URL", "http://qits-platform-mirror:8080/artifacts/maven/central");
     env.put("QITS_DOCS_URL", "http://qits-artifacts:8080/artifacts/docs/docs");
     env.put("QITS_WORKSPACES_URL", "http://qits-workspaces:8080");
@@ -404,15 +405,15 @@ public class CiDaemonLauncherTest {
   }
 
   @Test
-  public void everyStepIsToldWhereMavenCentralIsMirrored() {
-    // Both address planes, unconditional like the pairs above: the build-url is consumed as a
-    // docker-build arg (the builder's mvnw runs --network host, so it needs the host-published
-    // mirror vhost), the step-url is dialled by the step container itself over qits-net.
+  public void theStepPlaneCarriesTheMirrorAndTheBuildPlaneIsEmpty() {
+    // Only the step plane can reach the mirror (in-network alias, dialled by the step container over
+    // qits-net). The build plane is a docker-build arg and ships EMPTY, because a `docker build`'s
+    // maven resolve runs in the host netns with the image's resolv.conf, where no mirror address
+    // resolves — so it goes direct to Central. A non-empty build-url reddened every image build,
+    // measured 2026-09-01.
     for (LaunchSpec each : List.of(spec, publishing())) {
       Map<String, String> env = launcher().buildWorkloadSpec(each).spec().env();
-      assertEquals(
-          "http://mirror.dev.localhost:8080/artifacts/maven/central",
-          env.get("QITS_MAVEN_CENTRAL_MIRROR_URL"));
+      assertEquals("", env.get("QITS_MAVEN_CENTRAL_MIRROR_URL"));
       assertEquals(
           "http://qits-platform-mirror:8080/artifacts/maven/central",
           env.get("QITS_MAVEN_PROXY_URL"));
