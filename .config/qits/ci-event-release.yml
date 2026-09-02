@@ -129,6 +129,44 @@ steps:
       # content a concurrent build of this same Dockerfile may still be resolving, which is the
       # race that broke the release of 2026-08-11.
 
+      # --- the SBOM -----------------------------------------------------------------------------
+      # THE DOCUMENT GOES UP AFTER THE PUSH AND BEFORE THIS STEP EXITS GREEN. qits-ci — this very
+      # application — announces `SoftwareRelease` only for a green run, so ordering is the whole
+      # guarantee: no consumer is ever told about a version whose bill of materials is missing. A
+      # failed PUT fails the release ON PURPOSE — the store being down is not a reason to announce a
+      # version nobody can audit. Only THIS pipeline uploads one: ci-post-receive.yml's sha push
+      # announces no release, so it owes no document.
+      #
+      # ONE DOCUMENT, TWO DECLARED ARTIFACTS. `artifacts:` above also declares the `@apidocs/qits-ci`
+      # docs bundle, and that one gets no SBOM: it is a tar of one committed openapi.yml, built by
+      # the block below rather than by Maven, with no dependency graph to describe. A CycloneDX
+      # document for it would be a document about nothing.
+      #
+      # The second `docker build` reaches the Dockerfile's `sbom` stage — a `FROM scratch` holding
+      # only the service module's CycloneDX document, exported with `--output` instead of pushed.
+      # Args and secrets are BYTE-IDENTICAL to the image build above, which is what makes every
+      # layer a cache hit and this export seconds rather than a second native compile; a drift
+      # between the two invocations costs a full rebuild, not a wrong document.
+      docker build --network host --target sbom --output type=local,dest=.sbom \
+        --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
+        --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
+        --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
+        --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
+        -f docker/Dockerfile .
+      # The SBOM store is a sibling path of the npm registry inside the artifacts deployment, so its
+      # root is DERIVED from $QITS_NPM_REGISTRY_URL — the qits-net alias a STEP container can reach.
+      # NOT from $QITS_REGISTRY: that is the host-published name the docker daemon pushes through,
+      # and inside this container it answers curl with an instant connection refusal (measured twice
+      # — on qits-artifacts' 2026.902 heal release the pushes above succeeded through the daemon
+      # while the same host name was unreachable from in here, and the edge 401s a sessionless
+      # write besides). The path names the DECLARED artifact identity verbatim: `artifacts:` above
+      # says `{type: docker, name: qits/qits-ci}`, and (packageType, packageName, version) is how
+      # the SoftwareRelease consumer will ask for it.
+      sbom_base="${QITS_NPM_REGISTRY_URL%%/artifacts/*}/artifacts/sboms"
+      curl -fsS -X PUT -H 'Content-Type: application/vnd.cyclonedx+json' \
+        --data-binary @.sbom/sbom.json \
+        "$sbom_base/docker/qits/qits-ci/-/$version"
+
       # --- the API document ---------------------------------------------------------------------
       # docs/openapi.yml is committed (OpenApiSchemaExportTest regenerates it), so publishing the
       # release's API surface is one tar and one PUT. The @apidocs scope is what the docs client
