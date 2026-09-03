@@ -1,0 +1,256 @@
+# THE QA PIPELINE — this repository's only pipeline outside the release recipe, and it runs for
+# RELEASE REQUESTS ALONE. It replaces ci-event-build.yml and ci-event-userflows.yml, both deleted in
+# the commit that added this file.
+#
+# THIS REPOSITORY IS THE ENGINE, so this file is also the worked instance of the reference template
+# that lives next to it: docs/ci-event-release-request.yml is the TEMPLATE the rollout stamped into
+# every repository, and this is qits-ci's own copy of it. The template carries the full argument —
+# why the event exists, why discovery reads main, why the halves are ordered — and is not repeated
+# here. The two are kept in step: a change to the shape belongs in the template first.
+#
+# Per-push CI is retired platform-wide. Nothing builds a branch: cd deploys what a RELEASE
+# published, and the CalVer image comes out of ci-event-release.yml. qits-projects folds an open
+# request's sources onto `release/<id>` and publishes `ReleaseRequestChanged` per re-fold; that
+# branch is written by the merge primitive, which fires no post-receive and publishes no
+# `SCMPublishCommit`, so without this event the fold exists and NOTHING BUILDS IT.
+#
+# DECIDE AT MAIN, BUILD AT THE FOLD. The file is discovered, parsed and selected at this
+# repository's `main` head; only the recorded run's branch and sha come from the payload. A release
+# request cannot alter the CI that gates it by folding in a commit that edits this file — which is
+# a property this repository IMPLEMENTS as well as relies on.
+#
+# THE SHA IMAGE IS GONE. The old build step ended in `docker push
+# $QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-ci:$QITS_CI_SHA`, the per-push coordinate cd keyed on.
+# Nothing consumes it, and a fold's merged sha is not a coordinate anything could deploy. The image
+# is still BUILT here under a local tag — that is the gate on this repository, whose Dockerfile is a
+# GraalVM native build — and ci-event-release.yml pushes `:$version` and nothing else.
+#
+# ONE FILE, TWO HALVES: the gating build first, the non-gating verify + docs publish last. That is
+# how "a red verify must not cost the image" survives the merge of two files that could not share a
+# verdict — ordering plus per-step classification, and `gating: false` is the whole of what the
+# second file was. A non-gating step that fails still fails the run and still shows red; it just
+# does not hold the fold for qits-projects' build gate. Keep it LAST: everything after a failing
+# step is SKIPPED.
+#
+# Loop review: this pipeline PUTs a docs bundle, pushes no commit, no tag and no image — nothing the
+# fold is made of changes, so it cannot re-trigger itself. Publish-if-absent: events redeliver and
+# docs versions are immutable, so 409 is success.
+event: ReleaseRequestChanged
+
+when:
+  # repoName, not repoId: the git host's storage coordinate is an opaque UUID since the identity
+  # cutover, so a name match on repoId is not dependable. The event echoes the public name; a rename
+  # updates this line in the same campaign. `suppressCi` went with the push event that carried it —
+  # a release request is not a push and `-o qits.no-ci` has nothing to say about one.
+  - repoName: { exact: qits-ci-service }
+
+checkout:
+  branch: backingBranch
+  sha: mergedSha
+
+steps:
+  # --- the GATING half: build the fold ------------------------------------------------------------
+  # ci-event-build.yml's step, minus the push. Two halves: the Angular client here, in a container
+  # that sits on qits-net and can therefore reach the platform's own npm registry, and then the
+  # image build whose builder stage packages that already-built bundle.
+  - image: qits/build-images/node-docker-base:latest
+    docker: true
+    timeout-seconds: 3600
+    script: |
+      # The daemon runs this with `bash -c` and no -e, so without this a failed docker build is
+      # swallowed and the run reports SUCCESS — a green verdict for a fold that does not build is
+      # exactly what a release gate must never be told. -u is load-bearing too: an unset registry
+      # variable must stop the step, not quietly resolve the @qits scope against npmjs.org, where
+      # those packages do not exist and never will.
+      set -eu
+
+      # $QITS_CI_BRANCH is release/<id> and $QITS_CI_SHA is the merged sha — the fold is already
+      # checked out, so nothing here fetches or switches refs.
+      #
+      # The daemon's clone does not recurse, so initialise the Angular client explicitly.
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-ci-frontend"
+      git -c submodule.qits-ci-frontend.url="$frontend_url" submodule update --init service/src/main/webui
+
+      # THE LOCKFILE is the one file this step edits, and npm leaves no alternative. Same problem
+      # and same fix as qits-ci-frontend's own pipeline — that repo's recipe is where this pattern is
+      # maintained, and the two should keep matching.
+      #
+      # npm pins a full resolved URL per package, and qits-ci-frontend's lockfile is generated on the
+      # deployment host, so every entry names a localhost port — an address that does not exist in
+      # this container. `npm ci` fetches tarballs by that URL and never asks the configured registry
+      # for them, so the environment below does not reach them: without this swap the install dies
+      # on connection refused. The paths are identical on every address, so replacing the ORIGIN and
+      # keeping the path is all it takes, and the integrity hashes are what make that safe — bytes
+      # from the other address must still hash the same. The checkout is this step's own; nothing is
+      # edited that anyone will ever read again.
+      #
+      # THE BYTE PLANE IS TWO SERVICES SINCE THE SPLIT, WHICH IS WHY THE SWAP READS THE PATH.
+      # qits-platform-mirror holds the npmjs pull-through cache; qits-artifacts hosts the @qits
+      # scope. No single origin serves both, so the path is what tells them apart: an entry under
+      # the hosted registry's own pathname — $QITS_NPM_REGISTRY_URL's, /artifacts/npm/npm/ — is a
+      # @qits tarball and gets the hosted origin, and every other entry gets the proxy's. One sed
+      # covered both roots while they shared an origin; since the split it sends every @qits tarball
+      # to the mirror, which has never held one: 404, on every run.
+      #
+      # THE ORDER OF THE TWO EXPRESSIONS IS THE WHOLE TRICK. sed applies -e in sequence per line, so
+      # the broad proxy swap runs FIRST and the narrow path-anchored one corrects the @qits entries
+      # after it. The other order lets the broad expression undo the narrow one.
+      #
+      # npm's own knob for exactly this, `--replace-registry-host=always`, cannot do it against a
+      # registry mounted under a path, and could not have told two registries apart either.
+      # @npmcli/arborist glues rather than resolves (reify.js:
+      # `registry.slice(0, -1) + resolvedURL.pathname`), so
+      # http://qits-platform-mirror:8080/artifacts/npm/npmjs/ + /artifacts/npm/npmjs/zone.js/-/…tgz
+      # comes out as …/artifacts/npm/npmjs/artifacts/npm/npmjs/zone.js/-/…tgz and every tarball
+      # 404s. Measured on npm 10.9.4.
+      #
+      # Every address is derived from the injected env rather than spelled here: no repository
+      # states a deployment's addresses, and the two qits-ci-frontend does state (in its .npmrc, for a
+      # developer on the host: registry.dev.localhost:8080 for the @qits scope and
+      # mirror.dev.localhost:8080 for npmjs) are the ones being replaced.
+      cd service/src/main/webui
+      npm_hosted_origin=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).origin')
+      npm_proxy_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
+      npm_hosted_path=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).pathname')
+      sed -i -E \
+        -e "s#(\"resolved\": \")https?://[^/\"]+#\1$npm_proxy_origin#" \
+        -e "s#(\"resolved\": \")https?://[^/\"]+($npm_hosted_path)#\1$npm_hosted_origin\2#" \
+        package-lock.json
+
+      # ENVIRONMENT, not a file. qits-ci-frontend COMMITS an .npmrc (registry.dev.localhost:8080 for
+      # @qits and mirror.dev.localhost:8080 for npmjs, right for a developer on the host), and npm
+      # ranks a project .npmrc ABOVE ~/.npmrc — so a `cat > ~/.npmrc` preamble would be written and
+      # silently ignored. `npm_config_*` environment outranks both files, so it wins without
+      # touching the submodule's tree.
+      env npm_config_registry="$QITS_NPM_PROXY_URL" \
+          "npm_config_@qits:registry=$QITS_NPM_REGISTRY_URL" \
+          npm ci --no-audit --no-fund
+
+      # dist/qits-spa-ci/browser — the bundle the image build consumes (it is
+      # quarkus.quinoa.build-dir in service/src/main/resources/application.properties), and the ONE
+      # artifact this half exists to produce. Lint and test are qits-ci-frontend's own pipeline's job;
+      # repeating them here would only make this repo red for someone else's commit.
+      npm run build
+      cd -
+
+      # THE CREDENTIAL IS A SECRET MOUNT AND NEVER A BUILD ARG — an arg is recorded in the image
+      # history. The launcher injects the run's commissioned idp client as
+      # $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET; these two flags hand that
+      # pair to the mounts on the Dockerfile's mvnw RUN, which is the only place it exists.
+      # Unconditional on purpose: a missing env source is NOT an error — measured on buildx v0.36.1,
+      # `--secret id=x,env=DOES_NOT_EXIST` builds green and the mounted variable is simply unset —
+      # so these lines do nothing at all until a run carries the pair.
+      #
+      # THE TAG IS LOCAL AND NOTHING IS PUSHED. `$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-ci:
+      # $QITS_CI_SHA` was the per-push publication and it is retired with the push path; the CalVer
+      # coordinate is ci-event-release.yml's. What remains is the build, which is what gates the
+      # fold. `docker: true` stays for the daemon socket the build needs and for the pull auth the
+      # mirror-fronted base images need.
+      ref="qits-ci:$QITS_CI_SHA"
+      docker build --network host \
+        --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
+        --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
+        --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
+        --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
+        -t "$ref" -f docker/Dockerfile .
+      # NO `docker rmi "$ref"`: on a CI host it frees nothing — the layers stay in the builder's
+      # cache either way — while under the containerd image store it drops the last reference to
+      # content a concurrent build of this same Dockerfile may still be resolving.
+
+  # --- the NON-GATING half: verify, and publish what the run observed -----------------------------
+  # ci-event-userflows.yml's step, unchanged but for `gating: false`, which is the whole of what that
+  # separate file was.
+  #
+  # `mvn verify` at the fold — which regenerates service/target/userstories/ through the three story
+  # IT classes named below — and the reports published as one docs bundle, site @userflows/qits-ci,
+  # version = the merged sha, branch riding as artifacts metadata for discovery.
+  #
+  # Six stories in three categories today: `authentication` (the packaged boot's JWKS fetch and a
+  # stranger's refusal), `builds` (a release event triggering a run, an event nobody selected building
+  # nothing, and a step container's daemon running a step over the control socket) and `operations`
+  # (an operator reading a finished build's transcript). They all drive ONE launched qits-ci, because
+  # they all share one @TestProfile.
+  #
+  # ONE STEP, BECAUSE STEPS SHARE NOTHING. Every step container clones the repository for itself, so
+  # the gating step above cannot hand this one a bundle and the verify must stay in the same
+  # container as the publish.
+  #
+  # THIS REPOSITORY IS ALSO THE ENGINE, so read the step that way: the run below is executed by a
+  # qits-ci that this repository's own release pipeline replaces. Nothing here publishes an image or
+  # an event, so a redeploy landing mid-run costs this run and nothing else — which is another way
+  # of saying non-gating.
+  #
+  # IT DOES NOT DISTURB ci-event-release.yml. That file publishes @apidocs/qits-ci at the released
+  # VERSION off an SCMRelease; this one publishes @userflows/qits-ci at the merged SHA off a fold.
+  # Different event, different scope, different version coordinate — and the dedupe is
+  # (trigger_event_id, repo_id, config_path), so two trigger files are two runs by construction even
+  # when one event could match both.
+  #
+  # `user: build`, and NOT a switch inside the script: both surefire suites start zonky's embedded
+  # postgres, initdb refuses to run as root and calls getpwuid, so the step needs a passwd-backed
+  # non-root user — maven-base carries one (uid 1001). The step containers are Alpine, which is why
+  # both poms that name zonky architectures (ci, service) carry the -alpine binaries as a fourth
+  # arch. qits-eventstream's pipeline is the measured precedent for all of it.
+  #
+  # Quinoa is off (`-Dquarkus.quinoa=false` — the extension's root toggle; `.enabled` is silently
+  # ignored and npm runs anyway): the Angular client is the gating step's business, where the
+  # qits-ci-frontend submodule is initialised and its lockfile origins are swapped, and none of that
+  # ritual belongs here — the ITs assert nothing about the SPA. It is also what keeps this step from
+  # needing the submodule at all: the daemon's clone does not recurse, so service/src/main/webui
+  # arrives empty and Quinoa treats an empty directory as a misconfiguration and fails the build on
+  # exactly that. The packaged fast-jar failsafe boots is otherwise exactly what ships.
+  #
+  # THE TWO IT FLAGS ARE THE OTHER HALF, and they are why this repository does NOT opt its service
+  # module back into ITs wholesale. `skipITs` is true in the root pom because three docker-backed
+  # gates bind to the same failsafe run — CiDaemonHandshakeIT, CiDaemonGateIT and
+  # CiDaemonContainerProbeIT, which need real docker, a published step image, a built qits-ci-daemon
+  # binary and a container route back to the JVM. The root pom's `qits.it.excluded-groups` would drop
+  # them by their `extended` tag, but it is EMPTY by default on purpose (only the `native` profile
+  # sets it), so that `-DskipITs=false` keeps meaning "run everything" as AGENTS.md documents. Naming
+  # the class is therefore the opt-in that is correct here, and it also keeps CiPackagedSurfaceIT —
+  # which is not extended-tagged and would otherwise run — out of a pipeline that is about the stories:
+  # `-DskipITs=false "-Dit.test=TokenValidationBootstrapIT,BuildExecutionIT,BuildTriggerIT"`.
+  #
+  # THE SEPARATOR IS A COMMA. `-Dit.test=A+B` is not a union, and failsafe silently matches nothing —
+  # a pipeline that regenerates an EMPTY bundle and goes green is the failure this line exists to
+  # prevent. The three classes share one @TestProfile on purpose, so all of them together cost one
+  # launched qits-ci for the whole failsafe phase; adding a fourth with a profile of its own would
+  # double the phase. TokenValidationBootstrapIT must stay FIRST in the list and first in the run:
+  # its class name sorts ahead of the story packages, and the startup JWKS fetch it documents lands
+  # in whichever story drains first.
+  - image: qits/build-images/maven-base:latest
+    user: build
+    gating: false
+    timeout-seconds: 2400
+    script: |
+      set -eu
+      # The platform registry, exactly as qits-eventstream's step derives it: the pom's default
+      # names a host-published address unreachable from a step container, and the exact-id mirror
+      # in .qits-maven-settings.xml is what passes Maven's HTTP blocker.
+      export QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL"
+      # Maven Central through the platform mirror's in-network alias — empty (an older qits-ci that
+      # injects nothing, or a deployment that turned the mirror plane off) deactivates the settings
+      # profile and Central is resolved directly.
+      export QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}"
+      ./mvnw -B -ntp -s .qits-maven-settings.xml verify \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
+        -Dquarkus.quinoa=false \
+        -DskipITs=false "-Dit.test=TokenValidationBootstrapIT,BuildExecutionIT,BuildTriggerIT"
+
+      # `-C … .` so the story directories are the bundle's roots — nesting one directory deep would
+      # put it in every served URL.
+      tar -czf userstories.tgz -C service/target/userstories .
+
+      # Branch and commit ride as metadata (the docs store's exact-match discovery keys); the
+      # version is the merged sha itself, so a bundle URL never changes meaning.
+      status=$(curl -sS -o /tmp/docs-publish.out -w '%{http_code}' \
+        -X PUT --data-binary @userstories.tgz \
+        -H "X-Artifacts-Meta-git.branch.name: $QITS_CI_BRANCH" \
+        -H "X-Artifacts-Meta-git.commit.hash: $QITS_CI_SHA" \
+        -H "X-Artifacts-Meta-git.repository.name: qits-ci" \
+        "$QITS_DOCS_URL/@userflows/qits-ci/-/$QITS_CI_SHA")
+      case "$status" in
+        201) echo "published userflows for qits-ci@$QITS_CI_SHA ($QITS_CI_BRANCH)" ;;
+        409) echo "userflows for qits-ci@$QITS_CI_SHA already published — skipping" ;;
+        *)   echo "docs publish failed: HTTP $status"; cat /tmp/docs-publish.out; exit 1 ;;
+      esac

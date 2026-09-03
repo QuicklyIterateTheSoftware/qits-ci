@@ -9,10 +9,15 @@
 # `SoftwareRelease` per entry under `artifacts:` below. The event that could loop is
 # SoftwareRelease, and this file neither listens for it nor publishes it.
 #
-# THE VERSION TAG IS A NEW COORDINATE BESIDE THE SHA, NOT A REPLACEMENT FOR IT.
-# ci-post-receive.yml's `:$QITS_CI_SHA` push is the whole contract with qits-deployments and is untouched;
-# every deployment still comes from a sha. What this adds is a name a human and a downstream
-# consumer can say out loud, on the same image content.
+# THE VERSION TAG IS THE ONLY COORDINATE NOW, AND IT USED TO BE THE SECOND OF TWO. This file read
+# `:$QITS_CI_SHA` at the push below for as long as there was a per-push image beside it — the sha
+# coordinate was the contract with qits-deployments, and this pipeline pushed the released tree
+# under it a second time so the two would never disagree. Both halves of that are gone: per-push CI
+# is retired (ci-event-build.yml and ci-event-userflows.yml are one QA pipeline that publishes no
+# image at all), and cd deploys a RELEASE rather than a green push. So the push below tags
+# `$version` — the CalVer name the release was made under, which is what `artifacts:` declares and
+# what every consumer of the resulting `SoftwareRelease` asks for. A sha coordinate nothing
+# publishes and nothing deploys was a tag pointing at an image no reader could name.
 #
 # `artifacts:` IS A DECLARATION, NOT A REPORT. qits-ci never learns how to publish anything, so it
 # cannot see what the step below pushed; it announces `{repository, version, packageType,
@@ -25,9 +30,10 @@
 # `qits/<application>` and the reader supplies its own host, exactly as the push below composes one
 # from environment.
 #
-# THE BUILD BELOW IS ci-post-receive.yml's, AND THE TWO MUST STAY MATCHED. Both pipelines publish
-# the same image content under two coordinates, so a fix to one build belongs in the other. That
-# file is where the two halves, the submodule fetches, the lockfile origin swap and the
+# THE BUILD BELOW IS THE QA PIPELINE'S, AND THE TWO SHOULD STAY MATCHED. It used to be
+# ci-post-receive.yml's, then ci-event-build.yml's; both are retired and the sibling that carries
+# the same two halves is now ci-event-release-request.yml's gating step, which builds the fold and
+# pushes nothing. That file is where the submodule fetch, the lockfile origin swap and the
 # `npm_config_*` environment are explained at length; this one carries the short form and points
 # there rather than keeping a second copy of the reasoning to drift.
 #
@@ -130,7 +136,7 @@ steps:
       # client as $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET. Unconditional — a
       # missing env source is NOT a buildx error, measured on v0.36.1 — so it is inert until a run
       # carries the pair. ci-post-receive.yml has the same two flags; keep them matched.
-      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-ci:$QITS_CI_SHA"
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-ci:$version"
       docker build --network host \
         --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
         --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
@@ -148,8 +154,8 @@ steps:
       # application — announces `SoftwareRelease` only for a green run, so ordering is the whole
       # guarantee: no consumer is ever told about a version whose bill of materials is missing. A
       # failed PUT fails the release ON PURPOSE — the store being down is not a reason to announce a
-      # version nobody can audit. Only THIS pipeline uploads one: ci-post-receive.yml's sha push
-      # announces no release, so it owes no document.
+      # version nobody can audit. Only THIS pipeline uploads one: the QA pipeline announces no
+      # release and publishes no image, so it owes no document.
       #
       # ONE DOCUMENT, TWO DECLARED ARTIFACTS. `artifacts:` above also declares the `@apidocs/qits-ci`
       # docs bundle, and that one gets no SBOM: it is a tar of one committed openapi.yml, built by

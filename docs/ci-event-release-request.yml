@@ -56,6 +56,17 @@
 # build.
 #
 # ---------------------------------------------------------------------------------------------
+# STEPS SHARE NOTHING, WHICH DECIDES WHERE THE VERIFY GOES
+#
+# Every step is its own container and the ci-daemon's Workspace clones into that container's own
+# /workspace, so a file one step produced does not exist in the next. The stamped-out files are
+# therefore NOT "gating step builds, non-gating step tars what it built": each half carries the work
+# it needs. In practice a repository's gating step is its old `ci-event-build.yml` step minus the
+# retired per-push image push, and its non-gating step is its old `ci-event-userflows.yml` step
+# whole — the verify AND the publish, in one container, because splitting them was tried and never
+# survived its first run.
+#
+# ---------------------------------------------------------------------------------------------
 # LOOP REVIEW
 #
 # This pipeline publishes a docs bundle and pushes no commit and no tag, so it changes nothing the
@@ -100,6 +111,10 @@ steps:
     timeout-seconds: 1200
     script: |
       set -eu
+
+      # This container has its own clone and nothing from the step above, so the verify that
+      # PRODUCES the reports belongs here, immediately before the publish.
+      <THE REPOSITORY'S VERIFY COMMAND, THE ONE ci-event-userflows.yml RAN>
 
       # Version the bundle by the merged sha, so a bundle URL never changes meaning, and carry the
       # branch as discovery metadata. Publish-if-absent: 409 is success.
