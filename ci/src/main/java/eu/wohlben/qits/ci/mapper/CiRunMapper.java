@@ -42,6 +42,7 @@ public interface CiRunMapper {
         bare.triggerEventId(),
         bare.triggerEventName(),
         bare.releaseRequestId(),
+        bare.retryOfRunId(),
         bare.configPath(),
         steps.stream().map(this::toDto).toList(),
         live);

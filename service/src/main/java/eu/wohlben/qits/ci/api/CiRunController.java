@@ -2,6 +2,9 @@ package eu.wohlben.qits.ci.api;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import eu.wohlben.qits.auth.MachineAuth;
+import eu.wohlben.qits.auth.MachineIdentity;
+import eu.wohlben.qits.auth.QitsClaims;
 import eu.wohlben.qits.ci.control.CiIdentifiers;
 import eu.wohlben.qits.ci.control.CiRunService;
 import eu.wohlben.qits.ci.daemonhost.CiStepRelay;
@@ -20,11 +23,13 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
+import io.quarkus.security.identity.SecurityIdentity;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.util.List;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.enums.SchemaType;
+import org.eclipse.microprofile.openapi.annotations.media.Content;
 import org.eclipse.microprofile.openapi.annotations.media.Schema;
 import org.eclipse.microprofile.openapi.annotations.parameters.Parameter;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
@@ -41,11 +46,20 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * not exist, and put three services under one gateway prefix. {@code {runId}} stays in the path:
  * there it is identity, not scope.
  *
- * <p><b>The reads take the pair {@code qits:admin, qits:system}; the cancel takes {@code qits:admin}
- * alone.</b> qits:system is the machine role and qits:admin the human one, and a machine that has to
- * poll a run it asked for — qits-platform-maintenance waits out every bump this way — must not be
- * granted a person's role to do it. What mutates is not widened: {@link #cancelRun} carries its own
- * method-level list, which replaces the class's rather than adding to it.
+ * <p><b>The reads take the pair {@code qits:admin, qits:system}; the two run-scoped writes take
+ * {@code qits:admin} alone.</b> qits:system is the machine role and qits:admin the human one, and a
+ * machine that has to poll a run it asked for — qits-platform-maintenance waits out every bump this
+ * way — must not be granted a person's role to do it. What mutates is not widened: {@link #cancelRun}
+ * and {@link #retryRun} carry their own method-level list, which replaces the class's rather than
+ * adding to it.
+ *
+ * <p><b>There is one write here a machine really does perform, and it is the exception that proves
+ * that rule.</b> {@link #cancelReleaseRequestRuns} is qits-projects withdrawing a release request's
+ * CI, addressed by {@code (repoId, releaseRequestId)} because the runs it stops carry a sha nobody
+ * pushed. It keeps the class's role pair — a peer service and an operator both legitimately call it —
+ * and adds this resource's only {@code MachineAuth} check, on the machine arm. The rule that
+ * matters is the one {@code MachineGuardTest} enforces: a new write that omits the guard ships
+ * unguarded and nothing says so, so every write on this surface has a case in that file.
  *
  * <p><b>Nothing here is hidden from the OpenAPI document any more.</b> The two reads used to carry
  * {@code @Operation(hidden = true)} on the criterion "does a client consume it, does a person invoke
@@ -70,9 +84,30 @@ public class CiRunController {
 
   @Inject ObjectMapper objectMapper;
 
+  /** The machine half of {@link #cancelReleaseRequestRuns}' guard; see that method. */
+  @Inject MachineAuth machineAuth;
+
+  /** Read only to tell a machine caller from a forwarded session — never as a security state. */
+  @Inject SecurityIdentity identity;
+
   public record ListRunsResponse(List<CiRunDto> runs) {}
 
   public record CancelRunRequest(String reason) {}
+
+  /**
+   * What qits-projects sends to withdraw a release request's CI: the repository, and the request
+   * whose work is no longer wanted. Both are required — see {@link #cancelReleaseRequestRuns}.
+   */
+  public record CancelReleaseRequestRunsRequest(
+      @Schema(description = "The repository whose runs to stop", required = true) String repoId,
+      @Schema(description = "The release request whose work is withdrawn", required = true)
+          String releaseRequestId) {}
+
+  /** Which runs the cancellation actually reached — empty when there was nothing left in flight. */
+  public record CancelReleaseRequestRunsResponse(List<String> runIds) {}
+
+  /** The run a retry created; poll it like any other. */
+  public record RetryRunResponse(String runId) {}
 
   /**
    * A repository's runs, newest-first — without step output (fetch a single run for that). The
@@ -265,6 +300,115 @@ public class CiRunController {
           String payload) {
     runService.cancel(runId, cancellationReason(payload));
     return Response.accepted().build();
+  }
+
+  /**
+   * Stop every unfinished run one repository has for one release request — the door qits-projects
+   * knocks on when a request is withdrawn, closed or re-scoped.
+   *
+   * <p><b>Addressed by the pair, not by run id, and that is the contract rather than a convenience.</b>
+   * The runs it cancels were triggered by a {@code ReleaseRequestChanged} and build the request's
+   * backing branch, whose sha is a fold nobody pushed and is rewritten by the next re-fold. So the
+   * caller holds no run id and no stable sha — the request id is the only handle that survives, which
+   * is exactly why {@code ci_run.release_request_id} exists. Both halves are required: one request
+   * folds many repositories and one repository carries many open requests, so either alone would
+   * cancel a sibling's build.
+   *
+   * <p><b>202 and nothing else on the happy path.</b> A queued run is terminal before this returns; a
+   * running one has only been <em>asked</em> to stop, and its container still has to answer. Nothing
+   * left in flight is a 202 with an empty list rather than a 404: the caller asked for a state — this
+   * request's work is not running — and that state holds. Repeating the call is therefore safe.
+   *
+   * <p><b>Nothing cancelled here publishes a gating verdict.</b> A {@code CANCELLED} run announces
+   * neither {@code BuildSuccessful} nor {@code BuildFailed}, so the release gate on the other side
+   * never sees a withdrawn request's stopped build as a failure. That is {@code CiRunService}'s
+   * standing contract, and it is the property this endpoint depends on.
+   *
+   * <p><b>The guard is the machine one, and a person still reaches it.</b> A machine caller is judged
+   * on its token exactly as {@code CiEventController}'s is: right audience, and {@code project=*},
+   * because qits-ci owns no project entity and can resolve a repository to no project. A caller that
+   * presents no token is not a machine and never reaches the check — it has already been judged by
+   * the class-level roles, which is the forwarded {@code X-Qits-User}/{@code X-Qits-Roles} session an
+   * operator arrives on. Both callers are real for this route, which is why the check is on the
+   * machine arm rather than over the whole method.
+   */
+  @POST
+  @Path("/cancellations")
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Operation(summary = "Cancel every unfinished run a repository has for one release request")
+  @APIResponse(
+      responseCode = "202",
+      description = "The request's runs have been stopped or asked to stop",
+      content = @Content(schema = @Schema(implementation = CancelReleaseRequestRunsResponse.class)))
+  @APIResponse(responseCode = "400", description = "The repository id or the release request id is missing or invalid")
+  public Response cancelReleaseRequestRuns(CancelReleaseRequestRunsRequest request) {
+    if (request == null) {
+      throw new BadRequestException("A repository id and a release request id are required");
+    }
+    CiIdentifiers.requireRepoId(request.repoId());
+    String releaseRequestId = requireReleaseRequestId(request.releaseRequestId());
+    if (MachineIdentity.isMachine(identity)) {
+      machineAuth.requireProject(QitsClaims.ANY);
+    }
+    return Response.accepted()
+        .entity(
+            new CancelReleaseRequestRunsResponse(
+                runService.cancelReleaseRequestRuns(request.repoId(), releaseRequestId)))
+        .build();
+  }
+
+  /**
+   * A release request id is qits-projects' opaque string and this service validates it as one:
+   * present, and short enough to be the id of a request this platform issued. It reaches nothing but
+   * a bound query parameter, so there is no shape to check beyond that — inventing one here would be
+   * this service holding an opinion about another context's identifiers.
+   */
+  private static String requireReleaseRequestId(String releaseRequestId) {
+    if (releaseRequestId == null || releaseRequestId.isBlank()) {
+      throw new BadRequestException("A release request id is required");
+    }
+    String trimmed = releaseRequestId.trim();
+    if (trimmed.length() > MAX_RELEASE_REQUEST_ID_LENGTH) {
+      throw new BadRequestException(
+          "A release request id is at most " + MAX_RELEASE_REQUEST_ID_LENGTH + " characters");
+    }
+    return trimmed;
+  }
+
+  /** What {@code ci_run.release_request_id} holds, so a longer one names no run here. */
+  private static final int MAX_RELEASE_REQUEST_ID_LENGTH = 255;
+
+  /**
+   * Run this run's pipeline again, unchanged — the same repository, the same trigger file, the same
+   * commit, the same release request.
+   *
+   * <p>A person's button, for the case a red run is about the platform rather than about the code: a
+   * flaked container, a registry that was down, a step that hit its deadline on a busy host. Nothing
+   * about the work has changed, so nothing needs re-folding and no new event needs waiting for — the
+   * new run builds the very sha the old one built, and its verdict lands on that commit exactly as
+   * the first one's would have.
+   *
+   * <p>202 rather than 201: the answer is a run that has been <em>accepted</em>, is {@code QUEUED}
+   * and has not started, so the caller polls {@code GET /ci/api/runs/{runId}} with the id in the body
+   * like it does after a trigger. Retrying a run that has not finished is a 409 — the question is
+   * still being answered, and two runs racing for one verdict is not what was asked for.
+   *
+   * <p>It is a write, so it carries the same {@code qits:admin} the cancel does rather than the
+   * class's read pair: starting somebody's build is not a thing a peer service does either.
+   */
+  @POST
+  @Path("/{runId}/retry")
+  @jakarta.annotation.security.RolesAllowed("qits:admin")
+  @Consumes(MediaType.WILDCARD)
+  @Operation(summary = "Run a finished CI run's pipeline again, at the same commit")
+  @APIResponse(
+      responseCode = "202",
+      description = "A new run has been accepted and queued",
+      content = @Content(schema = @Schema(implementation = RetryRunResponse.class)))
+  @APIResponse(responseCode = "404", description = "No such run")
+  @APIResponse(responseCode = "409", description = "The run has not finished, so there is nothing to retry yet")
+  public Response retryRun(@PathParam("runId") String runId) {
+    return Response.accepted().entity(new RetryRunResponse(runService.retry(runId).id)).build();
   }
 
   private String cancellationReason(String payload) {

@@ -162,6 +162,31 @@ public class CiRunRepository implements PanacheRepositoryBase<CiRun, String> {
   }
 
   /**
+   * Every unfinished run one repository has for one release request — {@code QUEUED} or {@code
+   * RUNNING} — oldest first. What {@code POST /ci/api/runs/cancellations} cancels.
+   *
+   * <p><b>The pair is the scope, and both halves are load-bearing.</b> A release request is
+   * qits-projects' aggregate and one request folds N repositories, so the id alone would reach
+   * another repository's run; a repository alone would reach the runs of every OTHER request open
+   * against it, which is exactly the sibling a withdrawn request must not take down with it. The
+   * predicate is the complement of the terminal statuses for {@link #listFinishedNewestFirst}'s
+   * reason: a status added later is finished by default rather than silently cancellable.
+   *
+   * <p>Oldest first rather than newest, unlike every other listing here, because this one is not
+   * read — it is <em>acted on</em>, run by run, and settling the oldest first is what makes a
+   * partial pass (a caller that died halfway) leave the newest work standing rather than the
+   * staleest.
+   */
+  public List<CiRun> listUnfinishedForReleaseRequest(String repoId, String releaseRequestId) {
+    return list(
+        "repoId = ?1 and releaseRequestId = ?2 and status in (?3, ?4) order by createdAt, id",
+        repoId,
+        releaseRequestId,
+        CiRunStatus.QUEUED,
+        CiRunStatus.RUNNING);
+  }
+
+  /**
    * Every repository this instance has ever recorded a run for — half of what {@code KnownCiRepos}
    * offers the trigger engine as candidates, and the whole of what {@code GET /ci/api/repositories}
    * answers.

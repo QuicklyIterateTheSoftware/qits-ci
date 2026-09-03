@@ -507,7 +507,12 @@ bounded question — and an ask above **100** is clamped rather than refused, si
 listing that is both unscoped and otherwise unbounded.
 
 **The machine guard is a call in the handler, not a filter over a path.** `CiEventController` opens
-its one write with `machineAuth.requireProject(QitsClaims.ANY)`. Nothing matches a path, so renaming
+its one write with `machineAuth.requireProject(QitsClaims.ANY)`, and `CiRunController` opens
+`cancelReleaseRequestRuns` with the same call **on the machine arm** — `if
+(MachineIdentity.isMachine(identity))`, because that route has two real callers: qits-projects with a
+bearer, and an operator on the edge's forwarded `X-Qits-User`/`X-Qits-Roles` session, which carries
+no token at all and is judged by the class-level roles. Demanding a machine token unconditionally
+there would 401 the person; skipping the check would unguard the peer. Nothing matches a path, so renaming
 a `@Path` moves the guard with the route and can no longer detach it. The fail-open shape that
 replaced the old one is narrower and still real: a **new** write method that simply omits the call
 ships unguarded, and nothing says so.
@@ -528,8 +533,10 @@ controller carries a class-level role: **the pair** `{qits:admin, qits:system}` 
 and `CiRepositoryController` — `qits:system` is the machine role and `qits:admin` the human one, and
 a peer that polls a run it asked for must not be handed a person's role to do it — and `qits:system`
 on `CiEventController`, `CiDaemonController` and `CiDaemonSocket`, which is what a machine peer
-holds. **Nothing that mutates was widened with them**: `CiRunController.cancelRun` carries its own
-method-level `qits:admin`, which replaces the class's list rather than adding to it. So three doors shut in
+holds. **Nothing that mutates was widened with them**: `CiRunController.cancelRun` and
+`CiRunController.retryRun` carry their own method-level `qits:admin`, which replaces the class's list
+rather than adding to it. `cancelReleaseRequestRuns` keeps the class pair, because a peer service
+(qits-projects, withdrawing a release request) and an operator both legitimately call it. So three doors shut in
 order, and `MachineGuardTest` pins which: no token is 401, a token granted no roles is 403 at
 `@RolesAllowed`, a wrong audience or an uncovered project is `MachineAuth`'s own 403. **A machine
 token carries its roles in the `groups` claim** — qits-platform-idp copies them there from
@@ -1123,6 +1130,39 @@ names"), and what follows is what biting it feels like.
 
   **The re-fold burst needs nothing new.** The backing branch is stable per request, so
   `supersedeByCheckoutBranch` already collapses the queued older folds to the newest tip.
+
+- **Cancelling and retrying a release request's CI are the two operations that column bought, and
+  neither of them touched the dedupe.** `POST /ci/api/runs/cancellations` takes
+  `{repoId, releaseRequestId}` and cancels every unfinished run of that pair — **both halves
+  required**, since one request folds many repositories and one repository carries many open
+  requests, so either alone reaches a sibling's build. It leans entirely on a contract this service
+  already had: **a `CANCELLED` run announces nothing**, so a withdrawn request's stopped build can
+  never be read by qits-projects' gate as a failure. Nothing in flight is a 202 with an empty list —
+  the caller asked for a state, and that state holds — which is what makes it idempotent.
+
+  **The retry is where the interesting decision is.** `POST /ci/api/runs/{runId}/retry` inserts a new
+  row copying the source's repository, branch, sha, `release_request_id`, `config_path` and event
+  snapshot, so the re-run is the same work and its verdict correlates as the original's would have.
+  Every column of `(trigger_event_id, repo_id, config_path)` would therefore be identical, which is
+  precisely the replay that constraint refuses — so the retry mints a **synthetic trigger identity**,
+  `CiRunService.RETRY_TRIGGER_PREFIX + <its own run id>`. Unique by construction, unmistakably local,
+  and the constraint is left exactly as it is. **The tempting alternative was rejected and it is
+  worth knowing why**: adding `retry_of_run_id` to the constraint would have put a null in the tuple
+  on every ordinary row, and SQL treats such rows as never colliding — the dedupe would have stopped
+  firing platform-wide, silently. So `retry_of_run_id` (V9) is pure provenance.
+
+  Two consequences travel with the synthetic id. The **causation edge** is inherited rather than
+  re-minted — `causation_id` is copied from the run being re-fired, and `CiRunService.causingEventId`
+  is the one place that is read back, for the announcers and for a step's `$QITS_EVENT_ID`, so a
+  retried run's `BuildSuccessful` hangs off the domain event that started it rather than off a root
+  of its own. And **`gating` is re-derived from `trigger_config` rather than copied**: the column on
+  a *finished* run is what that run's verdict was worth (the file's flag ANDed with the failing
+  step's), so copying it would start a re-run of a gating pipeline off as non-gating and publish a
+  verdict no release gate holds a commit for.
+
+  Only a **terminal** run is retryable (409 otherwise): two runs racing for one verdict is not what
+  was asked for. Cancelled runs are retryable, which is the point — a re-fire is what a cancellation
+  invites.
 - **A step declares its own `gating:`, and that is what let two files become one.** The file-level
   flag says what a whole pipeline is worth to a release gate; the step-level one says what one step
   is worth, and a run's announced `gating` is the **AND** of the file's flag and the failing step's
@@ -1405,8 +1445,8 @@ no historical row has them; a run with no pair builds id-addressed URLs, which i
 did before names existed. `repo_id` is untouched and stays the key: the dedupe constraint is built on
 it and every existing row is found by it.
 
-`V6`, `V7__run_gating.sql` and `V8__run_release_request.sql` continue it too, and the last two are
-the release-flow pair. `ci_run.gating` is the data form of "userflows are non-gating" — added with a
+`V6`, `V7__run_gating.sql`, `V8__run_release_request.sql` and `V9__run_retry.sql` continue it too,
+and the last three are the release-flow set. `ci_run.gating` is the data form of "userflows are non-gating" — added with a
 default so every historical row fills as gating, then the default dropped, which is the V3-era
 lesson followed. `ci_run.release_request_id` is nullable with **no** default and no backfill,
 because null is the ordinary value rather than a value to be filled: every push run and every event
@@ -1414,7 +1454,11 @@ run not triggered by a `ReleaseRequestChanged` has none, so there is nothing for
 be and no reading of "absent" to get wrong. It carries a **partial** index (`where … is not null`),
 since an index over the nulls would be a second copy of the table for no query, and it is part of no
 constraint — the dedupe stays `(trigger_event_id, repo_id, config_path)` and the per-branch collapse
-a re-fold needs is already `supersedeByCheckoutBranch`'s.
+a re-fold needs is already `supersedeByCheckoutBranch`'s. `ci_run.retry_of_run_id` (V9) is the same
+shape and the same reasoning, plus one it states out loud: it is deliberately **not** part of the
+dedupe constraint, because a null in a unique tuple makes rows never collide and adding it there
+would have switched the dedupe off for every run on the platform. A retry gets past the constraint
+with a synthetic `trigger_event_id` instead — see "The trigger engine".
 
 `V1__init.sql` is the rest of the schema. The nine H2 migrations it replaces (V1-V8 plus a Java V9) are
 history in this repository's log and are not a prefix of this lineage: the move off H2 is a
@@ -1468,9 +1512,10 @@ migration to point at. `baseline-on-migrate` is gone with the H2 file it existed
 `SecurityIdentity`; this service authenticates no person. The platform edge establishes the
 session, and `qits-gateway` strips and re-asserts its reserved `X-Qits-*` namespace. That hygiene is
 the entire reason the headers can be trusted here. There is no auth variant to select in this
-service: the read routes accept `qits:admin` or `qits:system`, the one human write (`cancel`)
-requires `qits:admin`, and machine controllers retain their separate `MachineAuth` audience/scope
-checks pending endpoint-scoped machine roles.
+service: the read routes accept `qits:admin` or `qits:system`, the two human writes (`cancel` and
+`retry`) require `qits:admin`, the release-request cancellation takes either role and adds a
+`MachineAuth` check on its machine arm, and machine controllers retain their separate `MachineAuth`
+audience/scope checks pending endpoint-scoped machine roles.
 
 **`identity.isAnonymous()` is not a security state** — it means "no name for the audit row". A check
 of the form `if (identity.isAnonymous()) deny` would look like a security control and be worth
@@ -1587,7 +1632,8 @@ contract, tested where it lives.
   **The document holds the read surface and the one write, and exactly one operation is hidden.**
   The criterion has always been "does a first-party client consume it, does a person invoke it" —
   machine surfaces stay out. For a long time that left `paths: {}`, then one path (`POST
-  /ci/api/runs/{runId}/cancel`, the one operation here a person invokes on purpose), because no
+  /ci/api/runs/{runId}/cancel`, the one operation here a person invoked on purpose — it has since
+  been joined by `POST /ci/api/runs/{runId}/retry` and `POST /ci/api/runs/cancellations`), because no
   client read anything. **qits-spa-ci changed the answer, not the criterion**: it reads `GET
   /ci/api/repositories`, `GET /ci/api/repositories/summary`, `GET /ci/api/runs`, `GET
   /ci/api/runs/active`, `GET /ci/api/runs/finished` and `GET /ci/api/runs/{runId}` on every page it

@@ -17,12 +17,24 @@ import org.junit.jupiter.api.Test;
 /**
  * The write surface with the machine gate ON — the deployment posture once qits-idp exists.
  *
- * <p><b>There is one write left, and that is the whole of what this file now says.</b> It used to
- * cover two: the push intake, guarded with the pushed repository, and the manual trigger, guarded
- * with every project. The intake is gone — a push arrives as {@code SCMPublishCommit} off the event
- * log, where a bearer would mean nothing, since what authenticates an event is the bus that carried
- * it rather than a header on a request nobody makes. The cases that asked "may this token push to
- * this repository" have no endpoint left to ask it of.
+ * <p><b>There are two guarded writes, and the second one is the interesting shape.</b> This file used
+ * to cover the push intake, guarded with the pushed repository, and the manual trigger, guarded with
+ * every project. The intake is gone — a push arrives as {@code SCMPublishCommit} off the event log,
+ * where a bearer would mean nothing, since what authenticates an event is the bus that carried it
+ * rather than a header on a request nobody makes. The cases that asked "may this token push to this
+ * repository" have no endpoint left to ask it of.
+ *
+ * <p>What joined the trigger is {@code POST /ci/api/runs/cancellations}, qits-projects withdrawing a
+ * release request's CI. <b>It has two real callers and both are asserted here</b>: a machine caller
+ * is judged on its token exactly as the trigger's is (own audience, {@code project=*}), and an
+ * operator arrives on the edge's forwarded {@code X-Qits-User}/{@code X-Qits-Roles} session carrying
+ * no token at all and is judged by the class-level roles. That is why the {@code MachineAuth} call
+ * sits on the machine arm rather than over the whole method, and why a case here asserts the
+ * forwarded session is <em>not</em> answered 401 — a guard tightened to "always a token" would break
+ * the person, and one dropped entirely would unguard the peer.
+ *
+ * <p>{@code POST /ci/api/runs/{runId}/retry} is beside the cancel, in the other category: a person's
+ * write, {@code qits:admin} only, and a machine granted every project is refused.
  *
  * <p>The rule they enforced is unchanged, and is why this file stays: a NEW write method that simply
  * omits {@code machineAuth.require*} ships unguarded and nothing says so. Add a write endpoint, add
@@ -109,6 +121,13 @@ class MachineGuardTest {
   private static final String TRIGGER_BODY =
       """
       {"name":"SoftwareRelease","payload":{"repository":"guarded-repo","version":"1.0.0"}}""";
+
+  /** The other guarded write: qits-projects withdrawing a release request's CI. Absolute too. */
+  private static final String CANCELLATIONS = "/ci/api/runs/cancellations";
+
+  private static final String CANCELLATIONS_BODY =
+      """
+      {"repoId":"guarded-repo","releaseRequestId":"rr-guarded"}""";
 
   @Test
   void theManualTriggerWithNoMachineTokenIs401() {
@@ -290,6 +309,107 @@ class MachineGuardTest {
     // The one write on the read resource, and the whole reason the reads' widening is method-scoped
     // rather than class-wide: stopping somebody's build is not a thing a peer service does.
     given().when().post("/ci/api/runs/no-such-run/cancel").then().statusCode(403);
+  }
+
+  @Test
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = OWN_AUDIENCE),
+        @Claim(key = QitsClaims.PROJECT, value = "*")
+      })
+  void retryingARunStaysAPersonsAndRefusesAMachine() {
+    // The second write on the read resource, and it takes the same method-level qits:admin the
+    // cancel does for the same reason: starting somebody's build is not a thing a peer service does
+    // either. A machine holding every project is still 403 here.
+    given().when().post("/ci/api/runs/no-such-run/retry").then().statusCode(403);
+  }
+
+  @Test
+  void theReleaseRequestCancellationWithNoMachineTokenIs401() {
+    // The one write here a machine really does perform — qits-projects withdrawing a release
+    // request's CI. Nothing presented, and the %test dev user is blanked in this profile, so the
+    // answer is "present something".
+    given()
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(CANCELLATIONS_BODY)
+        .when()
+        .post(CANCELLATIONS)
+        .then()
+        .statusCode(401);
+  }
+
+  @Test
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = OWN_AUDIENCE),
+        @Claim(key = QitsClaims.PROJECT, value = "*")
+      })
+  void theReleaseRequestCancellationNeedsATokenGrantedEveryProject() {
+    // 202 is the guard PASSING, and it is deterministic: this instance holds no run for that
+    // request, and "nothing left in flight" is the state the caller asked for rather than a 404.
+    // What a dropped or tightened guard looks like is 401 or 403, which is what this case rules out.
+    given()
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(CANCELLATIONS_BODY)
+        .when()
+        .post(CANCELLATIONS)
+        .then()
+        .statusCode(202);
+  }
+
+  @Test
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = FOREIGN_AUDIENCE),
+        @Claim(key = QitsClaims.PROJECT, value = "*")
+      })
+  void aTokenMintedForAnotherServiceMayNotCancelAReleaseRequestsRuns() {
+    given()
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(CANCELLATIONS_BODY)
+        .when()
+        .post(CANCELLATIONS)
+        .then()
+        .statusCode(403);
+  }
+
+  @Test
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = OWN_AUDIENCE),
+        @Claim(key = QitsClaims.PROJECT, value = "guarded-repo")
+      })
+  void aTokenScopedToOneRepositoryMayNotCancelAReleaseRequestsRuns() {
+    // qits-ci owns no project entity and can resolve a repository to no project, so the honest
+    // grant for anything on this surface is every project — the manual trigger's ruling, applied.
+    given()
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(CANCELLATIONS_BODY)
+        .when()
+        .post(CANCELLATIONS)
+        .then()
+        .statusCode(403);
+  }
+
+  @Test
+  void aForwardedAdminSessionCancelsAReleaseRequestsRuns() {
+    // The other caller of the same route, and why the MachineAuth check sits on the machine arm
+    // rather than over the whole method: an operator arrives on the edge's forwarded session, which
+    // carries no bearer at all and is judged by the class-level roles. A guard that demanded a
+    // machine token unconditionally would answer this 401.
+    given()
+        .header("X-Qits-User", "alice")
+        .header("X-Qits-Roles", ADMIN)
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(CANCELLATIONS_BODY)
+        .when()
+        .post(CANCELLATIONS)
+        .then()
+        .statusCode(202);
   }
 
   @Test

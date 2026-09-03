@@ -115,6 +115,26 @@ public class CiRun extends PanacheEntityBase implements CausedRow {
   @Column(name = "release_request_id", length = 255)
   public String releaseRequestId;
 
+  /**
+   * The run this one re-fires, or null for every run that is not a manual retry — which is every run
+   * a trigger produced.
+   *
+   * <p>A retry asks for the <b>same work</b> again: same repository, same trigger file, same
+   * checkout, same {@link #releaseRequestId}, same {@link #commitSha}, so its verdict correlates
+   * exactly as the original's would have. What it may not carry is the same {@link #triggerEventId},
+   * because that column is one third of the dedupe constraint and a second row under the original
+   * event id is the replay the constraint exists to refuse. A retry therefore mints its own
+   * <b>synthetic</b> trigger identity, {@code CiRunService.RETRY_TRIGGER_PREFIX + id} — unique by
+   * construction, and naming no event qits-events ever minted.
+   *
+   * <p>This column is the provenance that synthetic id cannot carry, and it is also what tells the
+   * two apart at read time: a row with a value here is a re-fire, and its {@code triggerEventId} is
+   * a local token rather than a foreign id. {@link #causationId} is copied from the run being
+   * retried, so the events the retry publishes still name the domain event that started all of it.
+   */
+  @Column(name = "retry_of_run_id", length = 255)
+  public String retryOfRunId;
+
   @Enumerated(EnumType.STRING)
   @Column(nullable = false, length = 32)
   public CiRunStatus status;

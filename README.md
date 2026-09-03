@@ -103,6 +103,8 @@ rest of qits it reaches over a URL it is configured with:
 | in | `GET /ci/api/repositories/summary` → `{"repositories": [{repositoryId, projectId, repoName, lastRun, lastMainRun}]}` — ascending by id, full run objects, `lastMainRun` null when there is none, and the name pair null for a repository whose pushes were id-addressed | same; it is the id listing plus the two runs a client would otherwise make a request per repository to find |
 | in | `GET /ci/api/daemon` → `{"daemonName", "daemonVersion", "previousDaemonVersion", "source"}` — the pin ladder's top rung (an adopted release, else the configured pin), never a run row; blank `daemonVersion` and `source: "none"` mean this deployment has pinned none | same; read fail-closed by qits-artifacts' daemon GC and readable by the client |
 | in | `POST /ci/api/runs/{runId}/cancel` → 202, 409 on a run that has already finished | same: no machine guard, behind the deployment's auth policy |
+| in | `POST /ci/api/runs/{runId}/retry` → 202 `{runId}`, 404, 409 on a run that has not finished — a new run of the **same** pipeline at the **same** commit | same; `qits:admin`, like the cancel, and for the same reason |
+| in | `POST /ci/api/runs/cancellations` — `{repoId, releaseRequestId}` → 202 `{runIds}`, every unfinished run that repository has for that release request | **the one write here a machine performs.** qits-projects calls it when a request is withdrawn; a machine caller needs this service's audience and `project=*`, an operator arrives on the edge's forwarded session and is judged by the roles alone |
 | in | `ws://…/ci/daemon` — the socket each step container's daemon dials **out** to | two credentials and no machine token: the daemon asserts `X-Qits-User`/`X-Qits-Roles: qits:system` to get past the endpoint's `@RolesAllowed` at the **upgrade**, and the host-minted per-container secret is what `@OnOpen` checks |
 | out | where the git host answers: ci reads a commit's pipeline config off its content routes — `<base>/git/<projectId>/<repoName>/blob/<rev>/<path>` and `…/tree/<rev>[/<path>]` for a run whose push carried the public pair, `<base>/git/<repoId>/…` for one that did not — and, with no `qits.ci.projects-url` set, its candidate listing off `GET <base>/git` → `{"repositories": [...]}` | `qits.ci.git-host-url` |
 | out | `GET <base>/projects/api/repositories` → `{"repositories": [{id, projectId, name, mainBranch}]}` — the candidate list an arriving event is evaluated against, and the only place the public `(projectId, name)` pair can be read. **Unset by default**: with no value ci falls back to the git host's storage listing, which is what a pre-cutover platform and a clone-alone build need | `qits.ci.projects-url` |
@@ -653,7 +655,10 @@ fills in, is `docs/ci-event-release-request.yml`.
   publish nothing.
 - **The run records `releaseRequestId`**, and the API returns it. `mergedSha` names one fold and the
   next re-fold replaces it, so the request id is the handle a cancellation or a retry addresses the
-  work by; the sha says which fold the verdict is about.
+  work by; the sha says which fold the verdict is about. Those two operations exist now:
+  `POST /ci/api/runs/cancellations` withdraws a request's CI by that pair, and
+  `POST /ci/api/runs/{runId}/retry` re-asks the same question at the same fold. See "Following a run,
+  stopping one, and asking again".
 - **A burst of re-folds collapses to the newest** with nothing added: the backing branch is stable
   per request, so the existing per-branch collapse (`checkout:`'s) supersedes the queued older folds
   as `DEDUPED`. A fold already `RUNNING` keeps running.
@@ -1146,7 +1151,7 @@ removes it and becomes the step's output), a daemon that registered and then wen
 a genuine step timeout are six different recorded outcomes — none of them is "the step failed with
 exit −1".
 
-## Following a run, and stopping one
+## Following a run, stopping one, and asking again
 
 `GET /ci/api/runs/{runId}` is the whole live surface: while the run is `RUNNING` it carries a `live`
 object — the step index in flight and the bounded tail it has printed. **Poll it.** There is no SSE
@@ -1166,6 +1171,40 @@ A queued push is also cancelled automatically when a
 newer push for the same repository and branch is accepted: it records `DEDUPED` and the newer run's
 id, which the run detail links to. Event-triggered runs are excluded because distinct trigger files
 on one branch are independent pipelines, not duplicates.
+
+**A cancelled run announces nothing at all.** Not `BuildSuccessful`, not `BuildFailed` — a person
+withdrawing a question is not an answer to it, and the release gate on the other side reads every
+`BuildFailed` as "this commit is not releasable". That contract is what makes the next paragraph
+safe.
+
+`POST /ci/api/runs/cancellations` — body `{"repoId": "…", "releaseRequestId": "…"}` — cancels **every**
+unfinished run that repository has for that release request and answers 202 with the ids it stopped.
+It is qits-projects' door for a request that was withdrawn, closed or re-scoped, and it is addressed
+by the pair rather than by run id because the runs it stops build a fold nobody pushed: the sha is
+rewritten by the next re-fold and the caller never held a run id. **Both halves of the key are
+required** — one request folds many repositories and one repository carries many open requests, so
+either alone would cancel a sibling's build. Nothing left in flight is a 202 with an empty list
+rather than a 404: the caller asked for a state, and that state holds, which makes the call
+idempotent and safe to retry.
+
+`POST /ci/api/runs/{runId}/retry` answers 202 with `{"runId": "…"}` and runs that run's pipeline
+again — same repository, same trigger file, same commit, same release request. It is for the red
+that is about the platform rather than about the code (a flaked container, a registry that was down,
+a step that hit its deadline), where nothing needs re-folding and no new event needs waiting for. The
+new run builds the very sha the old one built, so its verdict lands on the same commit. Retrying a
+run that has not finished is a 409; everything terminal is retryable, cancelled runs included.
+
+**How it gets past the dedupe.** `unique (trigger_event_id, repo_id, config_path)` is the
+at-most-one-run-per-(event, trigger file) guarantee, and a retry is by definition the same three
+values — the shape that constraint exists to refuse. So a retry mints its own **synthetic** trigger
+identity, `retry:<its own run id>`: unique by construction, unmistakably local, and impersonating no
+event qits-events ever minted. The constraint is untouched, and adding a column to it was rejected
+for a concrete reason — the column is null on every ordinary row, and SQL treats a tuple containing a
+null as never colliding, so the dedupe would have stopped firing platform-wide. `retry_of_run_id`
+(V9) is then pure provenance, and it is what the API returns as `retryOfRunId`. The **causation** is
+inherited rather than re-minted: the retry copies `causation_id` from the run it re-fires, so its
+`BuildSuccessful` still hangs off the domain event that started the whole thing and a re-fired
+release request is one chain in the log rather than an unexplained root.
 
 ## What a restart costs
 
