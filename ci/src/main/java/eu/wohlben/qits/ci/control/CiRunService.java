@@ -1127,10 +1127,12 @@ public class CiRunService {
    *
    * <p><b>This is the only announcement a green run makes about itself</b>, and it used to be one of
    * two. The other was a direct POST to qits-platform-deployments' intake, sent from here on every
-   * green run; the deployer now subscribes to {@code BuildSuccessful} on the bus durably and calls
-   * its own announce path, so the deploy follows from this event instead of from a second call. The
-   * intake is still there and is still the manual door a replay knocks on — what went is qits-ci
-   * knocking on it.
+   * green run; the deployer subscribes off the bus durably instead, so a deploy follows from an
+   * event rather than from a second call of this service's. It follows {@code SoftwareRelease} and
+   * no longer this announcement — a green build is not a reason to put anything live — and what
+   * reads this one is qits-projects' release-request gate. The deployer's intake is still there,
+   * at {@code /events/software-released}, and is still the manual door a replay knocks on; what
+   * went is qits-ci knocking on any of it.
    *
    * <p>{@code finishedAt} comes back from {@link #finishRun} instead of being read off {@code run}
    * because it is not there — {@link #finishRun} mutates a freshly loaded entity in its own

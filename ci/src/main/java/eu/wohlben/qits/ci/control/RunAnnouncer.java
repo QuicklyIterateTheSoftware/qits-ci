@@ -11,10 +11,12 @@ import java.time.Instant;
  * qits-platform-deployments was asked to deploy, over HTTP, at a URL this repo configured, on every
  * green run. This is a <em>statement</em> addressed to nobody in particular — "a build passed" —
  * which qits-events records and anything on the platform may subscribe to, this service included.
- * The deployer is one of those subscribers now: it consumes {@code BuildSuccessful} durably and
- * calls its own announce path, so a disconnect delays a deployment instead of losing it, which is
- * what a fire-and-forget POST could never offer. Its HTTP intake stays as the manual and recovery
- * door; qits-ci is simply no longer one of the callers.
+ * Who acts on it has moved on twice: the deployer consumed it durably for a while, and now does not
+ * — a green build stopped being a reason to put anything live, so the deployer subscribes to {@code
+ * SoftwareRelease} and its {@code /events/build-succeeded} door is gone along with the POST that
+ * addressed it. What reads this statement is qits-projects' release-request gate, which records the
+ * verdict against the commit. Neither consumer is qits-ci's concern, which is the point of a
+ * statement: this port did not change when they did.
  *
  * <p>The signature carries {@code finishedAt} because an event carries <b>when it happened</b> —
  * that is what an event log is for — and the value is the run's own terminal timestamp rather than
@@ -46,8 +48,8 @@ public interface RunAnnouncer {
    *
    * <p>{@code repoId} is the storage id and is always set; {@code projectId} and {@code repoName}
    * are the public {@code (project, name)} pair off the run's own row, present when the announcing
-   * push arrived name-addressed and null when it did not. They ride the event so the deployer names
-   * the image {@code qits/<repoName>:<sha>} instead of falling back to the id.
+   * push arrived name-addressed and null when it did not. They ride the event so a subscriber can
+   * address the repository by name instead of falling back to the id.
    *
    * <p><b>A plain {@code String}, and that is the whole reason this parameter is here rather than an
    * ambient value.</b> It is a foreign id, which is exactly how this module names foreign things, and

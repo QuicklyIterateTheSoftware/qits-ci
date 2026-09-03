@@ -186,11 +186,18 @@ push back off the log instead. Two consequences worth stating:
 notifier, the `PdBearer` credential it carried, the `qits.platform.deployments.intake-url` key and
 the port itself.
 
-What replaced it is the pair below: qits-ci publishes `BuildSuccessful` through the eventstream
-outbox, and qits-platform-deployments consumes that event with a **durable** subscriber which calls
-its own announce path. Both halves are durable where the POST was fire-and-forget — an unreachable
-qits-events leaves the event in this process's outbox, and a disconnected or restarting deployer
-catches up from the log — so a deployment is delayed by an outage rather than lost to one.
+What replaced it is the bus below: qits-ci publishes through the eventstream outbox and the deployer
+consumes with a **durable** subscriber which calls its own announce path. Both halves are durable
+where the POST was fire-and-forget — an unreachable qits-events leaves the event in this process's
+outbox, and a disconnected or restarting deployer catches up from the log — so a deployment is
+delayed by an outage rather than lost to one.
+
+**Which event deploys has since changed, and it is no longer this one.** The deployer subscribed to
+`BuildSuccessful` when the POST retired; it subscribes to `SoftwareRelease` now, because a green
+build stopped being a reason to put anything live. So `BuildSuccessful` is a verdict about a commit —
+qits-projects' release-request gate is what reads it — and a deployment follows this service's
+`SoftwareRelease`, published once per artifact a release pipeline publishes. A repository whose
+pipeline publishes nothing deploys nothing, however green it goes.
 
 That is worth the whole paragraph because the loss was measured. The call was one POST whose failure
 was swallowed at debug, and a bootstrap paid for it: qits-platform-idp was redeployed minutes before
@@ -200,10 +207,11 @@ never happened with nothing anywhere saying so. The first answer was bounded ret
 at-most-once past three minutes, still a POST that only this process knew it owed. The bus pair has
 no such window, and the retries retired with the notifier that grew them.
 
-**The deployer's HTTP intake stays.** It is the manual and recovery door, which a bootstrap replay
-knocks on by hand; what went away is qits-ci knocking on it per green run. So this repository
-configures no address for the deployer at all, and presents a credential to nobody — the
-`quarkus.oidc-client` extension went with `PdBearer`.
+**The deployer's HTTP intake stays, at a different path.** `/events/build-succeeded` is gone at that
+end too and answers 404; what takes its place is `POST /platform-deployments/api/events/software-released`,
+the manual and recovery door a bootstrap replay knocks on by hand. What went away is qits-ci knocking
+on any of it. So this repository configures no address for the deployer at all, and presents a
+credential to nobody — the `quarkus.oidc-client` extension went with `PdBearer`.
 
 **A green run is announced to nobody in particular.** The transition publishes a
 `BuildSuccessful` event to [qits-events-platform-service](https://github.com/QuicklyIterateTheSoftware/qits-events-platform-service),
@@ -211,7 +219,9 @@ through the `RunAnnouncer` seam in `ci/control`, implemented by
 `service/…/bus/BuildSuccessfulAnnouncer`. Only `SUCCESS` announces — a red run, a `TIMED_OUT` run, a
 `CONFIG_ERROR` and a discarded run announce nothing. It is a *statement* anything on the platform may subscribe to
 rather than a request addressed to one service, which is exactly why the deployer could move behind
-it without qits-ci learning anything about deploying. It is a
+it — and then off it again, to `SoftwareRelease` — without qits-ci learning anything about deploying
+either time. What reads it today is qits-projects' commit ledger, and through it the release
+request's quality gate. It is a
 `PUT` at a UUID the publisher picks, so a retry is a replay rather than a duplicate; a delivery that
 does not land goes to an outbox in this process and is retried on a schedule; and it carries the
 run's own `finishedAt` as the event's `occurredAt`, plus `imageDigest` — which qits-ci never has,
@@ -1327,10 +1337,12 @@ a repository's own listing will show.
   qits-platform-deployments and hand this service qits-idp client credentials
   (`QUARKUS_OIDC_CLIENT_CLIENT_ENABLED`, `QUARKUS_OIDC_CLIENT_CREDENTIALS_SECRET`) so the POST could
   carry a bearer. **All three are gone, and none of them is aliased** — a deployment still setting
-  any of them is setting nothing. A green run now announces itself on the bus and
-  qits-platform-deployments subscribes, so what makes a deployment happen is `QITS_EVENTS_URL` and
-  `QITS_EVENTSTREAM_ENABLED` below, plus a deployer that is subscribing. The deployer's HTTP intake
-  still exists for a manual replay; nothing here calls it.
+  any of them is setting nothing. Runs and releases announce themselves on the bus and
+  qits-platform-deployments subscribes — to `SoftwareRelease`, not to `BuildSuccessful`: a green
+  build is not a deployment any more, a published release is. So what makes a deployment happen is
+  `QITS_EVENTS_URL` and `QITS_EVENTSTREAM_ENABLED` below, plus a deployer that is subscribing, plus a
+  pipeline that publishes something. The deployer's HTTP intake still exists for a manual replay, at
+  `/events/software-released`; nothing here calls it.
 - Set `qits.artifacts.registry-host` / `qits.artifacts.image-repository` to qits-artifacts' registry
   as reachable **from the docker host** — the daemon on the far side of the mounted socket is what
   resolves that name and performs the push, not this process and not the step's CLI. While the

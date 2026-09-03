@@ -79,10 +79,11 @@ package:
 
   There was a third, `notify`, holding the deploy announcement — one POST per green run to
   qits-platform-deployments' intake, plus the qits-idp credential it carried. It is **gone**, and so
-  is its `PdNotifier` port in `ci/control`: the deployer subscribes to `BuildSuccessful` durably now,
-  so what used to be an outbound HTTP call of ci's is an ordinary consumption of the deployer's. The
-  intake it posted to still exists as the manual/recovery door; nothing here calls it, and no key
-  here configures it. `quarkus-oidc-client` left the pom with that package and has since come back
+  is its `PdNotifier` port in `ci/control`: what used to be an outbound HTTP call of ci's is an
+  ordinary consumption of the deployer's. What it consumes is `SoftwareRelease` — a green build
+  stopped being a reason to deploy, so the `/events/build-succeeded` path that POST addressed is gone
+  at that end as well. The intake that remains, `/events/software-released`, is the manual/recovery
+  door; nothing here calls it, and no key here configures it. `quarkus-oidc-client` left the pom with that package and has since come back
   for a different hop — the token this service presents to qits-containers, produced in
   `containers/`. See "Authentication".
 - `service/…/idp/` — the qits-idp commissioning adapter: the client, the run-scoped memory of what
@@ -745,9 +746,10 @@ eventstream suite does.
 `RunAnnouncer` (in `ci/control`, implemented in `service/`) is what keeps the `ci` module free of the
 bus. It used to be the second of two — `PdNotifier` was beside it, a direct POST asking
 qits-platform-deployments to deploy, and the two were separate ports because a request to one named
-service and a statement to the platform are different things. The deployer consumes `BuildSuccessful`
-durably now, so the request became a consumption and the port retired; the statement is what is left,
-and the shape of it did not change. `finishedAt` is on the signature because an event carries when it
+service and a statement to the platform are different things. The deployer consumes off the bus
+durably now — `SoftwareRelease`, since a green build stopped being a reason to deploy anything — so
+the request became a consumption and the port retired; the statement is what is left, and the shape
+of it did not change. What hangs off `BuildSuccessful` is qits-projects' release-request gate. `finishedAt` is on the signature because an event carries when it
 happened,
 and it comes back out of `finishRun` rather than off the `CiRun` instance: that method mutates a
 freshly loaded entity in its own transaction, so the caller's copy never sees the value. **A null
@@ -1607,7 +1609,7 @@ commissions nothing and a step container's environment is what it always was.
 
 **This is a NEW arrangement rather than the old one coming back.** The retired one was
 `notify/PdBearer`, a bearer for qits-platform-deployments' HTTP intake, and it went with the call it
-carried when the deployer started subscribing to `BuildSuccessful`. What the pom said in the gap —
+carried when the deployer started subscribing off the bus instead. What the pom said in the gap —
 "adding the extension back means a new outbound caller, not a config change" — is exactly what
 happened: a new caller arrived, so the extension did.
 

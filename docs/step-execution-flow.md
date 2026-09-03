@@ -58,7 +58,6 @@ sequenceDiagram
     participant Ci as qits-ci
     participant Dockerd as host dockerd
     participant Step as step container
-    participant Pd as qits-platform-deployments
 
     Dev->>Git: git push
     Git->>Bus: SCMPublishCommit{repoId, branch, oldSha, sha, …, suppressCi}<br/>through the outbox — durable, so a qits-ci that was down reads it back
@@ -85,16 +84,22 @@ sequenceDiagram
     end
 
     Note over Ci: a red step skips the rest; the remaining rows are written SKIPPED
-    Ci->>Pd: POST /platform-deployments/api/events/build-succeeded — only on SUCCESS
+    Ci->>Bus: BuildSuccessful — only on SUCCESS; BuildFailed with the terminal word otherwise
 ```
 
-Two things the diagram is deliberately precise about:
+Three things the diagram is deliberately precise about:
 
 - **The script arrives as a reply.** qits-ci initiates nothing toward a container. The script is a
   field of the frame answering the daemon's own `Initialized`, which is also why it never appears in
   an argv and why the container never receives the config *file* — only its own step.
 - **The row is written once, terminal.** While a step runs it has no row at all; `live` is what makes
   that legible instead of looking like a run with missing steps.
+- **The last arrow goes to the bus and to nobody in particular.** It used to be a POST to
+  qits-platform-deployments' `/events/build-succeeded`, drawn here because a green run *was* a
+  deployment. Both halves of that have gone: qits-ci published its last such POST some releases ago,
+  and the deployer has since removed the path itself — a green build is no longer a reason to put
+  anything live. `BuildSuccessful` is a verdict about a commit now, and its consumer is
+  qits-projects' release-request quality gate.
 
 ## Where a publishing step fits
 
@@ -105,6 +110,7 @@ sequenceDiagram
     participant Step as final step container
     participant Dockerd as host dockerd
     participant Reg as qits-artifacts registry
+    participant Bus as qits-events
     participant Pd as qits-platform-deployments
 
     Ci-->>Step: RunStep{script} over the control WebSocket
@@ -113,14 +119,20 @@ sequenceDiagram
     Dockerd->>Reg: PUT blobs + manifest — tokenless for producers
     Step-->>Ci: Output{chunks} — the build log, over the control WebSocket
     Step-->>Ci: Finished{exitCode}
-    Ci->>Pd: build-succeeded, because the run went green
-    Pd->>Reg: pull REGISTRY/REPOSITORY/APP:SHA — the tag convention, unenforced
+    Ci->>Bus: SoftwareRelease{repoId, projectId, version, package} — one per published declaration
+    Bus-->>Pd: the frame, durably; a deployer that was down reads it back
+    Pd->>Reg: pull REGISTRY/REPOSITORY/APP:VERSION — the tag convention, unenforced
 ```
 
 Nothing here is a new mechanism. The push is a step's exit code like any other — a failed push is a
-failed step is a failed run, so the announcement to qits-platform-deployments (green runs only) keeps
-implying the image exists. `$QITS_REGISTRY` and `$QITS_IMAGE_REPOSITORY` are injected into *every*
-step container so the script names no deployment fact; `$QITS_CI_SHA` was already there.
+failed step is a failed run, so the announcement (published declarations only) keeps implying the
+image exists. **What the deployer hears is the release and not the build**: it subscribes to
+`SoftwareRelease`, so a repository whose pipeline publishes nothing deploys nothing, however green
+it goes. Its HTTP intake still takes a `POST /platform-deployments/api/events/software-released`,
+and that door is a bootstrap's and an operator's — qits-ci calls it never.
+
+`$QITS_REGISTRY` and `$QITS_IMAGE_REPOSITORY` are injected into *every* step container so the script
+names no deployment fact; `$QITS_CI_SHA` was already there.
 
 And note who dials the registry in that diagram: **`Dockerd`, not `Step` and not `Ci`.** The CLI on
 the far side of the mounted socket is a client; the host's daemon is what resolves the registry name,
