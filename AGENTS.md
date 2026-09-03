@@ -1095,6 +1095,51 @@ names"), and what follows is what biting it feels like.
   has the jar — the same guard shape `EventWireReflectionTest` puts over the mix-in's class name.
   Rename the event or the field in qits-githost and the suite goes red, rather than the supersede
   quietly ceasing to fire.
+- **`ReleaseRequestChanged` is a trigger this engine needed no code to accept, and exactly one
+  column to serve.** The platform runs no CI outside release requests: qits-projects folds a
+  request's sources onto `release/<id>` and announces every successful re-fold, and a repository's
+  single QA pipeline (`ci-event-release-request.yml`; the reference file is
+  `docs/ci-event-release-request.yml` and `README.md` has the shape) selects it with
+  `checkout: { branch: backingBranch, sha: mergedSha }`. Matching, selection and checkout are the
+  generic grammar — the branch that gets built is a branch nobody pushed, which is the whole reason
+  the event has to exist, and "decide at main, build at the payload's commit" answers it unchanged.
+
+  **What is event-specific is `ci_run.release_request_id` and nothing else.** `mergedSha` names one
+  fold and the next re-fold replaces it, so it is not a handle a cancellation or a retry can hold;
+  the request id is. It is read at accept in `CiRunService`, **gated on the event NAME** the way
+  `supersedeByVersion` is gated on the tag event's — a `releaseRequestId` elsewhere on the bus is
+  some other context's word, and a provenance column that reads any field of any payload eventually
+  records something nobody meant. A value longer than the column is recorded as *none* rather than
+  truncated or thrown: the run is the point.
+
+  **`RELEASE_REQUEST_EVENT_NAME`/`RELEASE_REQUEST_ID_FIELD` are strings, and there is no jar to make
+  them anything else** — qits-projects publishes no vocabulary jar, by its own ruling and for
+  qits-workspaces' measured reason. `bus/ReleaseRequestChangedContractTest` is the guard, and it is
+  `ScmReleaseContractTest`'s mechanism rather than `ScmPublishTagContractTest`'s: a **transcription**
+  of the published record's component list, run through the real `CanonicalJson`, pinning the name,
+  both checkout dot-paths and the id field. A rename over there is a change to that transcription in
+  the same campaign; landing it there and not here leaves this suite green and every repository's QA
+  pipeline silently dead.
+
+  **The re-fold burst needs nothing new.** The backing branch is stable per request, so
+  `supersedeByCheckoutBranch` already collapses the queued older folds to the newest tip.
+- **A step declares its own `gating:`, and that is what let two files become one.** The file-level
+  flag says what a whole pipeline is worth to a release gate; the step-level one says what one step
+  is worth, and a run's announced `gating` is the **AND** of the file's flag and the failing step's
+  (`runSteps`, written to the row as well so the two can never disagree). Nothing else about failure
+  moved: a non-gating step that fails still fails the run, still skips what follows, still shows red.
+
+  The property it has to preserve is the sentence the old `ci-event-build.yml`/`ci-event-userflows.yml`
+  split was built on — *a red verify must not cost the image*. Two files bought it by never sharing a
+  verdict; one file buys it by **ordering plus classification**, since the gating half runs first and
+  has published whatever it publishes before a non-gating step can fail. So the non-gating steps go
+  **last**, and that is a rule rather than a style: everything after a failure is `SKIPPED`.
+
+  It is legal in **both** file kinds, unlike `checkout:` and the file-level `gating:`. The `steps:`
+  schema is one implementation on purpose, and the key is not inert in `ci-post-receive.yml` either
+  — a push whose last step publishes docs is the same case. Only a YAML boolean is accepted, on the
+  standing reason with its sharpest edge: `gating: "false"` parsing as truthy would hold a commit for
+  a failure nobody meant to gate on.
 - **The trigger file parser is strict where `ci-post-receive.yml` is lenient**, and the asymmetry is
   the point rather than an inconsistency. In a pipeline an unread key costs a feature; in a
   *selection* it costs correctness, because an absent `when:` means **unconditional** — so a mistyped
@@ -1359,6 +1404,17 @@ host fills the pair from the address a push arrived on, so an id-addressed push 
 no historical row has them; a run with no pair builds id-addressed URLs, which is what this service
 did before names existed. `repo_id` is untouched and stays the key: the dedupe constraint is built on
 it and every existing row is found by it.
+
+`V6`, `V7__run_gating.sql` and `V8__run_release_request.sql` continue it too, and the last two are
+the release-flow pair. `ci_run.gating` is the data form of "userflows are non-gating" — added with a
+default so every historical row fills as gating, then the default dropped, which is the V3-era
+lesson followed. `ci_run.release_request_id` is nullable with **no** default and no backfill,
+because null is the ordinary value rather than a value to be filled: every push run and every event
+run not triggered by a `ReleaseRequestChanged` has none, so there is nothing for an existing row to
+be and no reading of "absent" to get wrong. It carries a **partial** index (`where … is not null`),
+since an index over the nulls would be a second copy of the table for no query, and it is part of no
+constraint — the dedupe stays `(trigger_event_id, repo_id, config_path)` and the per-branch collapse
+a re-fold needs is already `supersedeByCheckoutBranch`'s.
 
 `V1__init.sql` is the rest of the schema. The nine H2 migrations it replaces (V1-V8 plus a Java V9) are
 history in this repository's log and are not a prefix of this lineage: the move off H2 is a

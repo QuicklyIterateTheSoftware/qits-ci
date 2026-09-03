@@ -86,9 +86,34 @@ public class CiRun extends PanacheEntityBase implements CausedRow {
    * every push run and for every event run whose trigger file does not say {@code gating: false} —
    * the userflow pipelines are the ones that do. Initialized true so no writer can forget it into
    * the primitive default, which points the wrong way.
+   *
+   * <p><b>It is written twice on a run whose failure was non-gating.</b> Accept time records what
+   * the trigger file declared; the terminal transition records what the <em>verdict</em> is worth,
+   * which is the file's flag ANDed with the failing step's own {@code gating:} — see {@code
+   * CiPipeline.CiStepDecl}. So the row and the build event it publishes never disagree, and reading
+   * this column off a finished run answers the question a release gate asks.
    */
   @Column(nullable = false)
   public boolean gating = true;
+
+  /**
+   * The release request this run serves, or null for every run that serves none — which is every
+   * push, and every event run not triggered by a {@code ReleaseRequestChanged}.
+   *
+   * <p>A release request is qits-projects' aggregate and this is its id as a plain string, the way
+   * this module names every foreign thing. It is recorded because the run is <b>about</b> that
+   * request rather than merely about a commit: the run's commit sha is a fold nobody pushed (the tip
+   * of {@code release/<id>}, rewritten on every re-fold), so the request id is the only stable
+   * handle a cancellation or a retry can address the work by. {@link #commitSha} is the merged sha
+   * the event named, so the two together say exactly which fold this verdict is about.
+   *
+   * <p>Nullable and part of no constraint: the dedupe stays {@code (trigger_event_id, repo_id,
+   * config_path)}, and the per-branch collapse a re-fold needs is already
+   * {@code CiRunService.supersedeByCheckoutBranch}'s — the backing branch is stable per request, so
+   * a burst of re-folds collapses to the newest tip with nothing added here.
+   */
+  @Column(name = "release_request_id", length = 255)
+  public String releaseRequestId;
 
   @Enumerated(EnumType.STRING)
   @Column(nullable = false, length = 32)

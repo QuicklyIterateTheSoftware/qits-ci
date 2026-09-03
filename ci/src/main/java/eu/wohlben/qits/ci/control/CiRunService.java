@@ -221,6 +221,36 @@ public class CiRunService {
 
   public static final String TAG_NAME_FIELD = "tagName";
 
+  /**
+   * qits-projects' release-request event, by the name it rides the bus under, and the payload field
+   * naming the request it is about.
+   *
+   * <p>A release request's backing branch is an octopus merge of N sources that qits-projects
+   * rewrites on every change, and it publishes this event per successful re-fold. A repository's QA
+   * pipeline selects it and checks out the fold — {@code checkout: { branch: backingBranch, sha:
+   * mergedSha }} — and the verdict returns on the ordinary build events keyed on {@code (repoId,
+   * commitSha)}. What that key cannot carry is <em>which request</em>, so the id is read here and
+   * lands on {@link CiRun#releaseRequestId}: the sha is a fold nobody pushed and the next re-fold
+   * replaces it, which makes the request id the only stable handle a cancellation or a retry can
+   * address the work by.
+   *
+   * <p><b>Spelled as strings, exactly like {@link #TAG_EVENT_NAME}, and for a sharper version of the
+   * same reason.</b> {@code ci} has no compile-time knowledge of another context — and here there is
+   * no jar to have one of: <b>qits-projects publishes no vocabulary jar</b>, deliberately, the way
+   * qits-workspaces does not (see {@code bus/ScmReleaseContractTest}). What keeps the two strings
+   * honest is {@code bus/ReleaseRequestChangedContractTest}, which holds a transcription of the
+   * published record and drives it through the real canonical serializer.
+   *
+   * <p><b>The engine gains no other knowledge of this event.</b> Matching, selection and checkout
+   * are the generic grammar; these two constants buy exactly one provenance column.
+   */
+  public static final String RELEASE_REQUEST_EVENT_NAME = "ReleaseRequestChanged";
+
+  public static final String RELEASE_REQUEST_ID_FIELD = "releaseRequestId";
+
+  /** What {@code ci_run.release_request_id} can hold; a longer value is recorded as none. */
+  static final int MAX_RELEASE_REQUEST_ID_LENGTH = 255;
+
   public static final String USER_CANCELLED = "USER_CANCELLED";
   public static final String DEDUPED = "DEDUPED";
   public static final int MAX_CANCELLATION_REASON_LENGTH = 255;
@@ -886,6 +916,19 @@ public class CiRunService {
    * remainder loop below is untouched), and skipped-by-branch carries {@link #notBoundNote} — the
    * same bracketed convention {@link #annotate}/{@link #note} already use for every other "why this
    * row reads this way" sentence. No new status, no new column, no migration.
+   *
+   * <h2>Which half the run died in decides what the verdict is worth</h2>
+   *
+   * <p>A step may declare {@code gating: false} ({@code CiPipeline.CiStepDecl}), and the run's
+   * announced {@code gating} is <b>the file's flag ANDed with the failing step's</b>. That is the
+   * whole mechanism behind putting a repository's gating build and its non-gating userflow publish
+   * in ONE file: ordering does the rest, because the gating half runs first and has published
+   * whatever it publishes before a non-gating step can fail. "A red verify must not cost the image"
+   * therefore survives the merge of the two files it used to require.
+   *
+   * <p>Nothing else about failure moved. A non-gating step that fails <b>still stops the run</b> and
+   * still leaves it {@code FAILED}, so a person sees the red exactly as before; what changes is only
+   * what a release gate reads off the event.
    */
   private void runSteps(
       CiRun run,
@@ -897,6 +940,9 @@ public class CiRunService {
     int index = 0;
     boolean failed = false;
     boolean timedOut = false;
+    // Which half the run died in, and it is a Boolean because "no step failed" is a third answer:
+    // a green run's verdict is worth what the FILE says and there is no step to ask.
+    Boolean failedStepGating = null;
 
     try {
       while (index < declared.size() && !failed && !cancelled.contains(run.id)) {
@@ -982,6 +1028,9 @@ public class CiRunService {
             stamps.startedAt(),
             stamps.finishedAt());
         failed = !ok;
+        if (failed) {
+          failedStepGating = decl.gating();
+        }
         timedOut = stepTimedOut;
         index++;
       }
@@ -990,6 +1039,9 @@ public class CiRunService {
       // Record it against the step it happened on so no declared step vanishes from the run.
       LOG.errorf(e, "CI run %s: step %d failed unexpectedly", run.id, index);
       if (index < declared.size()) {
+        // An infrastructure failure OF a non-gating step is still the non-gating half's: the run
+        // died where the declaration says a death costs no gate.
+        failedStepGating = declared.get(index).gating();
         Instant now = Instant.now();
         insertStep(
             run.id,
@@ -1025,7 +1077,13 @@ public class CiRunService {
             : timedOut
                 ? CiRunStatus.TIMED_OUT
                 : red ? CiRunStatus.FAILED : CiRunStatus.SUCCESS;
-    Instant finishedAt = finishRun(run.id, outcome);
+    // The verdict's own worth: the FILE's flag ANDed with the failing step's. A non-gating file
+    // cannot be made gating by a step, and a gating file's non-gating half produces a red that no
+    // release gate holds a commit for. It is written to the row as well as announced, so the two can
+    // never disagree — and the detached copy is updated because the announcers read it off there.
+    boolean verdictGating = run.gating && (failedStepGating == null || failedStepGating);
+    Instant finishedAt = finishRun(run.id, outcome, verdictGating);
+    run.gating = verdictGating;
     if (outcome == CiRunStatus.SUCCESS) {
       announceRun(run, finishedAt);
       announceRelease(run, finishedAt, release);
@@ -1419,6 +1477,7 @@ public class CiRunService {
     run.triggerEventPayload = request.payload();
     run.triggerConfig = request.triggerConfig();
     run.gating = request.trigger().gating();
+    run.releaseRequestId = releaseRequestOf(request);
     runs.persist(run);
     runs.flush();
     supersedeByVersion(run, request);
@@ -1539,6 +1598,42 @@ public class CiRunService {
   }
 
   /**
+   * The release request this event run serves, or null when it serves none.
+   *
+   * <p><b>Gated on the event NAME</b>, the way {@link #supersedeByVersion} is gated on the tag
+   * event's. A {@code releaseRequestId} elsewhere on the bus would be some other context's word,
+   * and a provenance column that reads any field of any payload is one that eventually records
+   * something nobody meant.
+   *
+   * <p>Walked rather than bound, the trigger engine's rule and the one that keeps this path free of
+   * native-image reflection metadata. A value too long for the column is recorded as <b>none</b>
+   * rather than truncated or thrown: the run is the point and a payload that cannot name a request
+   * within 255 characters is not naming one this platform issued.
+   */
+  private static String releaseRequestOf(EventRun request) {
+    if (!RELEASE_REQUEST_EVENT_NAME.equals(request.eventName())) {
+      return null;
+    }
+    JsonNode id =
+        CiEventSelectionEvaluator.resolve(
+            CiEventSelectionEvaluator.parsePayload(request.payload()), RELEASE_REQUEST_ID_FIELD);
+    if (id == null) {
+      return null;
+    }
+    String text = CiEventSelectionEvaluator.asString(id);
+    if (text.isBlank()) {
+      return null;
+    }
+    if (text.length() > MAX_RELEASE_REQUEST_ID_LENGTH) {
+      LOG.warnf(
+          "Event %s (%s) names a '%s' of %d characters — too long to record, the run keeps none",
+          request.eventId(), request.eventName(), RELEASE_REQUEST_ID_FIELD, text.length());
+      return null;
+    }
+    return text;
+  }
+
+  /**
    * The tag an {@code SCMPublishTag} payload announces, or null when there is none to read — an
    * unparseable payload, a missing field, or a blank one. Walked rather than bound, the same rule
    * {@link #versionOf} follows and for the same native-image reason.
@@ -1642,6 +1737,16 @@ public class CiRunService {
    * on when the run ended.
    */
   private Instant finishRun(String runId, CiRunStatus status) {
+    return finishRun(runId, status, null);
+  }
+
+  /**
+   * The same, also writing what the <b>verdict</b> is worth to a release gate. Null leaves the
+   * column alone, which is every terminal transition that is not the step loop's own: a config
+   * error, a cancellation and a swept orphan have no failing step to classify, so the file's own
+   * flag stands.
+   */
+  private Instant finishRun(String runId, CiRunStatus status, Boolean gating) {
     Instant finishedAt = Instant.now();
     QuarkusTransaction.requiringNew()
         .run(
@@ -1649,6 +1754,9 @@ public class CiRunService {
               CiRun run = runs.findById(runId);
               run.status = status;
               run.finishedAt = finishedAt;
+              if (gating != null) {
+                run.gating = gating;
+              }
             });
     return finishedAt;
   }

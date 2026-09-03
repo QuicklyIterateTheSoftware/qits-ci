@@ -536,6 +536,9 @@ steps:                          # exactly the schema ci-post-receive.yml uses
 - The other added key is **`checkout:`**, optional, which makes the run build the event's own
   commit — see "Building the commit the event names". Also a parse error in `ci-post-receive.yml`,
   where the checkout IS the push.
+- The third added key is **`gating:`**, optional, default `true`: whether a red run of this pipeline
+  should stand in the way of releasing its commit — see "Gating: what a red run is worth". Inert and
+  therefore a parse error in `ci-post-receive.yml`, where a push run is always gating.
 
 ### Building the commit the event names — `checkout:`
 
@@ -574,6 +577,91 @@ steps:
   third repository's file named. Declared anyway, it is one WARN per event and no run.
 - `suppressCi` stays a `when:` condition, not engine knowledge: matchers compare JSON literals, so
   `exact: "false"` matches the boolean. Every `SCMPublishCommit` trigger should carry it.
+
+### Gating: what a red run is worth
+
+A run's verdict travels on `BuildSuccessful`/`BuildFailed` as a `gating` flag, and a release gate
+reads it to decide whether a red run holds the commit. Two keys spell it, at two levels, and the
+run's verdict is the **AND** of them:
+
+```yaml
+gating: false                   # THE FILE — a red run of this pipeline gates nothing
+steps:
+  - image: qits/build-images/maven-base:latest
+    script: ./mvnw verify       # a step is gating unless it says otherwise
+  - image: qits/build-images/maven-base:latest
+    gating: false               # THE STEP — this one's failure gates nothing
+    script: ./publish-docs.sh
+```
+
+- **Absent is `true` at both levels**, so every pipeline written before either key existed keeps its
+  behaviour byte for byte, and a gating build's event payload stays byte-identical too: `gating` is
+  omitted from the wire when it is true and written as an explicit `false` only when it is not.
+- **The file-level key is trigger-files-only.** A push run is always gating as a file, so the key
+  would be inert in `ci-post-receive.yml` and is a parse error there — the same two-way rule
+  `checkout:` and `artifacts:` carry.
+- **The step-level key is legal in both files**, because the `steps:` schema is one implementation
+  and a step must not mean two things — and it is not inert in a push pipeline: a push whose last
+  step publishes docs is exactly the case it exists for.
+- **A non-gating step that fails still fails the run.** The row is `FAILED`, a person sees the red,
+  the remaining steps are `SKIPPED` — what changes is only what a release gate reads. That is why
+  **the non-gating steps go last**: everything after a failure is skipped, which is right for a
+  publish and wrong for a build.
+- **Only a YAML boolean is accepted** at either level. `gating: "false"` is a parse error rather
+  than a truthy default, because both directions of a silent misread are expensive: one holds a
+  commit for a failure nobody meant to gate on, the other waves one through.
+- **A finished run's `gating` on the API is what the verdict was worth**, not only what the pipeline
+  declared: a gating file whose failure landed in a `gating: false` step reads `false`, which is the
+  value its build event carried.
+
+### The release-request QA pipeline — `ci-event-release-request.yml`
+
+The platform runs **no CI outside release requests**. qits-projects keeps, per open release request,
+a backing branch `release/<id>` — an octopus merge of the request's sources, refolded whenever the
+set changes — and publishes **`ReleaseRequestChanged`** on every successful fold. That branch is
+written by qits-githost's merge primitive, which fires no `post-receive` and therefore publishes no
+`SCMPublishCommit`: without this event the fold exists and nothing builds it.
+
+So a repository commits **one** QA pipeline, and it is an ordinary event trigger:
+
+```yaml
+# .config/qits/ci-event-release-request.yml
+event: ReleaseRequestChanged
+when:
+  - repoName: { exact: qits-ci-service }
+checkout:
+  branch: backingBranch          # release/<id>
+  sha: mergedSha                 # the fold this run is about
+steps:
+  - image: qits/build-images/maven-base:latest
+    script: ./mvnw -B -ntp verify          # the GATING half
+  - image: qits/build-images/maven-base:latest
+    gating: false                          # the NON-GATING half
+    script: ./publish-userflows.sh
+```
+
+The full reference file, with the reasoning and the per-repository placeholders the rollout sweep
+fills in, is `docs/ci-event-release-request.yml`.
+
+- **The engine learns nothing new.** `event:` is matched against the frame's name as a string and
+  `checkout:` resolves two dot-paths, so this is the existing grammar pointed at a new event —
+  discovery, parsing and `when:` still read `main`'s head, and only the run's branch and sha come
+  from the payload. A fold cannot alter the CI that gates it by merging in an edit to this file.
+- **The payload's fields** are `projectId`, `repoId`, `repoName`, `releaseRequestId`,
+  `backingBranch`, `mergedSha` and `changedAt` (which is the envelope's `occurredAt` as well). Only
+  a real change is announced: a fold the git host answered `unchanged`, and one that conflicted,
+  publish nothing.
+- **The run records `releaseRequestId`**, and the API returns it. `mergedSha` names one fold and the
+  next re-fold replaces it, so the request id is the handle a cancellation or a retry addresses the
+  work by; the sha says which fold the verdict is about.
+- **A burst of re-folds collapses to the newest** with nothing added: the backing branch is stable
+  per request, so the existing per-branch collapse (`checkout:`'s) supersedes the queued older folds
+  as `DEDUPED`. A fold already `RUNNING` keeps running.
+- **The verdict returns keyed on the fold**: `BuildSuccessful`/`BuildFailed` with `commitSha` =
+  the `mergedSha` this run received, which is what qits-projects matches on together with `repoId`.
+- **This one file replaces `ci-event-build.yml` and `ci-event-userflows.yml`.** The two existed
+  because a red userflow round must not cost the image and two files cannot share a verdict; one
+  file buys the same property with ordering plus the per-step `gating:` above.
 
 ### The selection
 

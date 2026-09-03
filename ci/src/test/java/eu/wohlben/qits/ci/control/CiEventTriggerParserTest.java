@@ -661,4 +661,45 @@ public class CiEventTriggerParserTest {
                         + "steps:\n  - image: alpine:3\n    script: \"true\"\n"));
     assertTrue(refused.getMessage().contains("'checkout'"), refused.getMessage());
   }
+
+  // --- per-step gating: ------------------------------------------------------------------------
+
+  @Test
+  public void aStepDeclaresItsOwnGatingAndAbsenceIsGating() {
+    // The one-file QA pipeline's shape: a gating build followed by a non-gating publish. What the
+    // two halves used to buy with two files, ordering plus this key buys inside one.
+    CiEventTrigger trigger =
+        parser.parse(
+            PATH,
+            """
+            event: ReleaseRequestChanged
+            checkout:
+              branch: backingBranch
+              sha: mergedSha
+            steps:
+              - image: alpine:3
+                script: verify
+              - image: alpine:3
+                gating: false
+                script: publish-userflows
+            """);
+    assertTrue(trigger.gating(), "the FILE is gating; only the second step is not");
+    assertTrue(trigger.pipeline().steps().get(0).gating());
+    assertFalse(trigger.pipeline().steps().get(1).gating());
+  }
+
+  @Test
+  public void aStepGatingThatIsNotABooleanIsAParseError() {
+    // The sharper of the two standing reasons: `gating: "false"` parsing as truthy would hold a
+    // commit for a failure nobody meant to gate on, and the other direction waves one through.
+    CiConfigException refused =
+        assertThrows(
+            CiConfigException.class,
+            () ->
+                parser.parse(
+                    PATH,
+                    "event: X\nsteps:\n  - image: alpine:3\n    gating: \"false\"\n"
+                        + "    script: \"true\"\n"));
+    assertTrue(refused.getMessage().contains("gating"), refused.getMessage());
+  }
 }

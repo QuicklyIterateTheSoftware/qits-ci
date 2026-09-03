@@ -179,6 +179,7 @@ final class CiConfigSchema {
               optionalTimeoutSeconds(step, i),
               docker,
               optionalUser(step, i, docker),
+              optionalStepGating(step, i),
               optionalBranches(step, i, rejectBranchesIn)));
     }
     return new CiPipeline(List.copyOf(steps));
@@ -226,6 +227,39 @@ final class CiConfigSchema {
           "Step " + index + ": 'docker' must be a boolean, got: " + typeOf(value));
     }
     return docker;
+  }
+
+  /**
+   * The optional per-step {@code gating}: whether a failure of <b>this step</b> is a verdict about
+   * the commit. Absent means true, which is every pipeline written before the key existed.
+   *
+   * <p><b>It is the same word as the top-level {@link #GATING_KEY} one level down, and that is the
+   * point rather than a collision.</b> The file-level key says what the whole pipeline is worth to a
+   * release gate; this one says what one step is worth, and the run's verdict is the AND of the two
+   * — a non-gating file cannot be made gating by a step, and a gating file's non-gating step
+   * produces a non-gating red. That is what lets a repository's single QA pipeline carry the build
+   * and its tests as the gating half and the userflow publish as the non-gating half in ONE file,
+   * which is what replaced the two-file split (see {@link CiPipeline.CiStepDecl}).
+   *
+   * <p>Legal in <b>both</b> file kinds, unlike {@code checkout:} and the file-level {@code gating:}.
+   * The step schema is one implementation on purpose — a step must not mean two things — and the key
+   * is not inert in a push pipeline either: a push run is always gating as a file, and a non-gating
+   * step in it is exactly the "this half must not cost the image" case.
+   *
+   * <p>Held to the {@code timeout-seconds}/{@code docker} standard, and for the sharper of the two
+   * reasons: {@code gating: "false"} silently parsing as truthy would hold a commit for a failure
+   * nobody meant to gate on, and the other direction would wave one through.
+   */
+  private static boolean optionalStepGating(Map<?, ?> step, int index) {
+    Object value = step.get(GATING_KEY);
+    if (value == null) {
+      return true;
+    }
+    if (!(value instanceof Boolean gating)) {
+      throw new CiConfigException(
+          "Step " + index + ": '" + GATING_KEY + "' must be a boolean, got: " + typeOf(value));
+    }
+    return gating;
   }
 
   /**

@@ -38,6 +38,15 @@ import java.util.List;
  * event that caused it, null on every push. They are exposed here because the run API is where an
  * operator reads a run's provenance from outside — no client renders them yet, and that is a later,
  * small follow-up rather than a gap.
+ *
+ * <p>{@code releaseRequestId} is the fifth of them and the one that is not about a commit: the
+ * release request whose backing branch this run built, null for every run that serves none. The
+ * {@code commitSha} beside it is a fold nobody pushed and is replaced by the next re-fold, so this
+ * is the handle that says which piece of work the run belongs to.
+ *
+ * <p><b>{@code gating} on a FINISHED run is what the verdict was worth</b>, not only what the
+ * pipeline declared: a gating pipeline whose failure happened in a step declaring {@code gating:
+ * false} reads {@code false} here, which is the same value its build event carried.
  */
 public record CiRunDto(
     String id,
@@ -57,6 +66,7 @@ public record CiRunDto(
     CiTriggerType triggerType,
     String triggerEventId,
     String triggerEventName,
+    String releaseRequestId,
     String configPath,
     List<CiStepDto> steps,
     CiLiveStepDto live) {}

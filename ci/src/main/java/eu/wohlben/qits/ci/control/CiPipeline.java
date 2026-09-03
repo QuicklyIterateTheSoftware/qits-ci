@@ -47,6 +47,21 @@ public record CiPipeline(List<CiStepDecl> steps) {
    * before the container launches. <b>Empty means the config declared none</b>, and the empty list
    * has exactly one origin: {@code branches: []} in a file is a parse error, because both readings
    * of it already have an unambiguous spelling (omit the key; delete the step).
+   *
+   * <p><b>{@code gating} is whether THIS step's failure is a verdict about the commit</b>, and it is
+   * what lets one file carry a gating half and a non-gating half. Absent means true, which is every
+   * pipeline written before the key existed, byte for byte. A step declaring {@code gating: false}
+   * still fails the run — the row is red and a person sees it — but the build event the run
+   * announces carries {@code gating: false}, so a release gate reading per-commit verdicts does not
+   * hold the commit for it.
+   *
+   * <p>The reason it is per step rather than per file is the sentence the old two-file split was
+   * built on: <em>a red verify must not cost the image</em>. Two files bought that by never letting
+   * the two halves share a verdict; one file buys it by <b>ordering plus classification</b> — the
+   * gating half runs first and has already published whatever it publishes by the time a non-gating
+   * step can fail, and the failure it produces is classified as the non-gating one. Put the
+   * non-gating steps last; a non-gating step that fails still stops the run, exactly as any failing
+   * step always has.
    */
   public record CiStepDecl(
       String image,
@@ -54,6 +69,7 @@ public record CiPipeline(List<CiStepDecl> steps) {
       Integer timeoutSeconds,
       boolean docker,
       String user,
+      boolean gating,
       List<BranchFilter> branches) {
 
     /**

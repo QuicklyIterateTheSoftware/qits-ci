@@ -54,6 +54,8 @@ components:
           type: string
         triggerEventName:
           type: string
+        releaseRequestId:
+          type: string
         configPath:
           type: string
         steps:
@@ -441,4 +443,4 @@ paths:
         - qits:admin
 info:
   title: qits-ci API
-  version: 2026.830.143642
+  version: 2026.903.100706
