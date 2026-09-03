@@ -1260,6 +1260,7 @@ public class CiRunService {
             run.id,
             run.repoId,
             run.repoName,
+            run.projectId,
             version,
             run.triggerEventName,
             causingEventId(run),

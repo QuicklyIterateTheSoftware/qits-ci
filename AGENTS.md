@@ -763,8 +763,25 @@ build passed" and "the registry has it" behind one name, which is precisely the 
 split-release redesign exists to undo: the old single event fired at release-*push* time and every
 consumer read it as "the package exists", with an entire upstream build in the gap.
 
-Three things about that second seam are worth having in front of you:
+Four things about that second seam are worth having in front of you:
 
+- **`SoftwareRelease` names the repository three times and that is the additive shape, not a
+  duplication to tidy up.** `repository` is what it always was — the run's `repo_id` — and every
+  committed selection and every existing consumer reads it, so it is never repointed. `repoId` is the
+  same string under the name the platform addresses a repository by, and `projectId` is the fact
+  nothing on this event could previously supply. They exist for one reader: a consumer that has to
+  *deploy* what was published needs `(projectId, repoId)` to address the repository at all, and
+  making it look that up — against qits-projects, on its own dispatch thread, for something the
+  publisher already held — adds a hop that can fail to a release that cannot.
+  <br>**`projectId` is carried on the OWED ROW** (`ci_release_announcement.project_id`, V10), beside
+  `finished_at` and `trigger_event_id` and for the identical reason: the announcement is often made
+  by whoever closes the join later — a tag-triggered run waits for the `SCMRelease`, and the boot
+  sweep announces in a later process entirely — and neither can read the run row back.
+  `ReleaseJoinTest.theOwedAnnouncementCarriesTheProjectItWasOwedFor` is the case that fails if it is
+  ever read at announce time instead.
+  <br>**Null is a supported value and reaches the wire as an ABSENT KEY**, because `CanonicalJson`
+  includes `NON_NULL`. An id-addressed candidate has no project, so "qits-ci does not know" is
+  spelled by the key not being there; writing a null would have made absence a value.
 - **The fan-out is `CiRunService`'s and the port takes one artifact.** N declarations are N calls, so
   a failure costs one announcement rather than the rest. The bus already supports siblings —
   the outbox enqueues one row per event in its own transaction and `CausationScope.current()` is a
@@ -792,9 +809,26 @@ only once an `SCMRelease` for the same `(repository, version)` has been seen. bo
 WP2; the class javadoc carries the argument in full and the short form is:
 
 - A **restore** re-establishes SCM state and produces `SCMPublishTag` alone. A **release** also
-  announces novelty, and only qits-workspaces publishes `SCMRelease`. Announcing off the tag made
+  announces novelty, and `SCMRelease` is that announcement. Announcing off the tag made
   every rebootstrap impersonate a release — the train woke against a platform the boot had not
   finished deploying, and the same eight repositories went red every time.
+- **The publisher moved from qits-workspaces to qits-projects and this repository changed nothing**,
+  which is a property of how the consumer is written rather than luck: the durable seam subscribes by
+  **signature**, an `EventFrame` carries no producer and no source service, the join key is
+  `(repository, version)`, and the causation edge is the frame's own id rather than an expectation
+  about who minted it. Anything that had recorded "qits-workspaces said so" — a producer filter, a
+  source check, an expected parent — would have gone silently dead at the cutover, in the direction
+  that publishes without announcing. The event's shape did not move either: same signature, same
+  seven components, so `ScmReleaseContractTest`'s transcription is unchanged and only the file it
+  names moved (`qits-projects-service/service/…/bus/SCMRelease.java`).
+- **What DID change is `branch`, and nothing here reads it.** It is the release request's backing
+  branch (`release/<id>`) now, and that branch is **deleted in the same operation that creates the
+  tag** — so it does not exist by the time the event is evaluated. A release pipeline declares no
+  `checkout:`, so its run is recorded at `main` and the daemon clones `main`; the step then fetches
+  `refs/tags/$version` and checks it out detached, which is where the released tree comes from. The
+  version drives every coordinate. `ReleaseAnnounceSeamTest` and `ScmReleaseContractTest` pin both
+  halves, and `CiEventTriggerCausationTest`'s frame carries a `release/<uuid>` branch for the same
+  reason.
 - **The two facts race on a real release, so both halves are rows.** `ci_release_announcement` holds
   what a green run owes (`announced_at` null is "still owed"), `ci_scm_release` holds what was really
   released. Either arrival order works and a restart between them costs nothing.
@@ -1459,6 +1493,13 @@ shape and the same reasoning, plus one it states out loud: it is deliberately **
 dedupe constraint, because a null in a unique tuple makes rows never collide and adding it there
 would have switched the dedupe off for every run on the platform. A retry gets past the constraint
 with a synthetic `trigger_event_id` instead — see "The trigger engine".
+
+`V10__release_announcement_project.sql` is the first migration in this lineage that touches the
+release join's tables rather than `ci_run`, and it is the same shape a third time:
+`ci_release_announcement.project_id`, nullable, no default, no backfill, part of no constraint and no
+index. It exists because `SoftwareRelease` gained `projectId` and the announcement is **not always
+made by the run that owes it** — see "There are two publishing seams". Nothing looks a row up by
+project; the join key is `(repo_id, version)` and is untouched.
 
 `V1__init.sql` is the rest of the schema. The nine H2 migrations it replaces (V1-V8 plus a Java V9) are
 history in this repository's log and are not a prefix of this lineage: the move off H2 is a

@@ -235,8 +235,14 @@ public class CiEventTriggerCausationTest {
     JsonNode npm = json.readTree(puts.get(2).body());
     assertEquals("SoftwareRelease", npm.get("name").asText());
     assertEquals(eventId, npm.get("parentId").asText(), "N siblings under one parent");
+    // repoId is the same string `repository` carries, under the name the platform addresses a
+    // repository by; projectId is simply ABSENT, because the stub git host's listing answers ids
+    // alone and NON_NULL inclusion writes no key for what qits-ci does not know. That absence is the
+    // shipped behaviour on an id-addressed platform and is asserted here rather than assumed.
     assertEquals(
-        "{\"packageName\":\"@qits/ui-components\",\"packageType\":\"npm\",\"repository\":\""
+        "{\"packageName\":\"@qits/ui-components\",\"packageType\":\"npm\",\"repoId\":\""
+            + repoId
+            + "\",\"repository\":\""
             + repoId
             + "\",\"version\":\"1.4.0\"}",
         npm.get("payload").asText());
@@ -245,7 +251,9 @@ public class CiEventTriggerCausationTest {
     assertEquals("SoftwareRelease", image.get("name").asText());
     assertEquals(eventId, image.get("parentId").asText());
     assertEquals(
-        "{\"packageName\":\"qits/qits-stt\",\"packageType\":\"docker\",\"repository\":\""
+        "{\"packageName\":\"qits/qits-stt\",\"packageType\":\"docker\",\"repoId\":\""
+            + repoId
+            + "\",\"repository\":\""
             + repoId
             + "\",\"version\":\"1.4.0\"}",
         image.get("payload").asText());
@@ -273,10 +281,18 @@ public class CiEventTriggerCausationTest {
         .formatted(released);
   }
 
-  /** qits-workspaces' release event, as it will arrive after the rename. */
+  /**
+   * The release event as <b>qits-projects</b> publishes it: same signature, same payload fields, and
+   * a {@code branch} that names the release request's backing branch rather than a branch anybody
+   * pushed. That branch is deleted when the tag is created, so it is already gone when this frame is
+   * dispatched — which is exactly why it is spelled that way here. Nothing on this path reads it:
+   * the trigger matches on {@code repository}, the run builds {@code main}, and the announcement's
+   * coordinates come from {@code version}.
+   */
   private String scmReleaseFrame(String eventId, String released) throws Exception {
     String payload =
-        "{\"branch\":\"main\",\"projectId\":\"p-1\",\"repository\":\""
+        "{\"branch\":\"release/9f2c1a7e-4b31-4c8e-9a11-6d0f5c2e8b44\",\"projectId\":\"p-1\","
+            + "\"repository\":\""
             + released
             + "\",\"version\":\"1.4.0\"}";
     return "{\"id\":\""

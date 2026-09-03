@@ -747,8 +747,15 @@ repository's others.**
 ### The release pipeline, and what it declares
 
 A **release pipeline** is an ordinary event trigger with two things added: it selects its own
-repository's `SCMRelease` — qits-workspaces publishes that the moment a release push is accepted —
+repository's `SCMRelease` — qits-projects publishes that the moment the release tag is created —
 and it declares the artifacts it publishes.
+
+> **Build the tag, never the event's branch.** The event's `branch` is the release request's backing
+> branch, and that branch is deleted in the same operation that creates the tag, so it does not exist
+> by the time this pipeline runs. A release pipeline therefore declares **no `checkout:`** — its run
+> is recorded at `main` and clones it, which is what a trigger with no `checkout:` does by
+> construction — and its first step fetches `refs/tags/$version` and checks it out detached. The
+> version, not the branch, is what every coordinate is derived from.
 
 ```yaml
 # .config/qits/ci-event-release.yml
@@ -805,10 +812,21 @@ When a run whose trigger file declared artifacts goes **green**, qits-ci publish
 
 | Field | What |
 |---|---|
-| `repository` | the repository whose pipeline published it — this repo, not the upstream |
+| `repository` | the repository whose pipeline published it — this repo, not the upstream. Unchanged since the event existed, and every committed selection reads it |
+| `repoId` | the same value under the name the platform addresses a repository by: `ci_run.repo_id`, the git host's storage id |
+| `projectId` | the project that repository belongs to, as qits-projects names it. **Absent** — no key at all — when the run's repository was known only by storage id |
 | `version` | read out of the **triggering** event's payload: `version` on an `SCMRelease`, `tagName` on an `SCMPublishTag` (a release stamp IS the name of the tag the release push created) |
 | `packageType` | `npm`, `maven` or `docker`, as declared |
 | `packageName` | the declared name, verbatim |
+
+**`projectId` and `repoId` are additive and exist for one reader: a consumer that has to *deploy*
+what was published.** Addressing a repository on this platform takes `(projectId, repoId)`, and a
+consumer that had to look that pair up — against qits-projects, on its own dispatch thread, for a
+fact the publisher already held — would be adding a hop that can fail to a release that cannot.
+Nothing was repointed to make room for them: `repository` carries exactly the bytes it always did,
+which is what makes the addition free for every existing subscriber. `projectId` being **absent**
+rather than null is the wire's own way of saying qits-ci does not know, and a consumer must read it
+as "ask somebody" rather than as an id.
 
 Each one carries the triggering event as its `parentId`, so N artifacts are N siblings under one
 cause and the whole train is a chain in the event log.
@@ -837,14 +855,21 @@ A green release pipeline is **not enough** to announce. qits-ci announces a `Sof
 `(repository, version)` only when both of these exist, in either order:
 
 1. a **green release-pipeline run** for that pair, and
-2. an **`SCMRelease`** for that pair — the event only qits-workspaces publishes, and only for a real
-   release.
+2. an **`SCMRelease`** for that pair — the event one service publishes, and only for a real release.
 
 The reason is the bootstrap. A rebootstrap restores each repository's release **tag** so the platform
 re-derives its artifacts; that is a restore, not a release, and it produces `SCMPublishTag` alone.
 Announcing off the tag made every replay impersonate a release: the train woke, every consumer ran a
-bump, and each bump ended in a release call against a qits-workspaces the boot had not deployed yet.
+bump, and each bump ended in a release call against a service the boot had not deployed yet.
 A replay has no novelty to announce, and `SCMRelease` is exactly the platform's word for novelty.
+
+**Who publishes it moved, and qits-ci did not notice.** It was qits-workspaces' release door; it is
+qits-projects' release request now, which folds the request's sources onto `release/<id>`, tags it,
+and announces the release. Same signature, same payload fields — and nothing on this side keys on the
+producer: the consumer subscribes by **signature**, a frame carries no publisher, the join key is
+`(repository, version)`, and causation is the frame's own id. The one value that did change is
+`branch`, which now names the request's backing branch and is **deleted at tag creation**; no field
+qits-ci reads is affected, and the release pipeline builds the tag rather than the branch (below).
 
 Both halves are rows, so the two may arrive in any order and a restart between them costs nothing:
 
@@ -993,6 +1018,8 @@ POST /ci/api/events/trigger
   "name": "SoftwareRelease",
   "payload": {
     "repository": "qits-spa-ui-components",
+    "repoId": "qits-spa-ui-components",
+    "projectId": "qits",
     "version": "1.4.0",
     "packageType": "npm",
     "packageName": "@qits/ui-components"

@@ -40,6 +40,18 @@ public class CiReleaseAnnouncement extends PanacheEntityBase {
   @Column(name = "repo_id", nullable = false)
   public String repoId;
 
+  /**
+   * The project that repository belongs to, copied off the run so the announcement can name it — the
+   * announcement may be made minutes after the run finished, or by a boot sweep in another process,
+   * and neither can go back and ask the run row.
+   *
+   * <p>Nullable, and not a relation: it is another context's id, exactly as {@code ci_run.project_id}
+   * is. A run whose candidate was id-addressed has none, which is why the published event's key is
+   * simply absent rather than null.
+   */
+  @Column(name = "project_id")
+  public String projectId;
+
   /** Half of the join key, read out of the triggering event — see {@code ReleaseJoin}. */
   @Column(nullable = false)
   public String version;

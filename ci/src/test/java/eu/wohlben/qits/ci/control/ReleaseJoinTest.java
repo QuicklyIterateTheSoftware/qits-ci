@@ -240,6 +240,49 @@ public class ReleaseJoinTest extends CiTestSupport {
     assertEquals(1, releaseAnnouncer.published().size());
   }
 
+  // --- what the announcement carries about the repository ----------------------------------------
+
+  /**
+   * The project rides on the <b>owed row</b>, which is what makes it survive the gap the join exists
+   * for.
+   *
+   * <p>{@code SoftwareRelease} carries {@code projectId} and {@code repoId} so a deploy consumer can
+   * address the repository without asking qits-projects on its own dispatch thread. The run knows
+   * both; the announcement is made by whoever closes the join, and in the tag-first order that is the
+   * {@code SCMRelease} arriving later — a different thread, possibly a different process after a
+   * restart, with no access to the run. So the value is copied onto the obligation at green, and this
+   * is the order that proves it: had it been read from the run at announce time, this case would
+   * publish a null and the {@code SCMRelease}-triggered case one directory up would still pass.
+   */
+  @Test
+  public void theOwedAnnouncementCarriesTheProjectItWasOwedFor() throws Exception {
+    fakeCandidates.setRefs(CiRepoRef.of(repoId, "p-42", "qits-thing-service"));
+
+    tagRun();
+    join.onScmRelease(repoId, repoId, VERSION, UUID.randomUUID().toString(), Instant.now());
+
+    assertEquals(1, releaseAnnouncer.published().size());
+    FakeReleaseAnnouncer.Published published = releaseAnnouncer.published().get(0);
+    assertEquals("p-42", published.projectId(), "the project the run recorded, off the owed row");
+    assertEquals(repoId, published.repoId(), "and the repository that published it");
+  }
+
+  /**
+   * An id-addressed run has no project, and the announcement says so by carrying none.
+   *
+   * <p>That is the shipped answer for a repository the candidate listing knows only by storage id —
+   * every pre-cutover row, and any platform running without {@code qits.ci.projects-url}. The wire
+   * form then omits the key entirely (NON_NULL inclusion), which is the honest spelling of "qits-ci
+   * does not know" and is what stops a consumer reading an invented id.
+   */
+  @Test
+  public void anIdAddressedRunAnnouncesNoProjectRatherThanAGuessedOne() throws Exception {
+    releaseRun(releasePayload());
+
+    assertEquals(1, releaseAnnouncer.published().size());
+    assertNull(releaseAnnouncer.published().get(0).projectId());
+  }
+
   // --- fixtures ---------------------------------------------------------------------------------
 
   /** A green run of the tag-triggered release recipe, and the id of the tag event that caused it. */

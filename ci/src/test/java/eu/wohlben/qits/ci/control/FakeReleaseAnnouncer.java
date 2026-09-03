@@ -19,6 +19,7 @@ public class FakeReleaseAnnouncer implements ReleaseAnnouncer {
   public record Published(
       String runId,
       String repoId,
+      String projectId,
       String version,
       String packageType,
       String packageName,
@@ -39,6 +40,7 @@ public class FakeReleaseAnnouncer implements ReleaseAnnouncer {
   public void onArtifactPublished(
       String runId,
       String repoId,
+      String projectId,
       String version,
       String packageType,
       String packageName,
@@ -46,6 +48,13 @@ public class FakeReleaseAnnouncer implements ReleaseAnnouncer {
       String triggerEventId) {
     published.add(
         new Published(
-            runId, repoId, version, packageType, packageName, finishedAt, triggerEventId));
+            runId,
+            repoId,
+            projectId,
+            version,
+            packageType,
+            packageName,
+            finishedAt,
+            triggerEventId));
   }
 }
