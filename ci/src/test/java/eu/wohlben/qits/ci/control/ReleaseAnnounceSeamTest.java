@@ -37,6 +37,9 @@ public class ReleaseAnnounceSeamTest extends CiTestSupport {
 
   private static final String HEAD = "b".repeat(40);
 
+  /** The project the candidate listing answers with — what the announcement has to carry through. */
+  private static final String PROJECT_ID = "p-1";
+
   /** A release pipeline: it selects its own repository's SCM release and declares what it ships. */
   private static final String RELEASE_TRIGGER =
       """
@@ -77,6 +80,16 @@ public class ReleaseAnnounceSeamTest extends CiTestSupport {
   private static final String NO_VERSION =
       "{\"branch\":\"main\",\"projectId\":\"p-1\",\"repository\":\"qits-spa-ui-components\"}";
 
+  /**
+   * The same release, cut the way the release-request flow cuts one: {@code branch} names the
+   * request's backing branch rather than a branch anybody pushed, and that branch is <b>deleted</b>
+   * at tag creation, so it no longer exists by the time this event is evaluated.
+   */
+  private static final String RELEASED_FROM_A_BACKING_BRANCH =
+      "{\"branch\":\"release/9f2c1a7e-4b31-4c8e-9a11-6d0f5c2e8b44\",\"projectId\":\"p-1\","
+          + "\"repository\":\"qits-spa-ui-components\",\"repositoryName\":\"qits-spa-ui-components\","
+          + "\"version\":\"1.4.0\"}";
+
   @Inject CiEventTriggerService engine;
   @Inject CiRunService runService;
   @Inject FakeRunAnnouncer runAnnouncer;
@@ -87,7 +100,11 @@ public class ReleaseAnnounceSeamTest extends CiTestSupport {
   @BeforeEach
   void resetAnnouncers() {
     repoId = "releaser-" + UUID.randomUUID().toString().substring(0, 8);
-    fakeCandidates.set(repoId);
+    // The full public coordinate, because what this class asserts is what an announcement CARRIES:
+    // projectId and repoId are on the event so a deploy consumer can address the repository without
+    // a lookup, and only a named candidate has a project to carry. The id-addressed arm — where the
+    // announcement correctly names none — is ReleaseJoinTest's.
+    fakeCandidates.setRefs(CiRepoRef.of(repoId, PROJECT_ID, "qits-spa-ui-components"));
     runAnnouncer.reset();
     releaseAnnouncer.reset();
   }
@@ -114,6 +131,11 @@ public class ReleaseAnnounceSeamTest extends CiTestSupport {
     FakeReleaseAnnouncer.Published npm = published.get(0);
     assertEquals(run.id, npm.runId());
     assertEquals(repoId, npm.repoId(), "the repository that PUBLISHED it, not the one that released");
+    assertEquals(
+        PROJECT_ID,
+        npm.projectId(),
+        "the project comes off the run's own repository reference, never off the event's payload —"
+            + " the event names what released, this names what published");
     assertEquals("1.4.0", npm.version(), "the version comes out of the triggering event's payload");
     assertEquals("npm", npm.packageType());
     assertEquals("@qits/ui-components", npm.packageName());
@@ -192,6 +214,44 @@ public class ReleaseAnnounceSeamTest extends CiTestSupport {
 
     assertEquals(1, runAnnouncer.announced().size());
     assertEquals(List.of(), releaseAnnouncer.published());
+  }
+
+  /**
+   * The publisher of {@code SCMRelease} moves from qits-workspaces to qits-projects and its {@code
+   * branch} becomes a release request's backing branch, {@code release/<id>} — which is deleted the
+   * moment the tag is created, so it is gone before this event is ever evaluated. <b>Nothing about
+   * the release pipeline may depend on it.</b>
+   *
+   * <p>This is the unit-level pin of that. The run is recorded at {@code main} and {@code main}'s
+   * head, because a trigger file with no {@code checkout:} builds the tracked branch by construction
+   * ({@code CiEventTriggerService.TRIGGER_BRANCH}) — the payload's branch reaches neither the row nor
+   * the clone, and is never validated as an identifier either. What drives the announcement is the
+   * <b>version</b>, exactly as it did before, so the coordinates of the published artifacts are byte
+   * for byte what a {@code branch: main} payload produces.
+   *
+   * <p>The step's own checkout is the other half and lives in the recipe rather than here: {@code
+   * .config/qits/ci-event-release.yml} fetches {@code refs/tags/$version} and checks it out detached,
+   * so the tree it builds is the tag's whatever the clone landed on. A pipeline that cloned the
+   * event's branch instead would have died on the first release of the new flow.
+   */
+  @Test
+  public void aReleaseCutFromADeletedBackingBranchAnnouncesExactlyTheSame() throws Exception {
+    String eventId = deliver(RELEASE_TRIGGER, RELEASED_FROM_A_BACKING_BRANCH);
+
+    CiRun run = runService.runsFor(repoId).get(0);
+    assertEquals(
+        CiEventTriggerService.TRIGGER_BRANCH,
+        run.branch,
+        "the run builds the tracked branch, never the ref the payload names");
+    assertEquals(HEAD, run.commitSha, "and its head, which is what the trigger decided at");
+
+    List<FakeReleaseAnnouncer.Published> published = releaseAnnouncer.published();
+    assertEquals(2, published.size(), "two declarations are two announcements, as ever");
+    assertEquals("1.4.0", published.get(0).version(), "the version drives the coordinates");
+    assertEquals("@qits/ui-components", published.get(0).packageName());
+    assertEquals("qits/qits-stt", published.get(1).packageName());
+    assertEquals(eventId, published.get(0).triggerEventId());
+    assertEquals(1, runAnnouncer.announced().size(), "and it is still a build that passed");
   }
 
   @Test

@@ -20,12 +20,36 @@ import java.util.UUID;
  * CausationScope.current()} is a non-consuming read, so N siblings under one parent is an ordinary
  * shape rather than a special case.
  *
- * <p><b>What is deliberately not here.</b> No {@code projectId} — qits-ci never learns one, and a
- * field it would have to invent is worse than a field a consumer looks up. No {@code branch} — a
- * release is a tag, and the branch it was cut from is the SCM event's business. No registry host on
- * a docker {@code packageName}: the registry is {@code qits-artifacts:8080} inside a step container
- * and {@code registry.dev.localhost:8080} to qits-ci and qits-cd, so no qualified reference is
- * portable and the name travels unqualified ({@code qits/qits-stt}) for the consumer to qualify.
+ * <p><b>{@code projectId} and {@code repoId} name the repository the way the platform does, and they
+ * are additive.</b> This class used to argue that no {@code projectId} belonged here because "qits-ci
+ * never learns one" — which stopped being true when a run started carrying its repository's public
+ * coordinate ({@code ci_run.project_id}/{@code repo_name}, the identity campaign's V5). A consumer
+ * that has to deploy what was published needs {@code (projectId, repoId)} to address the repository
+ * at all, and making it look that pair up — against qits-projects, on the event's dispatch thread,
+ * for a fact the publisher already holds — is a hop that can fail for a release that cannot. So the
+ * pair rides along:
+ *
+ * <ul>
+ *   <li>{@code repoId} is the git host's storage id of the repository whose pipeline published. It is
+ *       the same string {@code repository} has always carried, under the name the rest of the
+ *       platform spells it with — {@code repository} is kept exactly as it is, because every
+ *       committed selection and every existing consumer reads it, and a field whose meaning depends
+ *       on who is reading it is worth less than two fields that each mean one thing.
+ *   <li>{@code projectId} is the owning project as qits-projects names it, and it is the genuinely
+ *       new fact. <b>Nullable</b>: a run of a repository the candidate listing answered id-addressed
+ *       carries none, and {@code CanonicalJson}'s {@code NON_NULL} inclusion then leaves the key out
+ *       of the payload entirely rather than writing a null. A consumer that needs it must treat
+ *       absence as "ask somebody", never as an id.
+ * </ul>
+ *
+ * <p><b>What is deliberately still not here.</b> No {@code branch} — a release is a tag, and the
+ * branch it was cut from is the SCM event's business. That is sharper than it used to be rather than
+ * softer: the release request's backing branch ({@code release/&lt;id&gt;}) is <em>deleted</em> when
+ * the tag is created, so a branch on this event would name a ref that no longer exists by the time
+ * anybody read it. No registry host on a docker {@code packageName}: the registry is {@code
+ * qits-artifacts:8080} inside a step container and {@code registry.dev.localhost:8080} to qits-ci and
+ * qits-cd, so no qualified reference is portable and the name travels unqualified ({@code
+ * qits/qits-stt}) for the consumer to qualify.
  *
  * <p><b>{@code packageType} is a plain String and its values are {@code npm}, {@code maven}, {@code
  * docker} and {@code daemon}</b> — the last being a platform daemon binary such as {@code
@@ -43,6 +67,8 @@ import java.util.UUID;
 public record SoftwareRelease(
     UUID eventId,
     String repository,
+    String projectId,
+    String repoId,
     String version,
     String packageType,
     String packageName,
@@ -58,10 +84,12 @@ public record SoftwareRelease(
   /** The constructor a publisher uses: the facts, with the identity taken care of. */
   public SoftwareRelease(
       String repository,
+      String projectId,
+      String repoId,
       String version,
       String packageType,
       String packageName,
       Instant occurredAt) {
-    this(null, repository, version, packageType, packageName, occurredAt);
+    this(null, repository, projectId, repoId, version, packageType, packageName, occurredAt);
   }
 }

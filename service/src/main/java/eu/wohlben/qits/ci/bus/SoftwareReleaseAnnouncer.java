@@ -19,6 +19,15 @@ import java.time.Instant;
  * and the parent is an explicit argument rather than an ambient value that a first publish could
  * consume.
  *
+ * <p><b>{@code repository} and {@code repoId} are handed the same string, deliberately.</b> The port
+ * has always given this method the run's {@code repo_id} — the git host's storage id of the
+ * repository whose pipeline published — and that is what {@code repository} has carried on the wire
+ * since the event existed. Naming the same value twice is what makes the pair additive: every
+ * existing consumer's field keeps its exact bytes, and a consumer that needs to address a repository
+ * reads a field whose name says what it holds, instead of guessing whether {@code repository} is an
+ * id or a name on the platform it happens to be running on. The genuinely new fact is {@code
+ * projectId}, which no consumer could have derived from this event at all.
+ *
  * <p><b>qits-ci publishes this name and subscribes to nothing under it.</b> The wire name is the
  * simple class name, and qits-workspaces is simultaneously renaming <em>its</em> release event
  * {@code SoftwareRelease → SCMRelease} — the two halves of one cutover, after which this is the only
@@ -34,13 +43,15 @@ public class SoftwareReleaseAnnouncer implements ReleaseAnnouncer {
   public void onArtifactPublished(
       String runId,
       String repoId,
+      String projectId,
       String version,
       String packageType,
       String packageName,
       Instant finishedAt,
       String triggerEventId) {
     bus.publish(
-        new SoftwareRelease(repoId, version, packageType, packageName, finishedAt),
+        new SoftwareRelease(
+            repoId, projectId, repoId, version, packageType, packageName, finishedAt),
         CausingEvent.parentOf(triggerEventId, runId));
   }
 }

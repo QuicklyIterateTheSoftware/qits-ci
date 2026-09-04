@@ -15,13 +15,17 @@ import org.jboss.logging.Logger;
  * records and broadcasts it, and qits-ci receives its own announcement back. That round trip is the
  * acceptance test for the whole bus, and this bean is where it becomes visible.
  *
- * <p><b>An INFO log is the whole behaviour, on purpose</b> — and the reason has changed under it,
- * which is worth stating so nobody grows this bean by accident. It used to read "nothing hangs off a
- * green build arriving this way, the deployment path is still the direct POST". The direct POST is
- * gone: qits-platform-deployments consumes this very event durably and deploys from it, so a green
- * build arriving this way is now how the platform deploys at all. That consumer is in <b>that</b>
- * repository, not this one. Here the line stays a line, because a second route to the same outcome
- * on this side would be exactly the duplication the retirement removed.
+ * <p><b>An INFO log is the whole behaviour, on purpose</b> — and the reason has changed under it
+ * twice, which is worth stating so nobody grows this bean by accident. It first read "nothing hangs
+ * off a green build arriving this way, the deployment path is still the direct POST"; then the POST
+ * retired and qits-platform-deployments consumed this very event to deploy from. Neither is true
+ * now: a green build is no longer a reason to put anything live, the deployer's
+ * {@code /events/build-succeeded} door is gone with the POST that used to knock on it, and what the
+ * deployer subscribes to is this service's {@code SoftwareRelease}. What hangs off {@code
+ * BuildSuccessful} is a <em>verdict</em> — qits-projects records it against the commit and its
+ * release-request gate reads it. That consumer is in <b>that</b> repository, not this one, and here
+ * the line stays a line: a second route to somebody else's outcome on this side would be exactly the
+ * duplication the retirement removed.
  *
  * <p><b>Durable, so it is now proof of two things rather than one.</b> It used to be a {@code
  * QitsEventListener<BuildSuccessful>} — the typed, live-only seam — which meant the round trip it

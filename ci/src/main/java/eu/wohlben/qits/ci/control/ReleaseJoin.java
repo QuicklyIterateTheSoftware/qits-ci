@@ -116,11 +116,17 @@ public class ReleaseJoin {
    * is an opaque storage UUID while {@code SCMRelease} speaks the platform's public name, so a join
    * that only compared ids would silently never close. The id arm stays as the fallback, and it is
    * what a pre-cutover platform — where the two agree — closes on.
+   *
+   * <p>{@code projectId} is carried for the announcement and for nothing else: it is no part of the
+   * join key and no part of any lookup here. It travels because the announcement it ends up in may
+   * be made long after this call — by a later {@code SCMRelease}, or by a boot sweep in another
+   * process — and neither of those can read the run row back. Null on an id-addressed run.
    */
   public record Published(
       String runId,
       String repoId,
       String repoName,
+      String projectId,
       String version,
       String triggerEventName,
       String triggerEventId,
@@ -190,6 +196,7 @@ public class ReleaseJoin {
       owed.id = UUID.randomUUID().toString();
       owed.runId = run.runId();
       owed.repoId = run.repoId();
+      owed.projectId = run.projectId();
       owed.version = run.version();
       owed.packageType = type;
       owed.packageName = artifact.name();
@@ -278,6 +285,7 @@ public class ReleaseJoin {
                     announcer.onArtifactPublished(
                         row.runId,
                         row.repoId,
+                        row.projectId,
                         row.version,
                         row.packageType,
                         row.packageName,

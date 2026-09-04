@@ -103,6 +103,8 @@ rest of qits it reaches over a URL it is configured with:
 | in | `GET /ci/api/repositories/summary` → `{"repositories": [{repositoryId, projectId, repoName, lastRun, lastMainRun}]}` — ascending by id, full run objects, `lastMainRun` null when there is none, and the name pair null for a repository whose pushes were id-addressed | same; it is the id listing plus the two runs a client would otherwise make a request per repository to find |
 | in | `GET /ci/api/daemon` → `{"daemonName", "daemonVersion", "previousDaemonVersion", "source"}` — the pin ladder's top rung (an adopted release, else the configured pin), never a run row; blank `daemonVersion` and `source: "none"` mean this deployment has pinned none | same; read fail-closed by qits-artifacts' daemon GC and readable by the client |
 | in | `POST /ci/api/runs/{runId}/cancel` → 202, 409 on a run that has already finished | same: no machine guard, behind the deployment's auth policy |
+| in | `POST /ci/api/runs/{runId}/retry` → 202 `{runId}`, 404, 409 on a run that has not finished — a new run of the **same** pipeline at the **same** commit | same; `qits:admin`, like the cancel, and for the same reason |
+| in | `POST /ci/api/runs/cancellations` — `{repoId, releaseRequestId}` → 202 `{runIds}`, every unfinished run that repository has for that release request | **the one write here a machine performs.** qits-projects calls it when a request is withdrawn; a machine caller needs this service's audience and `project=*`, an operator arrives on the edge's forwarded session and is judged by the roles alone |
 | in | `ws://…/ci/daemon` — the socket each step container's daemon dials **out** to | two credentials and no machine token: the daemon asserts `X-Qits-User`/`X-Qits-Roles: qits:system` to get past the endpoint's `@RolesAllowed` at the **upgrade**, and the host-minted per-container secret is what `@OnOpen` checks |
 | out | where the git host answers: ci reads a commit's pipeline config off its content routes — `<base>/git/<projectId>/<repoName>/blob/<rev>/<path>` and `…/tree/<rev>[/<path>]` for a run whose push carried the public pair, `<base>/git/<repoId>/…` for one that did not — and, with no `qits.ci.projects-url` set, its candidate listing off `GET <base>/git` → `{"repositories": [...]}` | `qits.ci.git-host-url` |
 | out | `GET <base>/projects/api/repositories` → `{"repositories": [{id, projectId, name, mainBranch}]}` — the candidate list an arriving event is evaluated against, and the only place the public `(projectId, name)` pair can be read. **Unset by default**: with no value ci falls back to the git host's storage listing, which is what a pre-cutover platform and a clone-alone build need | `qits.ci.projects-url` |
@@ -184,11 +186,18 @@ push back off the log instead. Two consequences worth stating:
 notifier, the `PdBearer` credential it carried, the `qits.platform.deployments.intake-url` key and
 the port itself.
 
-What replaced it is the pair below: qits-ci publishes `BuildSuccessful` through the eventstream
-outbox, and qits-platform-deployments consumes that event with a **durable** subscriber which calls
-its own announce path. Both halves are durable where the POST was fire-and-forget — an unreachable
-qits-events leaves the event in this process's outbox, and a disconnected or restarting deployer
-catches up from the log — so a deployment is delayed by an outage rather than lost to one.
+What replaced it is the bus below: qits-ci publishes through the eventstream outbox and the deployer
+consumes with a **durable** subscriber which calls its own announce path. Both halves are durable
+where the POST was fire-and-forget — an unreachable qits-events leaves the event in this process's
+outbox, and a disconnected or restarting deployer catches up from the log — so a deployment is
+delayed by an outage rather than lost to one.
+
+**Which event deploys has since changed, and it is no longer this one.** The deployer subscribed to
+`BuildSuccessful` when the POST retired; it subscribes to `SoftwareRelease` now, because a green
+build stopped being a reason to put anything live. So `BuildSuccessful` is a verdict about a commit —
+qits-projects' release-request gate is what reads it — and a deployment follows this service's
+`SoftwareRelease`, published once per artifact a release pipeline publishes. A repository whose
+pipeline publishes nothing deploys nothing, however green it goes.
 
 That is worth the whole paragraph because the loss was measured. The call was one POST whose failure
 was swallowed at debug, and a bootstrap paid for it: qits-platform-idp was redeployed minutes before
@@ -198,10 +207,11 @@ never happened with nothing anywhere saying so. The first answer was bounded ret
 at-most-once past three minutes, still a POST that only this process knew it owed. The bus pair has
 no such window, and the retries retired with the notifier that grew them.
 
-**The deployer's HTTP intake stays.** It is the manual and recovery door, which a bootstrap replay
-knocks on by hand; what went away is qits-ci knocking on it per green run. So this repository
-configures no address for the deployer at all, and presents a credential to nobody — the
-`quarkus.oidc-client` extension went with `PdBearer`.
+**The deployer's HTTP intake stays, at a different path.** `/events/build-succeeded` is gone at that
+end too and answers 404; what takes its place is `POST /platform-deployments/api/events/software-released`,
+the manual and recovery door a bootstrap replay knocks on by hand. What went away is qits-ci knocking
+on any of it. So this repository configures no address for the deployer at all, and presents a
+credential to nobody — the `quarkus.oidc-client` extension went with `PdBearer`.
 
 **A green run is announced to nobody in particular.** The transition publishes a
 `BuildSuccessful` event to [qits-events-platform-service](https://github.com/QuicklyIterateTheSoftware/qits-events-platform-service),
@@ -209,7 +219,9 @@ through the `RunAnnouncer` seam in `ci/control`, implemented by
 `service/…/bus/BuildSuccessfulAnnouncer`. Only `SUCCESS` announces — a red run, a `TIMED_OUT` run, a
 `CONFIG_ERROR` and a discarded run announce nothing. It is a *statement* anything on the platform may subscribe to
 rather than a request addressed to one service, which is exactly why the deployer could move behind
-it without qits-ci learning anything about deploying. It is a
+it — and then off it again, to `SoftwareRelease` — without qits-ci learning anything about deploying
+either time. What reads it today is qits-projects' commit ledger, and through it the release
+request's quality gate. It is a
 `PUT` at a UUID the publisher picks, so a retry is a replay rather than a duplicate; a delivery that
 does not land goes to an outbox in this process and is retried on a schedule; and it carries the
 run's own `finishedAt` as the event's `occurredAt`, plus `imageDigest` — which qits-ci never has,
@@ -536,6 +548,9 @@ steps:                          # exactly the schema ci-post-receive.yml uses
 - The other added key is **`checkout:`**, optional, which makes the run build the event's own
   commit — see "Building the commit the event names". Also a parse error in `ci-post-receive.yml`,
   where the checkout IS the push.
+- The third added key is **`gating:`**, optional, default `true`: whether a red run of this pipeline
+  should stand in the way of releasing its commit — see "Gating: what a red run is worth". Inert and
+  therefore a parse error in `ci-post-receive.yml`, where a push run is always gating.
 
 ### Building the commit the event names — `checkout:`
 
@@ -574,6 +589,94 @@ steps:
   third repository's file named. Declared anyway, it is one WARN per event and no run.
 - `suppressCi` stays a `when:` condition, not engine knowledge: matchers compare JSON literals, so
   `exact: "false"` matches the boolean. Every `SCMPublishCommit` trigger should carry it.
+
+### Gating: what a red run is worth
+
+A run's verdict travels on `BuildSuccessful`/`BuildFailed` as a `gating` flag, and a release gate
+reads it to decide whether a red run holds the commit. Two keys spell it, at two levels, and the
+run's verdict is the **AND** of them:
+
+```yaml
+gating: false                   # THE FILE — a red run of this pipeline gates nothing
+steps:
+  - image: qits/build-images/maven-base:latest
+    script: ./mvnw verify       # a step is gating unless it says otherwise
+  - image: qits/build-images/maven-base:latest
+    gating: false               # THE STEP — this one's failure gates nothing
+    script: ./publish-docs.sh
+```
+
+- **Absent is `true` at both levels**, so every pipeline written before either key existed keeps its
+  behaviour byte for byte, and a gating build's event payload stays byte-identical too: `gating` is
+  omitted from the wire when it is true and written as an explicit `false` only when it is not.
+- **The file-level key is trigger-files-only.** A push run is always gating as a file, so the key
+  would be inert in `ci-post-receive.yml` and is a parse error there — the same two-way rule
+  `checkout:` and `artifacts:` carry.
+- **The step-level key is legal in both files**, because the `steps:` schema is one implementation
+  and a step must not mean two things — and it is not inert in a push pipeline: a push whose last
+  step publishes docs is exactly the case it exists for.
+- **A non-gating step that fails still fails the run.** The row is `FAILED`, a person sees the red,
+  the remaining steps are `SKIPPED` — what changes is only what a release gate reads. That is why
+  **the non-gating steps go last**: everything after a failure is skipped, which is right for a
+  publish and wrong for a build.
+- **Only a YAML boolean is accepted** at either level. `gating: "false"` is a parse error rather
+  than a truthy default, because both directions of a silent misread are expensive: one holds a
+  commit for a failure nobody meant to gate on, the other waves one through.
+- **A finished run's `gating` on the API is what the verdict was worth**, not only what the pipeline
+  declared: a gating file whose failure landed in a `gating: false` step reads `false`, which is the
+  value its build event carried.
+
+### The release-request QA pipeline — `ci-event-release-request.yml`
+
+The platform runs **no CI outside release requests**. qits-projects keeps, per open release request,
+a backing branch `release/<id>` — an octopus merge of the request's sources, refolded whenever the
+set changes — and publishes **`ReleaseRequestChanged`** on every successful fold. That branch is
+written by qits-githost's merge primitive, which fires no `post-receive` and therefore publishes no
+`SCMPublishCommit`: without this event the fold exists and nothing builds it.
+
+So a repository commits **one** QA pipeline, and it is an ordinary event trigger:
+
+```yaml
+# .config/qits/ci-event-release-request.yml
+event: ReleaseRequestChanged
+when:
+  - repoName: { exact: qits-ci-service }
+checkout:
+  branch: backingBranch          # release/<id>
+  sha: mergedSha                 # the fold this run is about
+steps:
+  - image: qits/build-images/maven-base:latest
+    script: ./mvnw -B -ntp verify          # the GATING half
+  - image: qits/build-images/maven-base:latest
+    gating: false                          # the NON-GATING half
+    script: ./publish-userflows.sh
+```
+
+The full reference file, with the reasoning and the per-repository placeholders the rollout sweep
+fills in, is `docs/ci-event-release-request.yml`.
+
+- **The engine learns nothing new.** `event:` is matched against the frame's name as a string and
+  `checkout:` resolves two dot-paths, so this is the existing grammar pointed at a new event —
+  discovery, parsing and `when:` still read `main`'s head, and only the run's branch and sha come
+  from the payload. A fold cannot alter the CI that gates it by merging in an edit to this file.
+- **The payload's fields** are `projectId`, `repoId`, `repoName`, `releaseRequestId`,
+  `backingBranch`, `mergedSha` and `changedAt` (which is the envelope's `occurredAt` as well). Only
+  a real change is announced: a fold the git host answered `unchanged`, and one that conflicted,
+  publish nothing.
+- **The run records `releaseRequestId`**, and the API returns it. `mergedSha` names one fold and the
+  next re-fold replaces it, so the request id is the handle a cancellation or a retry addresses the
+  work by; the sha says which fold the verdict is about. Those two operations exist now:
+  `POST /ci/api/runs/cancellations` withdraws a request's CI by that pair, and
+  `POST /ci/api/runs/{runId}/retry` re-asks the same question at the same fold. See "Following a run,
+  stopping one, and asking again".
+- **A burst of re-folds collapses to the newest** with nothing added: the backing branch is stable
+  per request, so the existing per-branch collapse (`checkout:`'s) supersedes the queued older folds
+  as `DEDUPED`. A fold already `RUNNING` keeps running.
+- **The verdict returns keyed on the fold**: `BuildSuccessful`/`BuildFailed` with `commitSha` =
+  the `mergedSha` this run received, which is what qits-projects matches on together with `repoId`.
+- **This one file replaces `ci-event-build.yml` and `ci-event-userflows.yml`.** The two existed
+  because a red userflow round must not cost the image and two files cannot share a verdict; one
+  file buys the same property with ordering plus the per-step `gating:` above.
 
 ### The selection
 
@@ -654,8 +757,15 @@ repository's others.**
 ### The release pipeline, and what it declares
 
 A **release pipeline** is an ordinary event trigger with two things added: it selects its own
-repository's `SCMRelease` — qits-workspaces publishes that the moment a release push is accepted —
+repository's `SCMRelease` — qits-projects publishes that the moment the release tag is created —
 and it declares the artifacts it publishes.
+
+> **Build the tag, never the event's branch.** The event's `branch` is the release request's backing
+> branch, and that branch is deleted in the same operation that creates the tag, so it does not exist
+> by the time this pipeline runs. A release pipeline therefore declares **no `checkout:`** — its run
+> is recorded at `main` and clones it, which is what a trigger with no `checkout:` does by
+> construction — and its first step fetches `refs/tags/$version` and checks it out detached. The
+> version, not the branch, is what every coordinate is derived from.
 
 ```yaml
 # .config/qits/ci-event-release.yml
@@ -712,10 +822,21 @@ When a run whose trigger file declared artifacts goes **green**, qits-ci publish
 
 | Field | What |
 |---|---|
-| `repository` | the repository whose pipeline published it — this repo, not the upstream |
+| `repository` | the repository whose pipeline published it — this repo, not the upstream. Unchanged since the event existed, and every committed selection reads it |
+| `repoId` | the same value under the name the platform addresses a repository by: `ci_run.repo_id`, the git host's storage id |
+| `projectId` | the project that repository belongs to, as qits-projects names it. **Absent** — no key at all — when the run's repository was known only by storage id |
 | `version` | read out of the **triggering** event's payload: `version` on an `SCMRelease`, `tagName` on an `SCMPublishTag` (a release stamp IS the name of the tag the release push created) |
 | `packageType` | `npm`, `maven` or `docker`, as declared |
 | `packageName` | the declared name, verbatim |
+
+**`projectId` and `repoId` are additive and exist for one reader: a consumer that has to *deploy*
+what was published.** Addressing a repository on this platform takes `(projectId, repoId)`, and a
+consumer that had to look that pair up — against qits-projects, on its own dispatch thread, for a
+fact the publisher already held — would be adding a hop that can fail to a release that cannot.
+Nothing was repointed to make room for them: `repository` carries exactly the bytes it always did,
+which is what makes the addition free for every existing subscriber. `projectId` being **absent**
+rather than null is the wire's own way of saying qits-ci does not know, and a consumer must read it
+as "ask somebody" rather than as an id.
 
 Each one carries the triggering event as its `parentId`, so N artifacts are N siblings under one
 cause and the whole train is a chain in the event log.
@@ -744,14 +865,21 @@ A green release pipeline is **not enough** to announce. qits-ci announces a `Sof
 `(repository, version)` only when both of these exist, in either order:
 
 1. a **green release-pipeline run** for that pair, and
-2. an **`SCMRelease`** for that pair — the event only qits-workspaces publishes, and only for a real
-   release.
+2. an **`SCMRelease`** for that pair — the event one service publishes, and only for a real release.
 
 The reason is the bootstrap. A rebootstrap restores each repository's release **tag** so the platform
 re-derives its artifacts; that is a restore, not a release, and it produces `SCMPublishTag` alone.
 Announcing off the tag made every replay impersonate a release: the train woke, every consumer ran a
-bump, and each bump ended in a release call against a qits-workspaces the boot had not deployed yet.
+bump, and each bump ended in a release call against a service the boot had not deployed yet.
 A replay has no novelty to announce, and `SCMRelease` is exactly the platform's word for novelty.
+
+**Who publishes it moved, and qits-ci did not notice.** It was qits-workspaces' release door; it is
+qits-projects' release request now, which folds the request's sources onto `release/<id>`, tags it,
+and announces the release. Same signature, same payload fields — and nothing on this side keys on the
+producer: the consumer subscribes by **signature**, a frame carries no publisher, the join key is
+`(repository, version)`, and causation is the frame's own id. The one value that did change is
+`branch`, which now names the request's backing branch and is **deleted at tag creation**; no field
+qits-ci reads is affected, and the release pipeline builds the tag rather than the branch (below).
 
 Both halves are rows, so the two may arrive in any order and a restart between them costs nothing:
 
@@ -900,6 +1028,8 @@ POST /ci/api/events/trigger
   "name": "SoftwareRelease",
   "payload": {
     "repository": "qits-spa-ui-components",
+    "repoId": "qits-spa-ui-components",
+    "projectId": "qits",
     "version": "1.4.0",
     "packageType": "npm",
     "packageName": "@qits/ui-components"
@@ -1058,7 +1188,7 @@ removes it and becomes the step's output), a daemon that registered and then wen
 a genuine step timeout are six different recorded outcomes — none of them is "the step failed with
 exit −1".
 
-## Following a run, and stopping one
+## Following a run, stopping one, and asking again
 
 `GET /ci/api/runs/{runId}` is the whole live surface: while the run is `RUNNING` it carries a `live`
 object — the step index in flight and the bounded tail it has printed. **Poll it.** There is no SSE
@@ -1078,6 +1208,40 @@ A queued push is also cancelled automatically when a
 newer push for the same repository and branch is accepted: it records `DEDUPED` and the newer run's
 id, which the run detail links to. Event-triggered runs are excluded because distinct trigger files
 on one branch are independent pipelines, not duplicates.
+
+**A cancelled run announces nothing at all.** Not `BuildSuccessful`, not `BuildFailed` — a person
+withdrawing a question is not an answer to it, and the release gate on the other side reads every
+`BuildFailed` as "this commit is not releasable". That contract is what makes the next paragraph
+safe.
+
+`POST /ci/api/runs/cancellations` — body `{"repoId": "…", "releaseRequestId": "…"}` — cancels **every**
+unfinished run that repository has for that release request and answers 202 with the ids it stopped.
+It is qits-projects' door for a request that was withdrawn, closed or re-scoped, and it is addressed
+by the pair rather than by run id because the runs it stops build a fold nobody pushed: the sha is
+rewritten by the next re-fold and the caller never held a run id. **Both halves of the key are
+required** — one request folds many repositories and one repository carries many open requests, so
+either alone would cancel a sibling's build. Nothing left in flight is a 202 with an empty list
+rather than a 404: the caller asked for a state, and that state holds, which makes the call
+idempotent and safe to retry.
+
+`POST /ci/api/runs/{runId}/retry` answers 202 with `{"runId": "…"}` and runs that run's pipeline
+again — same repository, same trigger file, same commit, same release request. It is for the red
+that is about the platform rather than about the code (a flaked container, a registry that was down,
+a step that hit its deadline), where nothing needs re-folding and no new event needs waiting for. The
+new run builds the very sha the old one built, so its verdict lands on the same commit. Retrying a
+run that has not finished is a 409; everything terminal is retryable, cancelled runs included.
+
+**How it gets past the dedupe.** `unique (trigger_event_id, repo_id, config_path)` is the
+at-most-one-run-per-(event, trigger file) guarantee, and a retry is by definition the same three
+values — the shape that constraint exists to refuse. So a retry mints its own **synthetic** trigger
+identity, `retry:<its own run id>`: unique by construction, unmistakably local, and impersonating no
+event qits-events ever minted. The constraint is untouched, and adding a column to it was rejected
+for a concrete reason — the column is null on every ordinary row, and SQL treats a tuple containing a
+null as never colliding, so the dedupe would have stopped firing platform-wide. `retry_of_run_id`
+(V9) is then pure provenance, and it is what the API returns as `retryOfRunId`. The **causation** is
+inherited rather than re-minted: the retry copies `causation_id` from the run it re-fires, so its
+`BuildSuccessful` still hangs off the domain event that started the whole thing and a re-fired
+release request is one chain in the log rather than an unexplained root.
 
 ## What a restart costs
 
@@ -1173,10 +1337,12 @@ a repository's own listing will show.
   qits-platform-deployments and hand this service qits-idp client credentials
   (`QUARKUS_OIDC_CLIENT_CLIENT_ENABLED`, `QUARKUS_OIDC_CLIENT_CREDENTIALS_SECRET`) so the POST could
   carry a bearer. **All three are gone, and none of them is aliased** — a deployment still setting
-  any of them is setting nothing. A green run now announces itself on the bus and
-  qits-platform-deployments subscribes, so what makes a deployment happen is `QITS_EVENTS_URL` and
-  `QITS_EVENTSTREAM_ENABLED` below, plus a deployer that is subscribing. The deployer's HTTP intake
-  still exists for a manual replay; nothing here calls it.
+  any of them is setting nothing. Runs and releases announce themselves on the bus and
+  qits-platform-deployments subscribes — to `SoftwareRelease`, not to `BuildSuccessful`: a green
+  build is not a deployment any more, a published release is. So what makes a deployment happen is
+  `QITS_EVENTS_URL` and `QITS_EVENTSTREAM_ENABLED` below, plus a deployer that is subscribing, plus a
+  pipeline that publishes something. The deployer's HTTP intake still exists for a manual replay, at
+  `/events/software-released`; nothing here calls it.
 - Set `qits.artifacts.registry-host` / `qits.artifacts.image-repository` to qits-artifacts' registry
   as reachable **from the docker host** — the daemon on the far side of the mounted socket is what
   resolves that name and performs the push, not this process and not the step's CLI. While the

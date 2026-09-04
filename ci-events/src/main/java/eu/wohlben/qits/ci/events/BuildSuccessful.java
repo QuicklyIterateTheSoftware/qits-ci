@@ -26,10 +26,13 @@ import java.util.UUID;
  * never claimed to carry one.
  *
  * <p>{@code repoId} is the storage id and is always set; {@code projectId} and {@code repoName} are
- * the public {@code (project, name)} pair the deployer names the image tag {@code
- * qits/<repoName>:<sha>} from. They ride together — a push that arrived name-addressed carries both,
- * an id-addressed one carries neither — so a subscriber that has them addresses the image by name,
- * and one that does not falls back to the id exactly as before.
+ * the public {@code (project, name)} pair a subscriber addresses the repository by. They ride
+ * together — a push that arrived name-addressed carries both, an id-addressed one carries neither —
+ * so a subscriber that has them names the repository and one that does not falls back to the id
+ * exactly as before. The pair was added for a deployer that named an image {@code
+ * qits/<repoName>:<sha>} off this event; nothing deploys from a green build any longer, and the
+ * fields stay because the reader that replaced it — qits-projects' commit ledger, which the release
+ * gate reads — has the same addressing problem.
  *
  * <p>{@code imageDigest}, {@code projectId} and {@code repoName} are nullable — a pipeline that runs
  * tests and publishes nothing is an ordinary green build, and an id-addressed push announces no name

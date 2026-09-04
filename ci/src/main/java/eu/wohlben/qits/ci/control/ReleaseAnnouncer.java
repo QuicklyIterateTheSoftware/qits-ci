@@ -43,6 +43,10 @@ public interface ReleaseAnnouncer {
    *     that goes wrong has to be traceable to the run it came from.
    * @param repoId the repository whose pipeline published it — this repo, not the upstream that
    *     triggered it
+   * @param projectId the project that repository belongs to, as qits-projects names it, so a consumer
+   *     can address the repository without a lookup of its own. <b>Null</b> where the run carries no
+   *     public coordinate (an id-addressed candidate, and every row recorded before the identity
+   *     campaign); absent is a supported value and must never be invented into one
    * @param version the version, read out of the triggering event's payload — {@code version} on an
    *     {@code SCMRelease}, {@code tagName} on an {@code SCMPublishTag}. qits-ci publishes nothing
    *     when neither is there: the declaration was written for a trigger that cannot feed it.
@@ -58,6 +62,7 @@ public interface ReleaseAnnouncer {
   void onArtifactPublished(
       String runId,
       String repoId,
+      String projectId,
       String version,
       String packageType,
       String packageName,

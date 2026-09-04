@@ -79,10 +79,11 @@ package:
 
   There was a third, `notify`, holding the deploy announcement — one POST per green run to
   qits-platform-deployments' intake, plus the qits-idp credential it carried. It is **gone**, and so
-  is its `PdNotifier` port in `ci/control`: the deployer subscribes to `BuildSuccessful` durably now,
-  so what used to be an outbound HTTP call of ci's is an ordinary consumption of the deployer's. The
-  intake it posted to still exists as the manual/recovery door; nothing here calls it, and no key
-  here configures it. `quarkus-oidc-client` left the pom with that package and has since come back
+  is its `PdNotifier` port in `ci/control`: what used to be an outbound HTTP call of ci's is an
+  ordinary consumption of the deployer's. What it consumes is `SoftwareRelease` — a green build
+  stopped being a reason to deploy, so the `/events/build-succeeded` path that POST addressed is gone
+  at that end as well. The intake that remains, `/events/software-released`, is the manual/recovery
+  door; nothing here calls it, and no key here configures it. `quarkus-oidc-client` left the pom with that package and has since come back
   for a different hop — the token this service presents to qits-containers, produced in
   `containers/`. See "Authentication".
 - `service/…/idp/` — the qits-idp commissioning adapter: the client, the run-scoped memory of what
@@ -507,7 +508,12 @@ bounded question — and an ask above **100** is clamped rather than refused, si
 listing that is both unscoped and otherwise unbounded.
 
 **The machine guard is a call in the handler, not a filter over a path.** `CiEventController` opens
-its one write with `machineAuth.requireProject(QitsClaims.ANY)`. Nothing matches a path, so renaming
+its one write with `machineAuth.requireProject(QitsClaims.ANY)`, and `CiRunController` opens
+`cancelReleaseRequestRuns` with the same call **on the machine arm** — `if
+(MachineIdentity.isMachine(identity))`, because that route has two real callers: qits-projects with a
+bearer, and an operator on the edge's forwarded `X-Qits-User`/`X-Qits-Roles` session, which carries
+no token at all and is judged by the class-level roles. Demanding a machine token unconditionally
+there would 401 the person; skipping the check would unguard the peer. Nothing matches a path, so renaming
 a `@Path` moves the guard with the route and can no longer detach it. The fail-open shape that
 replaced the old one is narrower and still real: a **new** write method that simply omits the call
 ships unguarded, and nothing says so.
@@ -528,8 +534,10 @@ controller carries a class-level role: **the pair** `{qits:admin, qits:system}` 
 and `CiRepositoryController` — `qits:system` is the machine role and `qits:admin` the human one, and
 a peer that polls a run it asked for must not be handed a person's role to do it — and `qits:system`
 on `CiEventController`, `CiDaemonController` and `CiDaemonSocket`, which is what a machine peer
-holds. **Nothing that mutates was widened with them**: `CiRunController.cancelRun` carries its own
-method-level `qits:admin`, which replaces the class's list rather than adding to it. So three doors shut in
+holds. **Nothing that mutates was widened with them**: `CiRunController.cancelRun` and
+`CiRunController.retryRun` carry their own method-level `qits:admin`, which replaces the class's list
+rather than adding to it. `cancelReleaseRequestRuns` keeps the class pair, because a peer service
+(qits-projects, withdrawing a release request) and an operator both legitimately call it. So three doors shut in
 order, and `MachineGuardTest` pins which: no token is 401, a token granted no roles is 403 at
 `@RolesAllowed`, a wrong audience or an uncovered project is `MachineAuth`'s own 403. **A machine
 token carries its roles in the `groups` claim** — qits-platform-idp copies them there from
@@ -738,9 +746,10 @@ eventstream suite does.
 `RunAnnouncer` (in `ci/control`, implemented in `service/`) is what keeps the `ci` module free of the
 bus. It used to be the second of two — `PdNotifier` was beside it, a direct POST asking
 qits-platform-deployments to deploy, and the two were separate ports because a request to one named
-service and a statement to the platform are different things. The deployer consumes `BuildSuccessful`
-durably now, so the request became a consumption and the port retired; the statement is what is left,
-and the shape of it did not change. `finishedAt` is on the signature because an event carries when it
+service and a statement to the platform are different things. The deployer consumes off the bus
+durably now — `SoftwareRelease`, since a green build stopped being a reason to deploy anything — so
+the request became a consumption and the port retired; the statement is what is left, and the shape
+of it did not change. What hangs off `BuildSuccessful` is qits-projects' release-request gate. `finishedAt` is on the signature because an event carries when it
 happened,
 and it comes back out of `finishRun` rather than off the `CiRun` instance: that method mutates a
 freshly loaded entity in its own transaction, so the caller's copy never sees the value. **A null
@@ -756,8 +765,25 @@ build passed" and "the registry has it" behind one name, which is precisely the 
 split-release redesign exists to undo: the old single event fired at release-*push* time and every
 consumer read it as "the package exists", with an entire upstream build in the gap.
 
-Three things about that second seam are worth having in front of you:
+Four things about that second seam are worth having in front of you:
 
+- **`SoftwareRelease` names the repository three times and that is the additive shape, not a
+  duplication to tidy up.** `repository` is what it always was — the run's `repo_id` — and every
+  committed selection and every existing consumer reads it, so it is never repointed. `repoId` is the
+  same string under the name the platform addresses a repository by, and `projectId` is the fact
+  nothing on this event could previously supply. They exist for one reader: a consumer that has to
+  *deploy* what was published needs `(projectId, repoId)` to address the repository at all, and
+  making it look that up — against qits-projects, on its own dispatch thread, for something the
+  publisher already held — adds a hop that can fail to a release that cannot.
+  <br>**`projectId` is carried on the OWED ROW** (`ci_release_announcement.project_id`, V10), beside
+  `finished_at` and `trigger_event_id` and for the identical reason: the announcement is often made
+  by whoever closes the join later — a tag-triggered run waits for the `SCMRelease`, and the boot
+  sweep announces in a later process entirely — and neither can read the run row back.
+  `ReleaseJoinTest.theOwedAnnouncementCarriesTheProjectItWasOwedFor` is the case that fails if it is
+  ever read at announce time instead.
+  <br>**Null is a supported value and reaches the wire as an ABSENT KEY**, because `CanonicalJson`
+  includes `NON_NULL`. An id-addressed candidate has no project, so "qits-ci does not know" is
+  spelled by the key not being there; writing a null would have made absence a value.
 - **The fan-out is `CiRunService`'s and the port takes one artifact.** N declarations are N calls, so
   a failure costs one announcement rather than the rest. The bus already supports siblings —
   the outbox enqueues one row per event in its own transaction and `CausationScope.current()` is a
@@ -785,9 +811,26 @@ only once an `SCMRelease` for the same `(repository, version)` has been seen. bo
 WP2; the class javadoc carries the argument in full and the short form is:
 
 - A **restore** re-establishes SCM state and produces `SCMPublishTag` alone. A **release** also
-  announces novelty, and only qits-workspaces publishes `SCMRelease`. Announcing off the tag made
+  announces novelty, and `SCMRelease` is that announcement. Announcing off the tag made
   every rebootstrap impersonate a release — the train woke against a platform the boot had not
   finished deploying, and the same eight repositories went red every time.
+- **The publisher moved from qits-workspaces to qits-projects and this repository changed nothing**,
+  which is a property of how the consumer is written rather than luck: the durable seam subscribes by
+  **signature**, an `EventFrame` carries no producer and no source service, the join key is
+  `(repository, version)`, and the causation edge is the frame's own id rather than an expectation
+  about who minted it. Anything that had recorded "qits-workspaces said so" — a producer filter, a
+  source check, an expected parent — would have gone silently dead at the cutover, in the direction
+  that publishes without announcing. The event's shape did not move either: same signature, same
+  seven components, so `ScmReleaseContractTest`'s transcription is unchanged and only the file it
+  names moved (`qits-projects-service/service/…/bus/SCMRelease.java`).
+- **What DID change is `branch`, and nothing here reads it.** It is the release request's backing
+  branch (`release/<id>`) now, and that branch is **deleted in the same operation that creates the
+  tag** — so it does not exist by the time the event is evaluated. A release pipeline declares no
+  `checkout:`, so its run is recorded at `main` and the daemon clones `main`; the step then fetches
+  `refs/tags/$version` and checks it out detached, which is where the released tree comes from. The
+  version drives every coordinate. `ReleaseAnnounceSeamTest` and `ScmReleaseContractTest` pin both
+  halves, and `CiEventTriggerCausationTest`'s frame carries a `release/<uuid>` branch for the same
+  reason.
 - **The two facts race on a real release, so both halves are rows.** `ci_release_announcement` holds
   what a green run owes (`announced_at` null is "still owed"), `ci_scm_release` holds what was really
   released. Either arrival order works and a restart between them costs nothing.
@@ -1095,6 +1138,84 @@ names"), and what follows is what biting it feels like.
   has the jar — the same guard shape `EventWireReflectionTest` puts over the mix-in's class name.
   Rename the event or the field in qits-githost and the suite goes red, rather than the supersede
   quietly ceasing to fire.
+- **`ReleaseRequestChanged` is a trigger this engine needed no code to accept, and exactly one
+  column to serve.** The platform runs no CI outside release requests: qits-projects folds a
+  request's sources onto `release/<id>` and announces every successful re-fold, and a repository's
+  single QA pipeline (`ci-event-release-request.yml`; the reference file is
+  `docs/ci-event-release-request.yml` and `README.md` has the shape) selects it with
+  `checkout: { branch: backingBranch, sha: mergedSha }`. Matching, selection and checkout are the
+  generic grammar — the branch that gets built is a branch nobody pushed, which is the whole reason
+  the event has to exist, and "decide at main, build at the payload's commit" answers it unchanged.
+
+  **What is event-specific is `ci_run.release_request_id` and nothing else.** `mergedSha` names one
+  fold and the next re-fold replaces it, so it is not a handle a cancellation or a retry can hold;
+  the request id is. It is read at accept in `CiRunService`, **gated on the event NAME** the way
+  `supersedeByVersion` is gated on the tag event's — a `releaseRequestId` elsewhere on the bus is
+  some other context's word, and a provenance column that reads any field of any payload eventually
+  records something nobody meant. A value longer than the column is recorded as *none* rather than
+  truncated or thrown: the run is the point.
+
+  **`RELEASE_REQUEST_EVENT_NAME`/`RELEASE_REQUEST_ID_FIELD` are strings, and there is no jar to make
+  them anything else** — qits-projects publishes no vocabulary jar, by its own ruling and for
+  qits-workspaces' measured reason. `bus/ReleaseRequestChangedContractTest` is the guard, and it is
+  `ScmReleaseContractTest`'s mechanism rather than `ScmPublishTagContractTest`'s: a **transcription**
+  of the published record's component list, run through the real `CanonicalJson`, pinning the name,
+  both checkout dot-paths and the id field. A rename over there is a change to that transcription in
+  the same campaign; landing it there and not here leaves this suite green and every repository's QA
+  pipeline silently dead.
+
+  **The re-fold burst needs nothing new.** The backing branch is stable per request, so
+  `supersedeByCheckoutBranch` already collapses the queued older folds to the newest tip.
+
+- **Cancelling and retrying a release request's CI are the two operations that column bought, and
+  neither of them touched the dedupe.** `POST /ci/api/runs/cancellations` takes
+  `{repoId, releaseRequestId}` and cancels every unfinished run of that pair — **both halves
+  required**, since one request folds many repositories and one repository carries many open
+  requests, so either alone reaches a sibling's build. It leans entirely on a contract this service
+  already had: **a `CANCELLED` run announces nothing**, so a withdrawn request's stopped build can
+  never be read by qits-projects' gate as a failure. Nothing in flight is a 202 with an empty list —
+  the caller asked for a state, and that state holds — which is what makes it idempotent.
+
+  **The retry is where the interesting decision is.** `POST /ci/api/runs/{runId}/retry` inserts a new
+  row copying the source's repository, branch, sha, `release_request_id`, `config_path` and event
+  snapshot, so the re-run is the same work and its verdict correlates as the original's would have.
+  Every column of `(trigger_event_id, repo_id, config_path)` would therefore be identical, which is
+  precisely the replay that constraint refuses — so the retry mints a **synthetic trigger identity**,
+  `CiRunService.RETRY_TRIGGER_PREFIX + <its own run id>`. Unique by construction, unmistakably local,
+  and the constraint is left exactly as it is. **The tempting alternative was rejected and it is
+  worth knowing why**: adding `retry_of_run_id` to the constraint would have put a null in the tuple
+  on every ordinary row, and SQL treats such rows as never colliding — the dedupe would have stopped
+  firing platform-wide, silently. So `retry_of_run_id` (V9) is pure provenance.
+
+  Two consequences travel with the synthetic id. The **causation edge** is inherited rather than
+  re-minted — `causation_id` is copied from the run being re-fired, and `CiRunService.causingEventId`
+  is the one place that is read back, for the announcers and for a step's `$QITS_EVENT_ID`, so a
+  retried run's `BuildSuccessful` hangs off the domain event that started it rather than off a root
+  of its own. And **`gating` is re-derived from `trigger_config` rather than copied**: the column on
+  a *finished* run is what that run's verdict was worth (the file's flag ANDed with the failing
+  step's), so copying it would start a re-run of a gating pipeline off as non-gating and publish a
+  verdict no release gate holds a commit for.
+
+  Only a **terminal** run is retryable (409 otherwise): two runs racing for one verdict is not what
+  was asked for. Cancelled runs are retryable, which is the point — a re-fire is what a cancellation
+  invites.
+- **A step declares its own `gating:`, and that is what let two files become one.** The file-level
+  flag says what a whole pipeline is worth to a release gate; the step-level one says what one step
+  is worth, and a run's announced `gating` is the **AND** of the file's flag and the failing step's
+  (`runSteps`, written to the row as well so the two can never disagree). Nothing else about failure
+  moved: a non-gating step that fails still fails the run, still skips what follows, still shows red.
+
+  The property it has to preserve is the sentence the old `ci-event-build.yml`/`ci-event-userflows.yml`
+  split was built on — *a red verify must not cost the image*. Two files bought it by never sharing a
+  verdict; one file buys it by **ordering plus classification**, since the gating half runs first and
+  has published whatever it publishes before a non-gating step can fail. So the non-gating steps go
+  **last**, and that is a rule rather than a style: everything after a failure is `SKIPPED`.
+
+  It is legal in **both** file kinds, unlike `checkout:` and the file-level `gating:`. The `steps:`
+  schema is one implementation on purpose, and the key is not inert in `ci-post-receive.yml` either
+  — a push whose last step publishes docs is the same case. Only a YAML boolean is accepted, on the
+  standing reason with its sharpest edge: `gating: "false"` parsing as truthy would hold a commit for
+  a failure nobody meant to gate on.
 - **The trigger file parser is strict where `ci-post-receive.yml` is lenient**, and the asymmetry is
   the point rather than an inconsistency. In a pipeline an unread key costs a feature; in a
   *selection* it costs correctness, because an absent `when:` means **unconditional** — so a mistyped
@@ -1360,6 +1481,28 @@ no historical row has them; a run with no pair builds id-addressed URLs, which i
 did before names existed. `repo_id` is untouched and stays the key: the dedupe constraint is built on
 it and every existing row is found by it.
 
+`V6`, `V7__run_gating.sql`, `V8__run_release_request.sql` and `V9__run_retry.sql` continue it too,
+and the last three are the release-flow set. `ci_run.gating` is the data form of "userflows are non-gating" — added with a
+default so every historical row fills as gating, then the default dropped, which is the V3-era
+lesson followed. `ci_run.release_request_id` is nullable with **no** default and no backfill,
+because null is the ordinary value rather than a value to be filled: every push run and every event
+run not triggered by a `ReleaseRequestChanged` has none, so there is nothing for an existing row to
+be and no reading of "absent" to get wrong. It carries a **partial** index (`where … is not null`),
+since an index over the nulls would be a second copy of the table for no query, and it is part of no
+constraint — the dedupe stays `(trigger_event_id, repo_id, config_path)` and the per-branch collapse
+a re-fold needs is already `supersedeByCheckoutBranch`'s. `ci_run.retry_of_run_id` (V9) is the same
+shape and the same reasoning, plus one it states out loud: it is deliberately **not** part of the
+dedupe constraint, because a null in a unique tuple makes rows never collide and adding it there
+would have switched the dedupe off for every run on the platform. A retry gets past the constraint
+with a synthetic `trigger_event_id` instead — see "The trigger engine".
+
+`V10__release_announcement_project.sql` is the first migration in this lineage that touches the
+release join's tables rather than `ci_run`, and it is the same shape a third time:
+`ci_release_announcement.project_id`, nullable, no default, no backfill, part of no constraint and no
+index. It exists because `SoftwareRelease` gained `projectId` and the announcement is **not always
+made by the run that owes it** — see "There are two publishing seams". Nothing looks a row up by
+project; the join key is `(repo_id, version)` and is untouched.
+
 `V1__init.sql` is the rest of the schema. The nine H2 migrations it replaces (V1-V8 plus a Java V9) are
 history in this repository's log and are not a prefix of this lineage: the move off H2 is a
 re-bootstrap rather than a data migration, so no postgres database anywhere ever ran them and no
@@ -1412,9 +1555,10 @@ migration to point at. `baseline-on-migrate` is gone with the H2 file it existed
 `SecurityIdentity`; this service authenticates no person. The platform edge establishes the
 session, and `qits-gateway` strips and re-asserts its reserved `X-Qits-*` namespace. That hygiene is
 the entire reason the headers can be trusted here. There is no auth variant to select in this
-service: the read routes accept `qits:admin` or `qits:system`, the one human write (`cancel`)
-requires `qits:admin`, and machine controllers retain their separate `MachineAuth` audience/scope
-checks pending endpoint-scoped machine roles.
+service: the read routes accept `qits:admin` or `qits:system`, the two human writes (`cancel` and
+`retry`) require `qits:admin`, the release-request cancellation takes either role and adds a
+`MachineAuth` check on its machine arm, and machine controllers retain their separate `MachineAuth`
+audience/scope checks pending endpoint-scoped machine roles.
 
 **`identity.isAnonymous()` is not a security state** — it means "no name for the audit row". A check
 of the form `if (identity.isAnonymous()) deny` would look like a security control and be worth
@@ -1465,7 +1609,7 @@ commissions nothing and a step container's environment is what it always was.
 
 **This is a NEW arrangement rather than the old one coming back.** The retired one was
 `notify/PdBearer`, a bearer for qits-platform-deployments' HTTP intake, and it went with the call it
-carried when the deployer started subscribing to `BuildSuccessful`. What the pom said in the gap —
+carried when the deployer started subscribing off the bus instead. What the pom said in the gap —
 "adding the extension back means a new outbound caller, not a config change" — is exactly what
 happened: a new caller arrived, so the extension did.
 
@@ -1531,7 +1675,8 @@ contract, tested where it lives.
   **The document holds the read surface and the one write, and exactly one operation is hidden.**
   The criterion has always been "does a first-party client consume it, does a person invoke it" —
   machine surfaces stay out. For a long time that left `paths: {}`, then one path (`POST
-  /ci/api/runs/{runId}/cancel`, the one operation here a person invokes on purpose), because no
+  /ci/api/runs/{runId}/cancel`, the one operation here a person invoked on purpose — it has since
+  been joined by `POST /ci/api/runs/{runId}/retry` and `POST /ci/api/runs/cancellations`), because no
   client read anything. **qits-spa-ci changed the answer, not the criterion**: it reads `GET
   /ci/api/repositories`, `GET /ci/api/repositories/summary`, `GET /ci/api/runs`, `GET
   /ci/api/runs/active`, `GET /ci/api/runs/finished` and `GET /ci/api/runs/{runId}` on every page it

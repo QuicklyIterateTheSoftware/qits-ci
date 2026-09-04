@@ -22,8 +22,9 @@ import org.junit.jupiter.api.Test;
  *
  * <p>It is the whole of what a green run announces. There was a second port beside it —
  * {@code PdNotifier}, a direct POST to qits-platform-deployments' intake — and this file used to say
- * so; the deployer subscribes to {@code BuildSuccessful} durably now, so the deploy hangs off this
- * announcement and there is nothing left to be a sibling of.
+ * so; the deployer subscribes off the bus now (to {@code SoftwareRelease}, since a green build is no
+ * longer a reason to deploy), so there is nothing left to be a sibling of. What hangs off this
+ * announcement is qits-projects' release-request gate.
  *
  * <p>The assertion worth naming is {@code finishedAt}: the wire contract
  * requires an {@code occurredAt} on every published event, so a null here would be a 400 from

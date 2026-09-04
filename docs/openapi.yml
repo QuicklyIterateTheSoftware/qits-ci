@@ -4,6 +4,25 @@
 openapi: 3.1.0
 components:
   schemas:
+    CancelReleaseRequestRunsRequest:
+      type: object
+      required:
+      - repoId
+      - releaseRequestId
+      properties:
+        repoId:
+          type: string
+          description: The repository whose runs to stop
+        releaseRequestId:
+          type: string
+          description: The release request whose work is withdrawn
+    CancelReleaseRequestRunsResponse:
+      type: object
+      properties:
+        runIds:
+          type: array
+          items:
+            type: string
     CancelRunRequest:
       type: object
       properties:
@@ -53,6 +72,10 @@ components:
         triggerEventId:
           type: string
         triggerEventName:
+          type: string
+        releaseRequestId:
+          type: string
+        retryOfRunId:
           type: string
         configPath:
           type: string
@@ -155,6 +178,11 @@ components:
           $ref: "#/components/schemas/CiRunDto"
         lastMainRun:
           $ref: "#/components/schemas/CiRunDto"
+    RetryRunResponse:
+      type: object
+      properties:
+        runId:
+          type: string
     TriggerEventRequest:
       type: object
       properties:
@@ -347,6 +375,34 @@ paths:
       - SecurityScheme:
         - qits:admin
         - qits:system
+  /ci/api/runs/cancellations:
+    post:
+      summary: Cancel every unfinished run a repository has for one release request
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelReleaseRequestRunsRequest"
+        required: true
+      responses:
+        "202":
+          description: The request's runs have been stopped or asked to stop
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CancelReleaseRequestRunsResponse"
+        "400":
+          description: The repository id or the release request id is missing or invalid
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
+      tags:
+      - Ci Run Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
+        - qits:system
   /ci/api/runs/finished:
     get:
       summary: "The newest finished CI runs, all repositories, newest first"
@@ -439,6 +495,35 @@ paths:
       security:
       - SecurityScheme:
         - qits:admin
+  /ci/api/runs/{runId}/retry:
+    post:
+      summary: "Run a finished CI run's pipeline again, at the same commit"
+      parameters:
+      - name: runId
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "202":
+          description: A new run has been accepted and queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetryRunResponse"
+        "404":
+          description: No such run
+        "409":
+          description: "The run has not finished, so there is nothing to retry yet"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
+      tags:
+      - Ci Run Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
 info:
   title: qits-ci API
-  version: 2026.830.143642
+  version: 2026.903.100706

@@ -221,9 +221,63 @@ public class CiRunService {
 
   public static final String TAG_NAME_FIELD = "tagName";
 
+  /**
+   * qits-projects' release-request event, by the name it rides the bus under, and the payload field
+   * naming the request it is about.
+   *
+   * <p>A release request's backing branch is an octopus merge of N sources that qits-projects
+   * rewrites on every change, and it publishes this event per successful re-fold. A repository's QA
+   * pipeline selects it and checks out the fold — {@code checkout: { branch: backingBranch, sha:
+   * mergedSha }} — and the verdict returns on the ordinary build events keyed on {@code (repoId,
+   * commitSha)}. What that key cannot carry is <em>which request</em>, so the id is read here and
+   * lands on {@link CiRun#releaseRequestId}: the sha is a fold nobody pushed and the next re-fold
+   * replaces it, which makes the request id the only stable handle a cancellation or a retry can
+   * address the work by.
+   *
+   * <p><b>Spelled as strings, exactly like {@link #TAG_EVENT_NAME}, and for a sharper version of the
+   * same reason.</b> {@code ci} has no compile-time knowledge of another context — and here there is
+   * no jar to have one of: <b>qits-projects publishes no vocabulary jar</b>, deliberately, the way
+   * qits-workspaces does not (see {@code bus/ScmReleaseContractTest}). What keeps the two strings
+   * honest is {@code bus/ReleaseRequestChangedContractTest}, which holds a transcription of the
+   * published record and drives it through the real canonical serializer.
+   *
+   * <p><b>The engine gains no other knowledge of this event.</b> Matching, selection and checkout
+   * are the generic grammar; these two constants buy exactly one provenance column.
+   */
+  public static final String RELEASE_REQUEST_EVENT_NAME = "ReleaseRequestChanged";
+
+  public static final String RELEASE_REQUEST_ID_FIELD = "releaseRequestId";
+
+  /** What {@code ci_run.release_request_id} can hold; a longer value is recorded as none. */
+  static final int MAX_RELEASE_REQUEST_ID_LENGTH = 255;
+
   public static final String USER_CANCELLED = "USER_CANCELLED";
   public static final String DEDUPED = "DEDUPED";
+
+  /**
+   * What a run cancelled through {@code POST /ci/api/runs/cancellations} records: the release
+   * request it served was withdrawn, closed or re-scoped, so nobody is waiting for the answer any
+   * more. Distinct from {@link #USER_CANCELLED} because the two are read differently by whoever
+   * looks at the row later — one person stopped one build, versus a whole piece of work went away.
+   */
+  public static final String RELEASE_REQUEST_CANCELLED = "RELEASE_REQUEST_CANCELLED";
+
   public static final int MAX_CANCELLATION_REASON_LENGTH = 255;
+
+  /**
+   * What a manually retried run records as its {@code trigger_event_id}, prefixed onto its own run
+   * id.
+   *
+   * <p><b>This is the dedupe bypass, and the prefix is what keeps it honest.</b> A retry is the same
+   * work as the run it re-fires — same repository, same trigger file — so every column of {@code
+   * unique (trigger_event_id, repo_id, config_path)} would be identical and the insert would be
+   * refused as the replay that constraint exists to refuse. Minting a fresh identity out of the new
+   * run's own id makes the row unique by construction with the constraint left exactly as it is; the
+   * prefix makes it unmistakably local, so nothing ever looks this value up in the event log. The
+   * causation edge is not lost with it — {@link CiRun#causationId} is copied from the run being
+   * retried, and {@link #causingEventId} is what reads it back for the announcers.
+   */
+  public static final String RETRY_TRIGGER_PREFIX = "retry:";
 
   @ConfigProperty(name = "qits.ci.output-max-chars")
   int outputMaxChars;
@@ -611,7 +665,10 @@ public class CiRunService {
         run.branch,
         run.commitSha,
         trigger,
-        run.triggerEventId,
+        // The event, not the row's trigger identity: on a retry those differ, and what a step
+        // container's $QITS_EVENT_ID must name is the domain event whose payload sits beside it in
+        // $QITS_EVENT_PAYLOAD. A synthetic retry token there would be an id nothing can resolve.
+        causingEventId(run),
         run.triggerEventName,
         run.triggerEventOccurredAt,
         run.triggerEventPayload,
@@ -886,6 +943,19 @@ public class CiRunService {
    * remainder loop below is untouched), and skipped-by-branch carries {@link #notBoundNote} — the
    * same bracketed convention {@link #annotate}/{@link #note} already use for every other "why this
    * row reads this way" sentence. No new status, no new column, no migration.
+   *
+   * <h2>Which half the run died in decides what the verdict is worth</h2>
+   *
+   * <p>A step may declare {@code gating: false} ({@code CiPipeline.CiStepDecl}), and the run's
+   * announced {@code gating} is <b>the file's flag ANDed with the failing step's</b>. That is the
+   * whole mechanism behind putting a repository's gating build and its non-gating userflow publish
+   * in ONE file: ordering does the rest, because the gating half runs first and has published
+   * whatever it publishes before a non-gating step can fail. "A red verify must not cost the image"
+   * therefore survives the merge of the two files it used to require.
+   *
+   * <p>Nothing else about failure moved. A non-gating step that fails <b>still stops the run</b> and
+   * still leaves it {@code FAILED}, so a person sees the red exactly as before; what changes is only
+   * what a release gate reads off the event.
    */
   private void runSteps(
       CiRun run,
@@ -897,6 +967,9 @@ public class CiRunService {
     int index = 0;
     boolean failed = false;
     boolean timedOut = false;
+    // Which half the run died in, and it is a Boolean because "no step failed" is a third answer:
+    // a green run's verdict is worth what the FILE says and there is no step to ask.
+    Boolean failedStepGating = null;
 
     try {
       while (index < declared.size() && !failed && !cancelled.contains(run.id)) {
@@ -982,6 +1055,9 @@ public class CiRunService {
             stamps.startedAt(),
             stamps.finishedAt());
         failed = !ok;
+        if (failed) {
+          failedStepGating = decl.gating();
+        }
         timedOut = stepTimedOut;
         index++;
       }
@@ -990,6 +1066,9 @@ public class CiRunService {
       // Record it against the step it happened on so no declared step vanishes from the run.
       LOG.errorf(e, "CI run %s: step %d failed unexpectedly", run.id, index);
       if (index < declared.size()) {
+        // An infrastructure failure OF a non-gating step is still the non-gating half's: the run
+        // died where the declaration says a death costs no gate.
+        failedStepGating = declared.get(index).gating();
         Instant now = Instant.now();
         insertStep(
             run.id,
@@ -1025,7 +1104,13 @@ public class CiRunService {
             : timedOut
                 ? CiRunStatus.TIMED_OUT
                 : red ? CiRunStatus.FAILED : CiRunStatus.SUCCESS;
-    Instant finishedAt = finishRun(run.id, outcome);
+    // The verdict's own worth: the FILE's flag ANDed with the failing step's. A non-gating file
+    // cannot be made gating by a step, and a gating file's non-gating half produces a red that no
+    // release gate holds a commit for. It is written to the row as well as announced, so the two can
+    // never disagree — and the detached copy is updated because the announcers read it off there.
+    boolean verdictGating = run.gating && (failedStepGating == null || failedStepGating);
+    Instant finishedAt = finishRun(run.id, outcome, verdictGating);
+    run.gating = verdictGating;
     if (outcome == CiRunStatus.SUCCESS) {
       announceRun(run, finishedAt);
       announceRelease(run, finishedAt, release);
@@ -1042,10 +1127,12 @@ public class CiRunService {
    *
    * <p><b>This is the only announcement a green run makes about itself</b>, and it used to be one of
    * two. The other was a direct POST to qits-platform-deployments' intake, sent from here on every
-   * green run; the deployer now subscribes to {@code BuildSuccessful} on the bus durably and calls
-   * its own announce path, so the deploy follows from this event instead of from a second call. The
-   * intake is still there and is still the manual door a replay knocks on — what went is qits-ci
-   * knocking on it.
+   * green run; the deployer subscribes off the bus durably instead, so a deploy follows from an
+   * event rather than from a second call of this service's. It follows {@code SoftwareRelease} and
+   * no longer this announcement — a green build is not a reason to put anything live — and what
+   * reads this one is qits-projects' release-request gate. The deployer's intake is still there,
+   * at {@code /events/software-released}, and is still the manual door a replay knocks on; what
+   * went is qits-ci knocking on any of it.
    *
    * <p>{@code finishedAt} comes back from {@link #finishRun} instead of being read off {@code run}
    * because it is not there — {@link #finishRun} mutates a freshly loaded entity in its own
@@ -1075,11 +1162,30 @@ public class CiRunService {
             run.commitSha,
             run.gating,
             finishedAt,
-            run.triggerEventId);
+            causingEventId(run));
       } catch (RuntimeException e) {
         LOG.warnf(e, "Announcing run %s failed", run.id);
       }
     }
+  }
+
+  /**
+   * The event that caused a run, as the announcers' parent — {@link CiRun#triggerEventId} for
+   * everything a trigger produced, and the retried run's inherited cause for a manual re-fire.
+   *
+   * <p>The two columns normally agree, and on a retry they deliberately do not: the trigger identity
+   * is a synthetic local token (see {@link #RETRY_TRIGGER_PREFIX}) so the dedupe constraint can stay
+   * exactly as it is, while {@code causationId} still carries the domain event the original run was
+   * fired by. Reading the synthetic value here would cost every retry its causation edge and log a
+   * warning about a value this class minted on purpose — so the re-fired run's {@code
+   * BuildSuccessful} hangs off the same event as the original's, which is what makes a retried
+   * release request one chain in the log rather than an unexplained root.
+   */
+  private static String causingEventId(CiRun run) {
+    if (run.retryOfRunId == null) {
+      return run.triggerEventId;
+    }
+    return run.causationId == null ? null : run.causationId.toString();
   }
 
   /**
@@ -1107,7 +1213,7 @@ public class CiRunService {
             run.gating,
             outcome.name(),
             finishedAt,
-            run.triggerEventId);
+            causingEventId(run));
       } catch (RuntimeException e) {
         LOG.warnf(e, "Announcing run %s failed", run.id);
       }
@@ -1156,9 +1262,10 @@ public class CiRunService {
             run.id,
             run.repoId,
             run.repoName,
+            run.projectId,
             version,
             run.triggerEventName,
-            run.triggerEventId,
+            causingEventId(run),
             finishedAt,
             release.artifacts()));
   }
@@ -1419,6 +1526,7 @@ public class CiRunService {
     run.triggerEventPayload = request.payload();
     run.triggerConfig = request.triggerConfig();
     run.gating = request.trigger().gating();
+    run.releaseRequestId = releaseRequestOf(request);
     runs.persist(run);
     runs.flush();
     supersedeByVersion(run, request);
@@ -1539,6 +1647,42 @@ public class CiRunService {
   }
 
   /**
+   * The release request this event run serves, or null when it serves none.
+   *
+   * <p><b>Gated on the event NAME</b>, the way {@link #supersedeByVersion} is gated on the tag
+   * event's. A {@code releaseRequestId} elsewhere on the bus would be some other context's word,
+   * and a provenance column that reads any field of any payload is one that eventually records
+   * something nobody meant.
+   *
+   * <p>Walked rather than bound, the trigger engine's rule and the one that keeps this path free of
+   * native-image reflection metadata. A value too long for the column is recorded as <b>none</b>
+   * rather than truncated or thrown: the run is the point and a payload that cannot name a request
+   * within 255 characters is not naming one this platform issued.
+   */
+  private static String releaseRequestOf(EventRun request) {
+    if (!RELEASE_REQUEST_EVENT_NAME.equals(request.eventName())) {
+      return null;
+    }
+    JsonNode id =
+        CiEventSelectionEvaluator.resolve(
+            CiEventSelectionEvaluator.parsePayload(request.payload()), RELEASE_REQUEST_ID_FIELD);
+    if (id == null) {
+      return null;
+    }
+    String text = CiEventSelectionEvaluator.asString(id);
+    if (text.isBlank()) {
+      return null;
+    }
+    if (text.length() > MAX_RELEASE_REQUEST_ID_LENGTH) {
+      LOG.warnf(
+          "Event %s (%s) names a '%s' of %d characters — too long to record, the run keeps none",
+          request.eventId(), request.eventName(), RELEASE_REQUEST_ID_FIELD, text.length());
+      return null;
+    }
+    return text;
+  }
+
+  /**
    * The tag an {@code SCMPublishTag} payload announces, or null when there is none to read — an
    * unparseable payload, a missing field, or a blank one. Walked rather than bound, the same rule
    * {@link #versionOf} follows and for the same native-image reason.
@@ -1642,6 +1786,16 @@ public class CiRunService {
    * on when the run ended.
    */
   private Instant finishRun(String runId, CiRunStatus status) {
+    return finishRun(runId, status, null);
+  }
+
+  /**
+   * The same, also writing what the <b>verdict</b> is worth to a release gate. Null leaves the
+   * column alone, which is every terminal transition that is not the step loop's own: a config
+   * error, a cancellation and a swept orphan have no failing step to classify, so the file's own
+   * flag stands.
+   */
+  private Instant finishRun(String runId, CiRunStatus status, Boolean gating) {
     Instant finishedAt = Instant.now();
     QuarkusTransaction.requiringNew()
         .run(
@@ -1649,6 +1803,9 @@ public class CiRunService {
               CiRun run = runs.findById(runId);
               run.status = status;
               run.finishedAt = finishedAt;
+              if (gating != null) {
+                run.gating = gating;
+              }
             });
     return finishedAt;
   }
@@ -1762,6 +1919,168 @@ public class CiRunService {
         retryDeadline());
     runner.cancel(runId);
     LOG.infof("CI run %s cancelled on request (%s)", runId, reason);
+  }
+
+  /**
+   * Stop every unfinished run one repository has for one release request, and answer which ones were
+   * stopped.
+   *
+   * <p><b>The caller is qits-projects and the reason it calls is that the question went away.</b> A
+   * request is withdrawn, closed or re-scoped; the fold it was being built at is no longer worth
+   * building, and the runs still queued or running for it are work nobody will read. Addressing them
+   * by {@code (repoId, releaseRequestId)} rather than by run id is the whole point of {@link
+   * CiRun#releaseRequestId} existing: the merged sha those runs carry is a fold nobody pushed and the
+   * next re-fold replaces it, so the caller has no run id to hold and no sha that stays true.
+   *
+   * <p><b>Both halves of the key are required, and a sibling request survives.</b> One request folds
+   * N repositories and one repository can have N open requests against it, so either half alone
+   * would reach work that belongs to something else — cancelling another request's build is exactly
+   * the failure this endpoint must not have.
+   *
+   * <p><b>Nothing it cancels publishes a gating verdict.</b> That is not arranged here: a {@code
+   * CANCELLED} run announces nothing at all, which is {@link #announceFailedRun}'s contract and the
+   * property qits-projects' release gate depends on — a cancelled run must never be read as a
+   * failure, because a person withdrawing a question is not an answer to it.
+   *
+   * <p>A run that finishes between the listing and the cancel is a race the caller is right not to
+   * care about: it is skipped rather than reported, since the outcome asked for — that run is not
+   * still going — is the outcome that happened. So this is <b>idempotent</b>: calling it twice
+   * cancels nothing the second time and still answers 202.
+   */
+  public List<String> cancelReleaseRequestRuns(String repoId, String releaseRequestId) {
+    List<CiRun> unfinished =
+        DbRetry.call(
+            "release request run listing",
+            () ->
+                QuarkusTransaction.requiringNew()
+                    .call(() -> runs.listUnfinishedForReleaseRequest(repoId, releaseRequestId)),
+            retryDeadline());
+    List<String> stopped = new ArrayList<>();
+    for (CiRun run : unfinished) {
+      try {
+        cancel(run.id, RELEASE_REQUEST_CANCELLED);
+        stopped.add(run.id);
+      } catch (ConflictException | NotFoundException raced) {
+        LOG.debugf(
+            "CI run %s of release request %s was already over when the cancellation reached it",
+            run.id, releaseRequestId);
+      }
+    }
+    LOG.infof(
+        "Release request %s in %s: cancelled %d of %d unfinished run(s)",
+        releaseRequestId, repoId, stopped.size(), unfinished.size());
+    return stopped;
+  }
+
+  /**
+   * Re-fire a finished run's pipeline, unchanged: a new run for the same repository, the same
+   * trigger file, the same checkout and the same release request.
+   *
+   * <p><b>What it is for.</b> A QA pipeline can go red for a reason that is not the code — a flaked
+   * container, a registry that was down, a step that timed out on a slow host — and the release
+   * request it gates has not changed, so there is nothing to re-fold and no new event to wait for.
+   * Re-asking the same question is the operation, and it is deliberately <em>not</em> "run it at the
+   * current head": the retry builds the exact {@link CiRun#commitSha} the original built, so its
+   * verdict lands on the same commit and the gate reads it exactly as it would have read the first
+   * one.
+   *
+   * <p><b>Only a finished run is retryable.</b> A queued or running one is a 409: the question is
+   * still being answered, and a second run of the same work would race the first for the same
+   * verdict. Everything terminal is fair game, cancelled runs included — re-fire is precisely what a
+   * cancellation invites.
+   *
+   * <p><b>The dedupe is bypassed rather than weakened</b>, by minting a synthetic trigger identity
+   * for the new row — see {@link #RETRY_TRIGGER_PREFIX} and {@link #insertRetry}. Nothing about
+   * {@code unique (trigger_event_id, repo_id, config_path)} changes, and no replay of a real event
+   * becomes possible.
+   *
+   * @return the new run, already {@code QUEUED} and on the worker
+   */
+  public CiRun retry(String runId) {
+    CiRun source = requireRun(runId);
+    if (source.status == CiRunStatus.QUEUED || source.status == CiRunStatus.RUNNING) {
+      throw new ConflictException(
+          "CI run " + runId + " has not finished (" + source.status + ") — nothing to retry yet");
+    }
+    CiRun retry =
+        DbRetry.inNewTx("run retry accept", () -> insertRetry(source.id), retryDeadline());
+    if (retry == null) {
+      throw new NotFoundException("No such CI run: " + runId);
+    }
+    LOG.infof(
+        "CI run %s retried as %s — same %s at %s", runId, retry.id, retry.configPath,
+        retry.commitSha);
+    enqueue(retry.id);
+    return retry;
+  }
+
+  /**
+   * The retry row, built inside its own transaction from a freshly read source row.
+   *
+   * <p>The source is re-read here rather than taken from the caller's detached copy for {@link
+   * #insertEventRun}'s reason: {@link DbRetry#inNewTx} re-runs the whole body, so everything it
+   * touches has to come from the database on each attempt and the row it persists has to be a fresh
+   * instance with no memory of a rolled-back one.
+   *
+   * <p><b>{@code gating} is re-derived from the trigger file rather than copied.</b> The column on a
+   * finished run is what that run's <em>verdict</em> was worth — the file's flag ANDed with whichever
+   * step failed — so copying it would start a green retry of a gating pipeline off as non-gating and
+   * publish a verdict no release gate holds a commit for. The declaration is on the row as {@code
+   * triggerConfig}, so the answer is one parse away; a push run carries none and is gating as every
+   * push run is.
+   */
+  private CiRun insertRetry(String sourceRunId) {
+    CiRun source = runs.findById(sourceRunId);
+    if (source == null) {
+      return null;
+    }
+    CiRun retry = new CiRun();
+    retry.id = UUID.randomUUID().toString();
+    retry.repoId = source.repoId;
+    retry.projectId = source.projectId;
+    retry.repoName = source.repoName;
+    retry.branch = source.branch;
+    retry.commitSha = source.commitSha;
+    retry.status = CiRunStatus.QUEUED;
+    retry.createdAt = Instant.now();
+    retry.gating = declaredGating(source);
+    retry.releaseRequestId = source.releaseRequestId;
+    retry.retryOfRunId = source.id;
+    retry.triggerType = source.triggerType;
+    retry.configPath = source.configPath;
+    // The bypass. Unique by construction, unmistakably local, and the constraint is untouched.
+    retry.triggerEventId = RETRY_TRIGGER_PREFIX + retry.id;
+    // The cause is inherited, so the events this run publishes name the same domain event the
+    // original's did. Set explicitly for insertEventRun's reason: this runs on a request thread on
+    // the way to the worker, and the ambient scope has nothing to say about a run being re-fired.
+    retry.causationId = source.causationId;
+    retry.triggerEventName = source.triggerEventName;
+    retry.triggerEventOccurredAt = source.triggerEventOccurredAt;
+    retry.triggerEventPayload = source.triggerEventPayload;
+    retry.triggerConfig = source.triggerConfig;
+    runs.persist(retry);
+    runs.flush();
+    return retry;
+  }
+
+  /** What a run's trigger file declared the pipeline to be worth, before any step narrowed it. */
+  private boolean declaredGating(CiRun source) {
+    if (source.triggerConfig == null) {
+      return true;
+    }
+    try {
+      return triggerParser.parse(source.configPath, source.triggerConfig).gating();
+    } catch (RuntimeException unparseable) {
+      // The snapshot parsed once, at accept, so this is unreachable through the engine. If it ever
+      // is not, the run's own recorded value is the closest true statement available — never a
+      // widening to gating, which would hold a commit for a verdict nobody declared gating.
+      LOG.warnf(
+          unparseable,
+          "Retry of run %s could not re-read %s — keeping the recorded gating flag",
+          source.id,
+          source.configPath);
+      return source.gating;
+    }
   }
 
   private static String cancellationReason(String requestedReason) {

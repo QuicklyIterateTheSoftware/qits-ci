@@ -2,17 +2,22 @@
 # released VERSION.
 #
 # THE SELECTION NAMES THIS REPOSITORY, WHICH READS LIKE A LOOP AND IS NOT. `SCMRelease` says only
-# "source control has this version" — qits-workspaces publishes it the instant the release push is
-# accepted, and nothing in this file publishes it. So a repository listening for its own SCMRelease
+# "source control has this version" — qits-projects publishes it the instant the release tag is
+# created, and nothing in this file publishes it. So a repository listening for its own SCMRelease
 # is exactly the release pipeline the split-release design asks each repository to own: the SCM half
 # fires, this half builds the tagged commit and pushes it, and qits-ci turns the green run into one
 # `SoftwareRelease` per entry under `artifacts:` below. The event that could loop is
 # SoftwareRelease, and this file neither listens for it nor publishes it.
 #
-# THE VERSION TAG IS A NEW COORDINATE BESIDE THE SHA, NOT A REPLACEMENT FOR IT.
-# ci-post-receive.yml's `:$QITS_CI_SHA` push is the whole contract with qits-deployments and is untouched;
-# every deployment still comes from a sha. What this adds is a name a human and a downstream
-# consumer can say out loud, on the same image content.
+# THE VERSION TAG IS THE ONLY COORDINATE NOW, AND IT USED TO BE THE SECOND OF TWO. This file read
+# `:$QITS_CI_SHA` at the push below for as long as there was a per-push image beside it — the sha
+# coordinate was the contract with qits-deployments, and this pipeline pushed the released tree
+# under it a second time so the two would never disagree. Both halves of that are gone: per-push CI
+# is retired (ci-event-build.yml and ci-event-userflows.yml are one QA pipeline that publishes no
+# image at all), and cd deploys a RELEASE rather than a green push. So the push below tags
+# `$version` — the CalVer name the release was made under, which is what `artifacts:` declares and
+# what every consumer of the resulting `SoftwareRelease` asks for. A sha coordinate nothing
+# publishes and nothing deploys was a tag pointing at an image no reader could name.
 #
 # `artifacts:` IS A DECLARATION, NOT A REPORT. qits-ci never learns how to publish anything, so it
 # cannot see what the step below pushed; it announces `{repository, version, packageType,
@@ -25,9 +30,10 @@
 # `qits/<application>` and the reader supplies its own host, exactly as the push below composes one
 # from environment.
 #
-# THE BUILD BELOW IS ci-post-receive.yml's, AND THE TWO MUST STAY MATCHED. Both pipelines publish
-# the same image content under two coordinates, so a fix to one build belongs in the other. That
-# file is where the two halves, the submodule fetches, the lockfile origin swap and the
+# THE BUILD BELOW IS THE QA PIPELINE'S, AND THE TWO SHOULD STAY MATCHED. It used to be
+# ci-post-receive.yml's, then ci-event-build.yml's; both are retired and the sibling that carries
+# the same two halves is now ci-event-release-request.yml's gating step, which builds the fold and
+# pushes nothing. That file is where the submodule fetch, the lockfile origin swap and the
 # `npm_config_*` environment are explained at length; this one carries the short form and points
 # there rather than keeping a second copy of the reasoning to drift.
 #
@@ -37,10 +43,19 @@
 # What a redeploy does interrupt is any other build still RUNNING, which is the ordinary reason this
 # repository is deployed with the queue quiet.
 #
-# THIS FILE IS INERT UNTIL qits-workspaces PUBLISHES SCMRelease, and it lands first on purpose: the
-# bus is at-most-once with no catch-up and no replay, so a trigger file must be in place before the
-# event it selects exists. The other order loses a release and looks like a train that quietly did
-# not roll.
+# THERE IS DELIBERATELY NO `checkout:` HERE, AND THAT IS LOAD-BEARING NOW RATHER THAN INCIDENTAL.
+# The event's `branch` is the release request's BACKING BRANCH (`release/<id>`), and qits-projects
+# deletes it — along with the request's source branches — in the same operation that creates the tag.
+# So by the time this pipeline runs, the branch the event names does not exist. A trigger with no
+# `checkout:` is recorded at `main` and the step container clones `main`; the tag fetch below is what
+# supplies the released tree. Adding `checkout: { branch: branch, ... }` here would clone a deleted
+# ref and fail every release — the version, never the branch, is what this file builds from.
+#
+# THIS FILE PREDATES ITS PUBLISHER, and it landed first on purpose: a trigger file must be in place
+# before the event it selects exists, or the first release is lost and looks like a train that
+# quietly did not roll. (The bus is durable now — a claim ledger and a catch-up sweep — so the window
+# is narrower than it was, but a file that is not there when the frame arrives still selects
+# nothing.)
 event: SCMRelease
 when:
   - repository: { exact: qits-ci-service }
@@ -73,14 +88,19 @@ steps:
       esac
       echo "releasing qits/qits-ci:$version"
 
-      # THE TAG IS THE CHECKOUT TARGET, and it is the only reason this run needs one. An
-      # event-triggered run is cloned at the head of main, which is where the release commit is
-      # *now* — a later push moves that, and the tag does not, so a busy main cannot make this
-      # pipeline ship a different tree than the one that was released. The clone is shallow and
-      # carries no tags, hence the explicit refspec; the URL rather than `origin` because every
-      # address a step needs arrives as environment. `checkout --detach` peels the annotated tag to
-      # its commit — and it is what makes the submodule fetches below land on the gitlinks the
-      # release recorded rather than on main's.
+      # THE TAG IS THE CHECKOUT TARGET, AND IT IS THE ONLY REF THIS PIPELINE MAY TRUST. An
+      # event-triggered run is cloned at the head of main; the released commit is NOT on main at this
+      # moment — the release flow tags the request's backing branch, deletes that branch, deploys, and
+      # finalizes main afterwards — and the branch the event names is already gone. So the clone is a
+      # way to have a working git repository and nothing more, and everything about WHAT is built
+      # comes from this fetch. The clone is shallow and carries no tags, hence the explicit refspec;
+      # the URL rather than `origin` because every address a step needs arrives as environment.
+      # `checkout --detach` peels the annotated tag to its commit — and it is what makes the submodule
+      # fetches below land on the gitlinks the release recorded rather than on main's.
+      #
+      # It was already written this way for a smaller reason (a busy main must not make this pipeline
+      # ship a different tree than the one that was released), which is why the new flow needed no
+      # change here. Do not "simplify" it to build the checkout the run was recorded at.
       git fetch "$QITS_CI_REPOSITORY_URL" "refs/tags/$version:refs/tags/$version"
       git checkout --detach "$version"
 
@@ -116,7 +136,7 @@ steps:
       # client as $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET. Unconditional — a
       # missing env source is NOT a buildx error, measured on v0.36.1 — so it is inert until a run
       # carries the pair. ci-post-receive.yml has the same two flags; keep them matched.
-      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-ci:$QITS_CI_SHA"
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-ci:$version"
       docker build --network host \
         --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
         --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
@@ -134,8 +154,8 @@ steps:
       # application — announces `SoftwareRelease` only for a green run, so ordering is the whole
       # guarantee: no consumer is ever told about a version whose bill of materials is missing. A
       # failed PUT fails the release ON PURPOSE — the store being down is not a reason to announce a
-      # version nobody can audit. Only THIS pipeline uploads one: ci-post-receive.yml's sha push
-      # announces no release, so it owes no document.
+      # version nobody can audit. Only THIS pipeline uploads one: the QA pipeline announces no
+      # release and publishes no image, so it owes no document.
       #
       # ONE DOCUMENT, TWO DECLARED ARTIFACTS. `artifacts:` above also declares the `@apidocs/qits-ci`
       # docs bundle, and that one gets no SBOM: it is a tar of one committed openapi.yml, built by

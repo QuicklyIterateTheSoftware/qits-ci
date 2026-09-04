@@ -1,0 +1,20 @@
+-- The published artifact says which project it belongs to.
+--
+-- `SoftwareRelease` gained `projectId` and `repoId` so that a deploy consumer can address the
+-- repository that published without a lookup against qits-projects — a hop on the dispatch thread
+-- that can fail for a release that cannot. `repoId` is a rename of what `repository` already
+-- carried and needs no storage; `projectId` is the new fact and does, because the announcement is
+-- NOT always made by the run that owes it: a tag-triggered run's announcement waits for the
+-- SCMRelease, and the boot sweep makes it in a later process entirely. Neither can go back and read
+-- the run row, so the value is copied onto the obligation at the moment it is owed, beside
+-- finished_at and trigger_event_id which are carried for exactly that reason.
+--
+-- Nullable, no default and no backfill, and every one of those is the design rather than a
+-- shortcut. A run whose candidate repository was answered id-addressed carries no project at all
+-- (ci_run.project_id is nullable for the same reason, V5), so absent is an ordinary value and there
+-- is nothing an existing row could be filled with. CanonicalJson's NON_NULL inclusion then leaves
+-- the key out of the payload entirely, which is what a consumer reads as "ask somebody".
+--
+-- Part of no constraint and no index: nothing looks a row up by project. The join key is
+-- (repo_id, version) and stays exactly as it is.
+alter table ci_release_announcement add column project_id varchar(255);
