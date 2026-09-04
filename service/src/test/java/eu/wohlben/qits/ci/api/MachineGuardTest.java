@@ -4,12 +4,14 @@ import static io.restassured.RestAssured.given;
 
 import eu.wohlben.qits.auth.MachineAuth;
 import eu.wohlben.qits.auth.QitsClaims;
+import eu.wohlben.qits.ci.githost.FakeGitHostRepoListing;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.quarkus.test.security.TestSecurity;
 import io.quarkus.test.security.oidc.Claim;
 import io.quarkus.test.security.oidc.OidcSecurity;
+import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MediaType;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -125,6 +127,9 @@ class MachineGuardTest {
   /** The other guarded write: qits-projects withdrawing a release request's CI. Absolute too. */
   private static final String CANCELLATIONS = "/ci/api/runs/cancellations";
 
+  /** The catalogue, so a case can say whether this instance holds a repository at all. */
+  @Inject FakeGitHostRepoListing gitHostListing;
+
   private static final String CANCELLATIONS_BODY =
       """
       {"repoId":"guarded-repo","releaseRequestId":"rr-guarded"}""";
@@ -186,10 +191,11 @@ class MachineGuardTest {
   }
 
   @Test
-  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM})
   @OidcSecurity(claims = {@Claim(key = "aud", value = OWN_AUDIENCE)})
-  void aTokenGrantedNoProjectClaimIs403() {
-    // An absent claim is a mismatch, never a wildcard.
+  void aTokenWithNoProjectClaimAndNoPlatformRoleIs403() {
+    // It names nothing to evaluate: no project claim, and no platform-tier role either. The
+    // ordinary machine role is what every read here takes and is not a statement about scope.
     given()
         .contentType(MediaType.APPLICATION_JSON)
         .body(TRIGGER_BODY)
@@ -201,21 +207,88 @@ class MachineGuardTest {
 
   @Test
   @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
-  @OidcSecurity(
-      claims = {
-        @Claim(key = "aud", value = OWN_AUDIENCE),
-        @Claim(key = QitsClaims.PROJECT, value = "guarded-repo")
-      })
-  void aTokenScopedToOneRepositoryMayNotTriggerAcrossAllOfThemIs403() {
-    // An event names no repository — it is evaluated against every candidate — so a grant naming one
-    // does not cover it.
+  @OidcSecurity(claims = {@Claim(key = "aud", value = OWN_AUDIENCE)})
+  void aPlatformTierTokenWithNoProjectClaimEvaluatesEverything() {
+    // The arm the live 403 landed on, and the ruling behind it is in CiEventController.scopeOf:
+    // qits-idp mints its agent and operator credentials with NO structured claims at all — measured
+    // on a commissioned workspace client, which pushes protected refs at qits-githost on its roles
+    // alone — so demanding one here made this the only door in the service no real machine caller
+    // could open. 503 is the guard passing; the case above is what keeps the widening to callers
+    // that already hold a platform-wide credential.
     given()
         .contentType(MediaType.APPLICATION_JSON)
         .body(TRIGGER_BODY)
         .when()
         .post(TRIGGER)
         .then()
-        .statusCode(403);
+        .statusCode(503);
+  }
+
+  @Test
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = OWN_AUDIENCE),
+        @Claim(key = QitsClaims.PROJECT, value = "project-alpha")
+      })
+  void aProjectScopedTokenIsAdmittedAndEvaluatedAgainstItsOwnProject() {
+    // The 2026-09-04 fix. This used to be a 403 on the reading that an event names no repository, so
+    // the only honest grant was project=*; a candidate carries its project now, so the token is
+    // admitted and the evaluation is narrowed to it instead. 503 is the guard passing, for the same
+    // reason the project=* case above answers it: nothing here can be read. What a refused token
+    // looks like is the case below.
+    given()
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(TRIGGER_BODY)
+        .when()
+        .post(TRIGGER)
+        .then()
+        .statusCode(503);
+  }
+
+  @Test
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = OWN_AUDIENCE),
+        @Claim(key = QitsClaims.PROJECT, value = "project-beta")
+      })
+  void aTokenWhoseProjectHoldsNoRepositoryHereIs403() {
+    // One candidate exists and it is not this token's — the cross-project case, at the door. 403
+    // rather than an empty 200: the catalogue is not empty, so "matched nothing" would be a claim
+    // about the event when the truth is that the token covers nothing here. The listing hands out no
+    // project for this candidate, which is the unprovable case and lands the same way: unprovable is
+    // not "yours". Which repositories a scoped call really evaluates is the ci module's suite, where
+    // a catalogue with projects in it can be staged.
+    gitHostListing.set("some-other-projects-repo");
+    try {
+      given()
+          .contentType(MediaType.APPLICATION_JSON)
+          .body(TRIGGER_BODY)
+          .when()
+          .post(TRIGGER)
+          .then()
+          .statusCode(403);
+    } finally {
+      gitHostListing.set();
+    }
+  }
+
+  @Test
+  void aForwardedAdminSessionTriggersByHand() {
+    // The trigger's other real caller, and why the machine check sits on the machine arm here too: a
+    // person invoking this on purpose is what the operation is for, and the edge's forwarded session
+    // carries no bearer at all. 503 is the guard passing; a guard demanding a token unconditionally
+    // answers this 401, and one left at the class's machine-only role answers it 403.
+    given()
+        .header("X-Qits-User", "alice")
+        .header("X-Qits-Roles", ADMIN)
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(TRIGGER_BODY)
+        .when()
+        .post(TRIGGER)
+        .then()
+        .statusCode(503);
   }
 
   @Test
@@ -384,8 +457,10 @@ class MachineGuardTest {
         @Claim(key = QitsClaims.PROJECT, value = "guarded-repo")
       })
   void aTokenScopedToOneRepositoryMayNotCancelAReleaseRequestsRuns() {
-    // qits-ci owns no project entity and can resolve a repository to no project, so the honest
-    // grant for anything on this surface is every project — the manual trigger's ruling, applied.
+    // This route still asks for project=*, and it is deliberately NOT the trigger's new ruling: the
+    // trigger names no repository and can therefore be narrowed to what a token covers, while this
+    // one names a repoId whose project qits-ci would have to look up to judge. Whoever gives it the
+    // same treatment does it with that lookup in hand.
     given()
         .contentType(MediaType.APPLICATION_JSON)
         .body(CANCELLATIONS_BODY)

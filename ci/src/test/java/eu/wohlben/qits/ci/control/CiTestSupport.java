@@ -1,5 +1,6 @@
 package eu.wohlben.qits.ci.control;
 
+import eu.wohlben.qits.ci.persistence.CiOwedEventRepository;
 import eu.wohlben.qits.ci.persistence.CiReleaseAnnouncementRepository;
 import eu.wohlben.qits.ci.persistence.CiRunRepository;
 import eu.wohlben.qits.ci.persistence.CiScmReleaseRepository;
@@ -25,6 +26,7 @@ public abstract class CiTestSupport {
   @Inject protected CiStepRepository steps;
   @Inject protected CiReleaseAnnouncementRepository announcements;
   @Inject protected CiScmReleaseRepository scmReleases;
+  @Inject protected CiOwedEventRepository owedEvents;
   @Inject protected FakeCiStepRunner fakeRunner;
   @Inject protected FakeCiConfigSource fakeConfig;
   @Inject protected FakeCandidateRepos fakeCandidates;
@@ -53,6 +55,10 @@ public abstract class CiTestSupport {
               runs.deleteAll();
               announcements.deleteAll();
               scmReleases.deleteAll();
+              // The trigger engine's owed-event ledger, wiped for the release join's reason: a row
+              // one test left owed would be re-evaluated by another test's sweep, against a
+              // candidate list that has moved on.
+              owedEvents.deleteAll();
             });
     fakeRunner.reset();
     fakeConfig.reset();

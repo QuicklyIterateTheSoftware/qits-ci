@@ -96,7 +96,7 @@ rest of qits it reaches over a URL it is configured with:
 | Direction | Surface | Config |
 |---|---|---|
 | in | `SCMPublishCommit` off the event bus — one per updated branch ref of a push, carrying the head commit's metadata and `suppressCi` | not an HTTP surface and not machine-guarded: what authenticates an event is the bus that carried it. Consumed durably as `ci-push-runs` (`bus/ScmPublishCommitListener`) |
-| in | `POST /ci/api/events/trigger` — `{name, payload, occurredAt?, eventId?}` → 200 `{eventId, runIds, repositoriesRead, repositoriesSkipped}`, one domain event supplied by hand instead of by the bus; it **evaluates before it answers**, and a 503 means it could not ("Triggering one by hand") | guarded on the same resource, and it needs the wider grant: a machine token covering **every** project, because the event names no repository |
+| in | `POST /ci/api/events/trigger` — `{name, payload, occurredAt?, eventId?}` → 200 `{eventId, runIds, repositoriesRead, repositoriesSkipped}`, one domain event supplied by hand instead of by the bus; it **evaluates before it answers**, and a 503 means it could not ("Triggering one by hand") | two real callers, like the cancellation below: an operator on the edge's forwarded session (`qits:admin`), and a machine token of this service's audience. `project=*` evaluates the whole catalogue; a token scoped to **one project** is admitted and the evaluation is narrowed to that project's repositories, so a cross-project trigger is impossible rather than refused. A project this instance can place no repository in is a 403 |
 | in | `GET /ci/api/runs?repositoryId={repoId}[&limit={n}]`, `GET /ci/api/runs/{runId}` | not machine-guarded; they carry build logs, so a deployment must keep them behind its auth policy. **Every read here takes `qits:admin` OR `qits:system`** — `qits:system` is the machine role and `qits:admin` the human one, and a peer polling a run it asked for (qits-platform-maintenance waits out a bump this way) must not be granted a person's role to do it. `POST /ci/api/runs/{runId}/cancel` is not widened with them and stays `qits:admin` |
 | in | `GET /ci/api/runs/active` → `{"runs": [...]}` — every `QUEUED` or `RUNNING` run on the instance, all repositories, newest first, no parameters | same; unscoped, because "what is CI doing right now" has no repository to scope to |
 | in | `GET /ci/api/repositories` → `{"repositoryIds": [...]}` — the distinct repo ids this instance has runs for, ascending | same; it is the one read here that is not scoped to a repository, because it answers *which* |
@@ -1096,6 +1096,41 @@ step containers get the same four `QITS_EVENT_*` variables, and a green release 
 its `SoftwareRelease`s under the supplied id as their `parentId`. So a hand-supplied event is a real
 event as far as everything downstream is concerned — including the loop warning above.
 
+**Who may call it, and what the call is evaluated against.** The door used to demand a machine token
+granted `project=*`, on the reading that an event names no repository — so the narrowest honest grant
+was every project, *because qits-ci could not name a project*. It can: a candidate carries
+`(repoId, projectId, name)`, and with `qits.ci.projects-url` set the catalogue is qits-projects' own
+listing. So:
+
+- **An operator** arrives on the edge's forwarded `X-Qits-User`/`X-Qits-Roles` session with
+  `qits:admin` (or `qits:system`), carries no bearer at all, and the evaluation covers everything.
+  This is a person's write, like the cancel and the retry.
+- **`project=*`** is unchanged: the whole catalogue, platform pipelines included.
+- **A project-scoped token** is admitted, and the evaluation is narrowed to the repositories the
+  catalogue places in that project. Another project's repository is never asked, so it cannot match
+  and cannot be made to run — a cross-project trigger is impossible rather than refused. Platform
+  pipelines are *not* part of a scoped evaluation: one repository's file acting on the whole
+  catalogue is a platform-wide act, and `project=*` is the honest grant for it.
+- **A project this instance can place no repository in is a 403**, not an empty 200: the token covers
+  nothing here. A candidate whose project qits-ci cannot name — one it knows only from its own run
+  rows, or every one of them while the qits-projects listing is unreachable — is in **no** scope, so
+  a listing outage narrows a scoped call to nothing rather than widening it to everybody. An unscoped
+  call is unaffected: a read failure never shrinks the candidate set.
+- **A token with no `project` claim at all** is not project-scoped, and the door then asks the other
+  half of what qits-idp issues: a **platform-tier role** (`qits-platform:system` or
+  `qits-platform:admin`) evaluates every project, and a token without one is a 403 naming what it is
+  missing. That is not "absent means wildcard" — `MachineAuth.requireClaim` answers "does your claim
+  cover *this target*", and for that question absence must never mean yes. This door asks "what may I
+  evaluate *for* you", and the platform's answer, measured, is that its agent and operator
+  credentials carry **no structured claims at all**: a commissioned workspace client's token holds
+  `groups` of `qits:system`, `qits-platform:system` and `qits:admin` and nothing else, and it pushes
+  protected refs at qits-githost on exactly that. A project-scoped client holding `qits:system` alone
+  still cannot act across the catalogue.
+
+Measured 2026-09-04: that commissioned client was 403 here while every other `/ci/api` read answered
+the same bearer, which made the documented manual re-fire mechanism unusable by exactly the callers
+that need it.
+
 ## How a step runs — qits-ci starts containers, and that is all
 
 > **No code path in qits-ci runs repo-controlled code as a host process, and none runs it through
@@ -1255,6 +1290,38 @@ mechanisms: the row covers a restart between accept and execution, and the durab
 restart before the push was ever accepted — a push announced while this process was away is read back
 off the event log rather than needing a replay.
 
+**The third half was the one that was still open, and it cost three release requests.** A run row
+covers a restart *after* the event was evaluated, and the durable claim covers a restart *before* the
+event was ever offered — between them sat the accept: `CiEventTriggerListener` hands the frame to the
+trigger worker and returns, so the claim committed when the event was accepted for evaluation rather
+than when a run row existed. The evaluation is a git-host fan-out and deliberately runs outside the
+claiming transaction, so that gap could not simply be closed by widening a bracket — and the claim
+lives on the *eventstream* datasource while runs live on ci's, which one JTA transaction cannot both
+take. On 2026-09-04 a qits-ci redeploy landed in it: three release requests created within a second
+of the cutover had their `ReleaseRequestChanged` claimed by the dying instance, no QA run was ever
+recorded, and under a release gate that strictly requires verdicts they hung `PENDING` until they
+were withdrawn and recreated.
+
+What is durable now is the **acceptance**. `ci_owed_event` takes one row per accepted event, written
+on ci's own datasource in its own transaction *before* the acceptance is reported back to the bus,
+and deleted the moment the evaluation returns — so the table is **empty in a healthy process**, the
+eventstream outbox's property, and a row in it is an event some process accepted and never evaluated.
+An event that could not be recorded is not accepted at all: the listener throws, the claim rolls back,
+and the bus offers it again.
+
+Two sweeps clear what a dead process left: one at **boot**, which takes every row whatever its age
+(`update_order: stop-first` — one CI process at a time, so a row at boot belongs to a process that is
+gone), and a **periodic** one taking whatever has been owed longer than `qits.ci.trigger-owed-grace`,
+so a boot sweep that ran while postgres or the git host was still coming up is not the only chance.
+Re-evaluating is safe by construction: the `(trigger_event_id, repo_id, config_path)` constraint
+makes a second evaluation of an event that already recorded its runs a no-op. A sweep settles a row
+whenever the evaluation *returns*, including one that reached no readable repository — that is the
+git host's case and behaves exactly as a live frame's does; only a **throw** leaves the row owed.
+
+A shutdown also gives the evaluations it has already accepted five seconds to finish. Not the
+durability mechanism — the ledger is — but an evaluation that completes there still writes its
+`QUEUED` rows, which the successor's boot sweep re-enqueues like any other.
+
 On boot:
 
 - push-triggered runs left `RUNNING` are marked `FAILED` — their in-flight step died with the
@@ -1266,7 +1333,10 @@ On boot:
 - runs left `QUEUED` are **re-enqueued**, oldest first, because they never started and the row says
   everything needed to start them. Nothing is lost and nothing has to be replayed;
 - containers carrying the `qits.ci.run` label are removed, and a daemon from a previous life that
-  dials in presents a secret this process does not know and is closed 1008.
+  dials in presents a secret this process does not know and is closed 1008;
+- every event left in `ci_owed_event` is **re-evaluated**, on its own thread so a slow git host
+  cannot lose the container healthcheck's race — the runs a dead process accepted and never
+  recorded.
 
 For an event-triggered run the row includes the original event timestamp, its canonical payload and
 the exact trigger-file content that matched. Recovery reparses that snapshot, preserving both the
