@@ -41,6 +41,8 @@ public class ReleaseJoinTest extends CiTestSupport {
 
   private static final String RELEASE_TRIGGER_PATH = ".config/qits/ci-event-own-release.yml";
 
+  private static final String QA_TRIGGER_PATH = ".config/qits/ci-event-release-request.yml";
+
   private static final String HEAD = "c".repeat(40);
 
   private static final String VERSION = "2026.812.101500";
@@ -68,6 +70,19 @@ public class ReleaseJoinTest extends CiTestSupport {
       steps:
         - image: alpine:3
           script: ./publish-tag.sh
+      """;
+
+  /**
+   * The repository's QA pipeline, as the rollout stamped it: it reacts to the release request's
+   * re-fold, it is green before the release is even approved, and it declares <b>no</b> {@code
+   * artifacts:} — it builds and tests a fold and pushes nothing.
+   */
+  private static final String QA_TRIGGER =
+      """
+      event: ReleaseRequestChanged
+      steps:
+        - image: alpine:3
+          script: ./verify.sh
       """;
 
   @Inject CiEventTriggerService engine;
@@ -240,6 +255,79 @@ public class ReleaseJoinTest extends CiTestSupport {
     assertEquals(1, releaseAnnouncer.published().size());
   }
 
+  // --- who may satisfy the join, and when --------------------------------------------------------
+
+  /**
+   * <b>The release request's QA run is not the release pipeline, and no {@code SCMRelease} may make
+   * it one.</b>
+   *
+   * <p>This is the shape the platform actually runs in since per-push CI retired, and it is the one
+   * a false announcement would be cheapest in. qits-projects folds a request onto {@code
+   * release/<id>}, publishes {@code ReleaseRequestChanged}, and the repository's QA pipeline builds
+   * that fold and goes green. Minutes later the request is approved: the tag is created and {@code
+   * SCMRelease} is published — while the release pipeline that builds and pushes {@code
+   * qits/<app>:<version>} is still QUEUED behind the single run worker. If the arriving release
+   * could close a join against <em>that</em> green run, qits-deployments would be told about an
+   * image that does not exist for another half hour, and the real announcement would arrive after
+   * the deployer had already recorded the version.
+   *
+   * <p>It cannot, and the reason is one line rather than a guard: {@code artifacts:} is a
+   * DECLARATION, so a run owes an announcement only for what its own trigger file declared, and the
+   * QA pipeline declares nothing. {@code CiRunService.announceRelease} returns on the null and
+   * {@link ReleaseJoin} is never called at all — which is why the payload below carries a {@code
+   * version} the pipeline could have been announced under. The version was never the gate; the
+   * declaration is.
+   */
+  @Test
+  public void aGreenQaRunOfTheSameRepositoryOwesNothingForAReleaseToClose() throws Exception {
+    qaRun();
+
+    join.onScmRelease(repoId, repoId, VERSION, UUID.randomUUID().toString(), Instant.now());
+
+    assertEquals(
+        List.of(),
+        releaseAnnouncer.published(),
+        "a green QA run published no artifact, so the release has nothing of its to announce");
+    assertEquals(List.of(), owedFor(repoId, VERSION), "and nothing was ever owed");
+  }
+
+  /**
+   * And the whole sequence, in the order a real release runs it: green QA run, then the tag and its
+   * {@code SCMRelease}, then — minutes later — the release pipeline. <b>Exactly one announcement,
+   * made at the finish of the run that pushed the image.</b>
+   *
+   * <p>The {@code finishedAt} assertion is what makes this a claim about <em>timing</em> rather than
+   * about a count: the announcement carries the release pipeline run's own terminal timestamp, so an
+   * announcement made at tag time could not produce it. That is the invariant qits-deployments
+   * depends on — a {@code SoftwareRelease} for {@code qits/<app>:<version>} is published once, by
+   * the run that really pushed it, after it succeeds.
+   */
+  @Test
+  public void theReleaseIsAnnouncedOnceAndOnlyWhenTheReleasePipelineSucceeds() throws Exception {
+    qaRun();
+
+    // The tag moment: qits-projects created the tag and published SCMRelease. Nothing has been
+    // built yet, and nothing may be announced yet.
+    join.onScmRelease(repoId, repoId, VERSION, UUID.randomUUID().toString(), Instant.now());
+    assertEquals(
+        List.of(), releaseAnnouncer.published(), "no artifact exists at tag time, so no announcement");
+
+    // And now the release pipeline, which is what actually pushes qits/<app>:<version>.
+    releaseRun(releasePayload());
+
+    assertEquals(1, releaseAnnouncer.published().size(), "announced once, by the run that built it");
+    FakeReleaseAnnouncer.Published published = releaseAnnouncer.published().get(0);
+    assertEquals("qits/qits-thing", published.packageName());
+    assertEquals(VERSION, published.version());
+    CiRun releasePipeline = releaseRunRow();
+    assertEquals(
+        releasePipeline.finishedAt,
+        published.finishedAt(),
+        "the announcement is stamped with the release pipeline's own finish, which is what makes"
+            + " announcing it at tag time impossible rather than merely unusual");
+    assertTrue(owedFor(repoId, VERSION).isEmpty());
+  }
+
   // --- what the announcement carries about the repository ----------------------------------------
 
   /**
@@ -308,6 +396,36 @@ public class ReleaseJoinTest extends CiTestSupport {
   private String releaseRun(String payload) throws Exception {
     return deliver(
         RELEASE_TRIGGER_PATH, RELEASE_TRIGGER, ReleaseJoin.RELEASE_EVENT_NAME, payload);
+  }
+
+  /**
+   * A green run of the repository's QA pipeline — the release request's fold, built and passed. It
+   * declares no {@code artifacts:}, which is the whole of why it can close no release join, and its
+   * payload names the version anyway so the test cannot pass for the wrong reason.
+   */
+  private String qaRun() throws Exception {
+    return deliver(
+        QA_TRIGGER_PATH,
+        QA_TRIGGER,
+        CiRunService.RELEASE_REQUEST_EVENT_NAME,
+        "{\"repoName\":\""
+            + repoId
+            + "\",\"releaseRequestId\":\""
+            + UUID.randomUUID()
+            + "\",\"backingBranch\":\"release/r-1\",\"mergedSha\":\""
+            + "f".repeat(40)
+            + "\",\"version\":\""
+            + VERSION
+            + "\"}");
+  }
+
+  /** The run of the release recipe, of everything this repository has recorded. */
+  private CiRun releaseRunRow() {
+    forgetLoadedEntities();
+    return runService.runsFor(repoId).stream()
+        .filter(run -> RELEASE_TRIGGER_PATH.equals(run.configPath))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("no release pipeline run was recorded"));
   }
 
   private String releasePayload() {

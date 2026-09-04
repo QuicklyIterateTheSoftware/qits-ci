@@ -80,6 +80,27 @@ import org.jboss.logging.Logger;
  * finds nothing owed), and a crash between the publish and the commit leaves the row owed — the boot
  * sweep announces it again. Losing an announcement is the failure this class exists to prevent;
  * making one twice is a nuisance the other way round, and that is the trade taken.
+ *
+ * <h2>What this class is NOT, and the deploy that looks like it is</h2>
+ *
+ * <p><b>Nothing here can announce before the run that published.</b> An owed row is written by a
+ * green run and by nothing else, and a run owes rows only for what its own trigger file's {@code
+ * artifacts:} declared — {@code CiRunService.announceRelease} returns on a null declaration before
+ * this class is reached at all. So a release request's QA pipeline, which declares nothing, cannot
+ * satisfy a join for a version it never built, however green and however recent it is; and an {@code
+ * SCMRelease} arriving at tag time announces exactly the rows that already exist, which for a repo
+ * whose release pipeline is still QUEUED is none. {@code ReleaseJoinTest} pins both directions.
+ *
+ * <p>That is worth stating because the symptom points here and the cause is elsewhere. A deployment
+ * of {@code qits/<app>:<version>} appearing minutes after the tag — failing {@code IMAGE_MISSING}
+ * because the release pipeline has not pushed yet — is qits-deployments' <b>manual door</b> ({@code
+ * POST /platform-deployments/api/events/software-released}), knocked by an operator or a script
+ * before the image run finished. It is distinguishable in the deployment REQUEST row: the bus door
+ * records the {@code packageName} the release announced, the manual door records none. And it is not
+ * free — the manual door writes a request row, {@code ReleaseTips} takes the newest request row as
+ * its floor, and the genuine {@code SoftwareRelease} arriving later is then refused as "not the
+ * newest release of this application any more". So the early knock does not merely fail; it can cost
+ * the deployment that would have worked.
  */
 @ApplicationScoped
 public class ReleaseJoin {

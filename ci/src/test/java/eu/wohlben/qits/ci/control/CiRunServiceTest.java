@@ -687,7 +687,10 @@ public class CiRunServiceTest extends CiTestSupport {
     CiRun newer = runs.stream().filter(run -> run.commitSha.equals(newerSha)).findFirst().orElseThrow();
     CiRun otherBranch =
         runs.stream().filter(run -> run.commitSha.equals(otherBranchSha)).findFirst().orElseThrow();
-    assertEquals(CiRunStatus.FAILED, older.status);
+    assertEquals(
+        CiRunStatus.CANCELLED,
+        older.status,
+        "a superseded run is cancelled, not failed — it never answered a question about this commit");
     assertEquals(CiRunService.DEDUPED, older.cancellationReason);
     assertEquals(newer.id, older.supersededByRunId);
     assertNull(older.daemonVersion, "a deduped queued build never starts");

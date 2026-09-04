@@ -163,7 +163,9 @@ public class CiTagSupersedeTest extends CiTestSupport {
   }
 
   private void assertSuperseded(CiRun loser, CiRun winner) {
-    assertEquals(CiRunStatus.FAILED, loser.status);
+    // CANCELLED, not FAILED: a superseded run answered no question, so it must not read as a build
+    // that broke. The reason is what says which cancellation it was.
+    assertEquals(CiRunStatus.CANCELLED, loser.status);
     assertEquals(CiRunService.DEDUPED, loser.cancellationReason);
     assertNotNull(loser.finishedAt, "a superseded run is over");
     // Each row names what beat it AT THE TIME, so tags arriving out of order leave a chain rather

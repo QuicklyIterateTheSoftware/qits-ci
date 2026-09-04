@@ -1375,10 +1375,7 @@ public class CiRunService {
                 runs.persist(run);
                 runs.flush();
                 for (CiRun older : runs.listQueuedPushes(repoId, branch, run.id)) {
-                  older.status = CiRunStatus.FAILED;
-                  older.finishedAt = run.createdAt;
-                  older.cancellationReason = DEDUPED;
-                  older.supersededByRunId = run.id;
+                  dedupe(older, run);
                 }
               });
     } catch (RuntimeException e) {
@@ -1638,9 +1635,33 @@ public class CiRunService {
     }
   }
 
-  /** Marks one queued run superseded by another. The idiom both supersedes write, spelled once. */
+  /**
+   * Marks one queued run superseded by another. The idiom all three supersedes write, spelled once.
+   *
+   * <p><b>{@code CANCELLED}, not {@code FAILED}.</b> The row used to settle red, and the word was
+   * wrong in the only place a word matters — a reader's. A superseded run answered no question and
+   * published no verdict: it is bookkeeping about the queue, exactly the statement {@link
+   * CiRunStatus#CANCELLED} already exists to make, and {@code cancellationReason = }{@link #DEDUPED}
+   * is what separates it from the two cancellations a person asks for. Settling it red made every
+   * re-fold of a release request look like a build that broke, in {@code GET /ci/api/runs/finished}
+   * and in the SPA, and false alarms are what got this changed.
+   *
+   * <p><b>Nothing downstream reads it as a new failure class</b>, because nothing downstream reads
+   * it at all: a deduped row is written here, at accept time, inside the accepting transaction, and
+   * never reaches {@link #announceRun} or {@link #announceFailedRun}. It published no {@code
+   * BuildFailed} before this change and publishes none after, so qits-projects' build gate — which
+   * matches verdicts on {@code (repoId, commitSha)} — sees exactly what it saw. The status is a read
+   * surface, and this is a correction to what that surface says.
+   *
+   * <p>The other columns are unchanged and load-bearing: {@code finishedAt} is the winner's
+   * acceptance rather than {@code now}, so the row is finished at the moment it was beaten; {@code
+   * supersededByRunId} is the link a reader follows to the run that stands. And {@code CANCELLED} is
+   * terminal, so the row leaves the active list and appears in the finished one exactly as before —
+   * {@code CiRunRepository.listFinished} names the two ACTIVE statuses rather than the terminal ones,
+   * for that reason.
+   */
   private static void dedupe(CiRun loser, CiRun winner) {
-    loser.status = CiRunStatus.FAILED;
+    loser.status = CiRunStatus.CANCELLED;
     loser.finishedAt = winner.createdAt;
     loser.cancellationReason = DEDUPED;
     loser.supersededByRunId = winner.id;

@@ -223,10 +223,24 @@ public class CiEventCheckoutTest extends CiTestSupport {
     CiRun older = bySha(recorded, first);
     CiRun newest = bySha(recorded, second);
     CiRun otherBranch = bySha(recorded, elsewhere);
-    assertEquals(CiRunStatus.FAILED, older.status, "the burst's older tip loses its queue slot");
+    assertEquals(
+        CiRunStatus.CANCELLED,
+        older.status,
+        "the burst's older tip loses its queue slot — cancelled, because losing a slot is not a"
+            + " verdict about the commit and a red row here is a false alarm");
+    assertEquals(CiRunService.DEDUPED, older.cancellationReason, "and the reason says which");
     assertEquals(newest.id, older.supersededByRunId);
     assertNotEquals(CiRunStatus.FAILED, newest.status);
+    assertNotEquals(CiRunStatus.CANCELLED, newest.status);
     assertNotEquals(CiRunStatus.FAILED, otherBranch.status, "another branch spends no slot here");
+    // And the status change is a read surface only: a superseded row publishes no verdict, before
+    // or after it, so qits-projects' build gate sees exactly what it always saw.
+    assertTrue(
+        announcer.failed().stream().noneMatch(failure -> failure.runId().equals(older.id)),
+        "a superseded run announces no BuildFailed — it is bookkeeping about the queue");
+    assertTrue(
+        announcer.announced().stream().noneMatch(succeeded -> succeeded.runId().equals(older.id)),
+        "and no BuildSuccessful either");
   }
 
   @Test

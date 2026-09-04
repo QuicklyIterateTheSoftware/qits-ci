@@ -14,8 +14,16 @@ package eu.wohlben.qits.ci.entity;
  *
  * <p>The two <b>active</b> states are {@code QUEUED} and {@code RUNNING}; the terminal ones are
  * {@code SUCCESS}, {@code FAILED}, {@code CANCELLED}, {@code CONFIG_ERROR} and {@code TIMED_OUT}. A
- * cancellation is a user decision rather than a failed pipeline verdict, so it has its own terminal
- * state, and a deadline is not a verdict either — {@link #TIMED_OUT} says the run ran out of time.
+ * cancellation is not a failed pipeline verdict, so it has its own terminal state, and a deadline is
+ * not a verdict either — {@link #TIMED_OUT} says the run ran out of time.
+ *
+ * <p><b>{@code FAILED} is a statement about the commit; every other terminal state is a statement
+ * about the run.</b> That is the line the vocabulary draws, and it is why a run superseded by a
+ * newer one settles {@code CANCELLED} rather than {@code FAILED}: nobody is waiting for its answer
+ * any more, and it never produced one. Which cancellation it was is {@code ci_run.cancellation_reason}
+ * — {@code USER_CANCELLED}, {@code RELEASE_REQUEST_CANCELLED} or {@code DEDUPED} — so the status
+ * says "no verdict" and the reason says why, instead of a red row saying something untrue about a
+ * commit that was never built.
  */
 public enum CiRunStatus {
   QUEUED,
