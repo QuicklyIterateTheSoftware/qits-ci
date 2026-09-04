@@ -85,6 +85,14 @@
             <artifactId>quarkus-hibernate-validator</artifactId>
         </dependency>
         <dependency>
+            <!-- CiEventTriggerService's owed-event sweep. Declared rather than taken transitively
+                 through qits-eventstream below, which carries the same extension for its outbox and
+                 catch-up sweepers: this module names @Scheduled in its own source, and a dependency
+                 a source file imports is one the pom states. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-scheduler</artifactId>
+        </dependency>
+        <dependency>
             <!-- CausedRow + CausationStamp: CiRun records the event it was written because of, in
                  the platform's generic causation_id column. The jar rides into this module's OWN
                  tests too — the eventstream persistence unit boots whether the bus is enabled or

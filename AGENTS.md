@@ -507,12 +507,14 @@ of the repository listing's default, because there is no repository here to make
 bounded question — and an ask above **100** is clamped rather than refused, since this is the one
 listing that is both unscoped and otherwise unbounded.
 
-**The machine guard is a call in the handler, not a filter over a path.** `CiEventController` opens
-its one write with `machineAuth.requireProject(QitsClaims.ANY)`, and `CiRunController` opens
-`cancelReleaseRequestRuns` with the same call **on the machine arm** — `if
-(MachineIdentity.isMachine(identity))`, because that route has two real callers: qits-projects with a
-bearer, and an operator on the edge's forwarded `X-Qits-User`/`X-Qits-Roles` session, which carries
-no token at all and is judged by the class-level roles. Demanding a machine token unconditionally
+**The machine guard is a call in the handler, not a filter over a path.** Both guarded writes sit on
+the **machine arm** — `if (MachineIdentity.isMachine(identity))` — because both have two real
+callers: a peer with a bearer, and an operator on the edge's forwarded `X-Qits-User`/`X-Qits-Roles`
+session, which carries no token at all and is judged by the roles. `CiRunController.cancelReleaseRequestRuns`
+asks for `project=*`; `CiEventController`'s trigger asks the claim itself — `MachineAuth.require()`
+for presence and audience, then the `project` claim read off the identity — and hands the value to
+the engine as a scope, because "granted some project" is not an equality check and the narrowing is
+what admits the caller. Demanding a machine token unconditionally
 there would 401 the person; skipping the check would unguard the peer. Nothing matches a path, so renaming
 a `@Path` moves the guard with the route and can no longer detach it. The fail-open shape that
 replaced the old one is narrower and still real: a **new** write method that simply omits the call
@@ -522,7 +524,12 @@ ships unguarded, and nothing says so.
 token, 403 for a token whose `aud` or `project` claim does not cover the target, and **the
 endpoint's own answer** for one that does — 503 at the manual trigger, which
 evaluates before it answers and has no git host to ask in that profile. Either way the case rules
-out 401 and 403, which is the whole of what a guard test can say.
+out 401 and 403, which is the whole of what a guard test can say. **At the trigger the pair to keep
+apart is now 503 and 403**: a project-scoped token is admitted (503, the endpoint's own answer with
+an empty catalogue) while a token whose project holds none of the repositories this instance does
+know is refused (403), which is the cross-project case at the door. Which repositories a scoped call
+really evaluates is the `ci` module's suite, where a catalogue with projects in it can be staged; a
+forwarded admin session is asserted here too, for the same reason it is on the cancellation.
 **The push intake used to be the second guarded write and is not a write at all any more**: a push
 arrives as `SCMPublishCommit` off the bus, where a bearer would mean nothing, so the cases that
 asked "may this token push to this repository" have no endpoint left.
@@ -534,7 +541,8 @@ controller carries a class-level role: **the pair** `{qits:admin, qits:system}` 
 and `CiRepositoryController` — `qits:system` is the machine role and `qits:admin` the human one, and
 a peer that polls a run it asked for must not be handed a person's role to do it — and `qits:system`
 on `CiEventController`, `CiDaemonController` and `CiDaemonSocket`, which is what a machine peer
-holds. **Nothing that mutates was widened with them**: `CiRunController.cancelRun` and
+holds — with the trigger method naming the pair itself, since an operator invoking it by hand is one
+of its two real callers and a method-level list replaces the class's rather than adding to it. **Nothing that mutates was widened with them**: `CiRunController.cancelRun` and
 `CiRunController.retryRun` carry their own method-level `qits:admin`, which replaces the class's list
 rather than adding to it. `cancelReleaseRequestRuns` keeps the class pair, because a peer service
 (qits-projects, withdrawing a release request) and an operator both legitimately call it. So three doors shut in
@@ -1007,8 +1015,23 @@ names"), and what follows is what biting it feels like.
   `POST /ci/api/events/trigger` (`CiEventController`) builds the same `Arrival` from a JSON body, so
   the engine cannot tell a hand-supplied event from a frame — no branch, no flag, no second code
   path, and nothing web-shaped reaching `ci/`. It is the only operation left on that resource — it
-  shared it with the push intake until that became a listener — and it demands `project=*`, because
-  an event names no repository. The **id default is load-bearing**: a
+  shared it with the push intake until that became a listener. **It demanded `project=*` until
+  2026-09-04 and does not any more**: the argument was that an event names no repository, so the
+  narrowest honest grant was every project — *because qits-ci could not name a project*. It can, and
+  has since the identity cutover: a candidate is a `CiRepoRef` carrying `(repoId, projectId, name)`.
+  So a project-scoped machine caller is admitted and its evaluation is narrowed to that project's
+  candidates, which refuses a cross-project trigger **by construction** — the other project's
+  repository is never asked. `project=*` is unchanged; a project this instance can place no
+  repository in is a 403 (`NoRepositoriesInProject`, thrown by the engine and mapped by the
+  controller); a candidate whose project qits-ci cannot name is in no scope at all, so an unreachable
+  qits-projects listing narrows a scoped call to nothing rather than widening it to everybody; and
+  platform pipelines are not part of a scoped evaluation, since one repository's file acting on the
+  whole catalogue is a platform-wide act. The guard sits on the **machine arm** the way
+  `cancelReleaseRequestRuns`'s does, and the method carries the `{qits:admin, qits:system}` pair
+  rather than the class's machine-only role, because an operator's forwarded session is this door's
+  other real caller. What was refused live, and made the documented re-fire mechanism unusable: a
+  commissioned client holding `qits:system` and its own project's claim, 403 here while every other
+  `/ci/api` read answered it. The **id default is load-bearing**: a
   fresh random UUID per call, or the dedupe below silently drops every rerun. A caller that passes
   one is opting into the dedupe, which is what makes a bootstrap script idempotent. Both are in
   `README.md` under "Triggering one by hand", and both are pinned by `CiManualTriggerTest`.
@@ -1075,13 +1098,42 @@ names"), and what follows is what biting it feels like.
   listener's and nothing else's now**: everything that reaches it has a redelivery channel behind
   it, which the manual trigger never had — see that bullet above.
 
-  **State the residual window plainly: the claim commits when the event is ACCEPTED, not when the run
-  row exists.** A crash in the gap between the enqueue and the evaluation loses that event. It is a
-  narrower guarantee than the seam's "exactly-once effect", and it is the deliberate price of keeping
-  the git-host fan-out off the dispatch thread and out of the claiming transaction. Both ends of the
-  gap are covered — a full queue fails rather than drops, and an accepted run is a `QUEUED` row that
-  survives a restart on its own — so what is exposed is milliseconds, not the disconnect windows this
-  migration existed to close.
+  **That residual window is CLOSED, and the price of leaving it open was measured.** It read: the
+  claim commits when the event is ACCEPTED, not when the run row exists, so a crash in the gap
+  between the enqueue and the evaluation loses that event — milliseconds, and the deliberate price of
+  keeping the git-host fan-out off the dispatch thread. Milliseconds are as wide as a cutover chooses
+  to make them: on **2026-09-04** a qits-ci redeploy landed in the gap for three release requests
+  created within a second of it, their `ReleaseRequestChanged` claimed by the dying instance, no QA
+  run recorded, and under a gate that strictly requires verdicts they hung PENDING until they were
+  withdrawn and recreated.
+
+  **What is durable now is the ACCEPTANCE, because the effect could not be made so.** The claim is on
+  the eventstream datasource and a run row is on ci's, and one JTA transaction does not take both
+  (`Enlisted connection used without active transaction`, the same measurement `acceptPostReceive`
+  and `ScmReleaseListener` already run under). So `onEvent` writes a `ci_owed_event` row on ci's own
+  datasource, in its own transaction, **before** it answers `true` — and `evaluateQuietly` deletes it
+  when the evaluation returns. The orderings are exhaustive: die before the row commits and the
+  accept answers `false`, the listener throws and the bus re-offers; die after it and the row is the
+  record that the event was never evaluated.
+
+  **Empty in a healthy process** — the outbox's property, and the reason a non-empty table is a
+  signal rather than a second copy of the log. Two sweeps clear it: `onStart` takes everything (the
+  deployment is `update_order: stop-first`, so a row at boot belongs to a process that is gone) on
+  its own thread, at `CiRunService.BOOT_SWEEP_PRIORITY` because it can hand runs to the run worker
+  and must not precede the container reap; and a `@Scheduled` tick takes what has been owed longer
+  than `qits.ci.trigger-owed-grace`, because a boot sweep is one attempt and a database that was not
+  up yet would otherwise leave the events owed until the next deployment.
+
+  **Re-evaluating is safe by construction rather than by care**: `unique (trigger_event_id, repo_id,
+  config_path)` makes a second evaluation of an event that already recorded its runs a no-op — which
+  is what lets the ledger be at-least-once. And what it does **not** do is retry an evaluation that
+  happened: a sweep settles a row whenever `evaluate` returns, including one that reached no readable
+  repository, because that case is the git host's and behaves exactly as a live frame's does. Only a
+  throw leaves a row owed.
+
+  A shutdown also drains for five seconds rather than calling `shutdownNow` at once. Not the
+  durability mechanism — an evaluation that finishes there writes its `QUEUED` rows, which the
+  successor's boot sweep re-enqueues exactly as it does an interrupted run's.
 - **The causation edge crosses those threads as data, not as context.** `CausationScope` is a plain
   `ThreadLocal` and does not follow work — that is its design, not its limitation. So the frame's
   `id` is written to `ci_run.trigger_event_id`, read back off the row at `announceRun`, and passed to
@@ -1476,8 +1528,8 @@ here implements `CausedRow` (CiRun) or declares `@Uncaused` with its reason in t
 — its run carries the cause, and its row is written on the run worker where no scope stands;
 CiDaemonPin — `event_id` is already the adopting event; CiReleaseAnnouncement — `trigger_event_id`
 is already the cause, and it is on the row because the published event is stamped with it;
-CiScmRelease — `event_id` is already the announcing release). A new entity that skips the decision
-fails the build naming the class.
+CiScmRelease — `event_id` is already the announcing release; CiOwedEvent — `event_id` IS the event
+the row is owed for). A new entity that skips the decision fails the build naming the class.
 
 `V4__run_started_at.sql` and `V5__run_repository_identity.sql` continue the same rule. The second is
 the repository-identity campaign's half of it: `ci_run.project_id` and `ci_run.repo_name`, both
@@ -1516,6 +1568,15 @@ deployer's name-addressed content read (`/git/<projectId>/<repoName>/blob/…`) 
 qits-githost's storage-client guard lets it make — and the column exists because the announcement
 outlives the run row that knows the name, exactly as V10's does. The two are written and read
 together and should be kept that way; nothing looks a row up by either.
+
+`V13__owed_trigger_event.sql` is the trigger engine's owed-event ledger, and it is the first table
+in this lineage that is meant to be **empty**. One row per event the engine has accepted and not yet
+evaluated, written before the acceptance is reported to the bus and deleted when the evaluation
+returns — the eventstream outbox's shape, for a gap of the same kind: the durable claim is on the
+*eventstream* datasource and a run row is here, so the only thing that can be made atomic with the
+run is the acceptance. Read its header for the cutover that bought it (2026-09-04, three release
+requests with no QA run) and "The trigger engine" for the sweeps that drain it. Keyed by the event
+id, so a redelivery finds its own row; one index, on `accepted_at`, which is the sweeps' only read.
 
 `V1__init.sql` is the rest of the schema. The nine H2 migrations it replaces (V1-V8 plus a Java V9) are
 history in this repository's log and are not a prefix of this lineage: the move off H2 is a
@@ -1570,9 +1631,10 @@ migration to point at. `baseline-on-migrate` is gone with the H2 file it existed
 session, and `qits-gateway` strips and re-asserts its reserved `X-Qits-*` namespace. That hygiene is
 the entire reason the headers can be trusted here. There is no auth variant to select in this
 service: the read routes accept `qits:admin` or `qits:system`, the two human writes (`cancel` and
-`retry`) require `qits:admin`, the release-request cancellation takes either role and adds a
-`MachineAuth` check on its machine arm, and machine controllers retain their separate `MachineAuth`
-audience/scope checks pending endpoint-scoped machine roles.
+`retry`) require `qits:admin`, the release-request cancellation **and the manual trigger** take
+either role and add a `MachineAuth` check on their machine arm — the trigger's reads the `project`
+claim as a scope rather than demanding one value — and machine controllers retain their separate
+`MachineAuth` audience/scope checks pending endpoint-scoped machine roles.
 
 **`identity.isAnonymous()` is not a security state** — it means "no name for the audit row". A check
 of the form `if (identity.isAnonymous()) deny` would look like a security control and be worth

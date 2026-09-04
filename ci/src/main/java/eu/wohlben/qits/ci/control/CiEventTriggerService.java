@@ -6,10 +6,19 @@ import com.fasterxml.jackson.databind.JsonNode;
 import eu.wohlben.qits.ci.control.CiConfigParser.CiConfigException;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerFile;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerLookup;
+import eu.wohlben.qits.ci.entity.CiOwedEvent;
+import eu.wohlben.qits.ci.persistence.CiOwedEventRepository;
+import io.quarkus.narayana.jta.QuarkusTransaction;
+import io.quarkus.runtime.LaunchMode;
+import io.quarkus.runtime.StartupEvent;
+import io.quarkus.scheduler.Scheduled;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -73,6 +82,39 @@ import org.jboss.logging.Logger;
  * round — the budget exists to keep a burst of machine events from storming the git host, and a
  * manual trigger is one request from one person, already bounded by the HTTP worker pool.
  *
+ * <h2>An accepted event is DURABLE, and that is what the enqueue used to cost</h2>
+ *
+ * <p>The residual window this class used to state plainly — "the claim commits when the event is
+ * ACCEPTED, not when the run row exists; a crash in the gap loses that event" — is <b>closed</b>.
+ * It was measured on 2026-09-04: three release requests created within a second of a qits-ci
+ * redeploy were consumed without effect, their {@code ReleaseRequestChanged} claimed by the dying
+ * instance and their QA runs never recorded, and with the release gate strictly requiring verdicts
+ * they hung PENDING until they were withdrawn and recreated. Milliseconds are exactly as wide as a
+ * cutover chooses to make them.
+ *
+ * <p>{@link #onEvent} now writes a {@link CiOwedEvent} row on ci's own datasource, in its own
+ * transaction, <b>before</b> it reports the acceptance — and {@link #evaluateQuietly} deletes it the
+ * moment the evaluation returns. The claim cannot join that transaction (it lives on the eventstream
+ * datasource, and one JTA transaction does not take both), so what is made atomic is the pair that
+ * can be: the acceptance is durable before it is claimable.
+ *
+ * <ul>
+ *   <li>dying before the row commits: the accept answers {@code false}, the listener throws, the
+ *       claim rolls back and the bus offers the event again — the existing retryable path.
+ *   <li>dying after it and before the run row: the claim stands, and the row is the record that the
+ *       event was never evaluated. {@link #sweepOwed} re-evaluates it at boot and on a schedule.
+ * </ul>
+ *
+ * <p><b>Re-evaluating is safe by construction rather than by care</b>: {@code unique
+ * (trigger_event_id, repo_id, config_path)} makes a second evaluation of an event that already
+ * recorded its runs a no-op. That constraint is what lets this ledger be at-least-once.
+ *
+ * <p><b>What the ledger does NOT do is retry an evaluation that happened.</b> A sweep settles a row
+ * whenever the evaluation returns, including one that reached no readable repository — that case is
+ * the git host's, it behaves exactly as a live frame's evaluation does, and making it retryable here
+ * would keep rows for a platform that simply has no candidates yet. Only a <em>throw</em> leaves the
+ * row owed.
+ *
  * <h2>Platform pipelines</h2>
  *
  * <p>There is a <b>second source of trigger files</b>: {@code .config/qits/ci-platform-event-*.yml}
@@ -114,6 +156,7 @@ public class CiEventTriggerService {
   @Inject CiEventTriggerParser triggerParser;
   @Inject CiCandidateRepos candidateRepos;
   @Inject CiRunService runService;
+  @Inject CiOwedEventRepository owed;
 
   /**
    * How long {@link #evaluateNow} keeps asking repositories. It runs on a request thread and reads
@@ -123,6 +166,19 @@ public class CiEventTriggerService {
    */
   @ConfigProperty(name = "qits.ci.trigger-deadline-seconds")
   int triggerDeadlineSeconds;
+
+  /**
+   * How long an accepted event may sit unevaluated before the periodic sweep treats it as a
+   * process's leftovers rather than as work in flight.
+   *
+   * <p>Generous on purpose: the sweep costs one git-host fan-out per row it picks up, and picking up
+   * an evaluation this process is still running is only a duplicate rather than a defect (the dedupe
+   * constraint refuses the second run). Wide enough that the ordinary case never happens, short
+   * enough that a lost event is recovered in minutes rather than at the next deployment. The boot
+   * sweep ignores it entirely — see {@link #onStart}.
+   */
+  @ConfigProperty(name = "qits.ci.trigger-owed-grace")
+  Duration owedGrace;
 
   /**
    * The repository whose {@code ci-platform-event-*.yml} files are platform pipelines — the wrapper
@@ -210,9 +266,35 @@ public class CiEventTriggerService {
             return t;
           });
 
+  /**
+   * How long a shutdown waits for the evaluations it has already accepted.
+   *
+   * <p>Not the durability mechanism — {@link CiOwedEvent} is — but the difference between a cutover
+   * that finishes its work and one that hands it to the successor's boot sweep. An evaluation that
+   * completes here still records its {@code QUEUED} rows, and {@code CiRunService} is already
+   * draining by then, so those rows are left for the successor to enqueue exactly as an
+   * interrupted run's are. A fan-out slower than this is abandoned and its row stays owed, which is
+   * the case the ledger exists for.
+   */
+  private static final int SHUTDOWN_DRAIN_SECONDS = 5;
+
   @PreDestroy
   void shutdown() {
-    evaluator.shutdownNow();
+    evaluator.shutdown();
+    try {
+      if (evaluator.awaitTermination(SHUTDOWN_DRAIN_SECONDS, TimeUnit.SECONDS)) {
+        return;
+      }
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+    }
+    List<Runnable> abandoned = evaluator.shutdownNow();
+    if (!abandoned.isEmpty()) {
+      LOG.warnf(
+          "%d accepted event(s) were not evaluated before shutdown; their owed rows stand and the"
+              + " next sweep re-evaluates them",
+          abandoned.size());
+    }
   }
 
   /**
@@ -232,9 +314,19 @@ public class CiEventTriggerService {
    *
    * <p>A malformed arrival — no id, no name — also answers {@code false}, and it is the caller's job
    * to tell the two apart. The listener does, by checking the frame before it gets here.
+   *
+   * <p><b>The acceptance is written down before it is reported</b>, which is what makes a {@code
+   * true} here worth what the funnel takes it for. A {@link CiOwedEvent} row commits on ci's own
+   * datasource first; only then is the event queued and only then is {@code true} answered. An event
+   * that could not be recorded is <em>not accepted</em> — {@code false}, so the claim rolls back and
+   * the bus offers it again — because an acceptance nothing durable knows about is exactly the
+   * promise this method used to break across a cutover.
    */
   public boolean onEvent(Arrival arrival) {
     if (arrival == null || arrival.eventId() == null || arrival.eventName() == null) {
+      return false;
+    }
+    if (!recordOwed(arrival)) {
       return false;
     }
     try {
@@ -243,10 +335,62 @@ public class CiEventTriggerService {
     } catch (RejectedExecutionException full) {
       // Either the queue is genuinely backed up or the process is shutting down. Both are worth a
       // line naming the event, because the event is simply not evaluated and nothing else will say so.
+      // The owed row goes with the refusal: this event stays the BUS's to redeliver, and leaving the
+      // row would make the sweep evaluate what the next offer is going to evaluate anyway.
+      settle(arrival.eventId());
       LOG.warnf(
           "Trigger evaluation queue is full — event %s (%s) was not evaluated",
           arrival.eventId(), arrival.eventName());
       return false;
+    }
+  }
+
+  /**
+   * Writes the acceptance down, or answers {@code false} so the caller refuses the event.
+   *
+   * <p>Its own transaction, because the caller's is the durable funnel's claim on another datasource
+   * — the arrangement {@code CiRunService.acceptPostReceive} already runs in and for the same
+   * measured reason. An existing row is success: a redelivery that reached the accept again is owed
+   * once, not twice.
+   */
+  private boolean recordOwed(Arrival arrival) {
+    try {
+      QuarkusTransaction.requiringNew()
+          .run(
+              () ->
+                  owed.record(
+                      arrival.eventId(),
+                      arrival.eventName(),
+                      arrival.occurredAt(),
+                      arrival.payload()));
+      return true;
+    } catch (RuntimeException notRecorded) {
+      // Loud and refused. Accepting an event this process cannot say it accepted is the failure the
+      // ledger exists to prevent, so the honest answer is to leave it owed on the bus instead.
+      LOG.errorf(
+          notRecorded,
+          "Event %s (%s) could not be recorded as owed; refusing it so the bus offers it again",
+          arrival.eventId(),
+          arrival.eventName());
+      return false;
+    }
+  }
+
+  /**
+   * Clears one owed row: this event has been evaluated and nothing is owed for it.
+   *
+   * <p>A failure here is a WARN and nothing else. The row stays, the next sweep re-evaluates the
+   * event, and the dedupe constraint makes that a no-op — an unclearable row costs a fan-out, where
+   * throwing would cost the evaluation that already happened.
+   */
+  private void settle(String eventId) {
+    try {
+      QuarkusTransaction.requiringNew().run(() -> owed.forget(eventId));
+    } catch (RuntimeException notSettled) {
+      LOG.warnf(
+          "Event %s was evaluated but its owed row could not be cleared; a sweep will re-evaluate"
+              + " it, which the dedupe makes a no-op: %s",
+          eventId, notSettled.toString());
     }
   }
 
@@ -260,15 +404,64 @@ public class CiEventTriggerService {
    * process that did not evaluate it.
    */
   public Evaluation evaluateNow(Arrival arrival) {
-    return evaluate(arrival, System.nanoTime() + SECONDS.toNanos(triggerDeadlineSeconds));
+    return evaluateNow(arrival, null);
+  }
+
+  /**
+   * The same evaluation, narrowed to <b>one project's</b> repositories.
+   *
+   * <p>{@code projectScope} null is every project, which is what an operator's forwarded session and
+   * a token granted {@code project=*} get. A non-null value is a machine caller's own project, and
+   * the narrowing is the whole of what admits it: the candidates are the ones the catalogue says
+   * belong to that project, so a repository of another project is not evaluated, cannot match and
+   * cannot be made to run — refused <em>by construction</em> rather than by a check that has to be
+   * remembered. See {@link #inProject} for what "the catalogue says" is worth, and {@code
+   * CiEventController} for the guard that decides the value.
+   *
+   * @throws NoRepositoriesInProject when the catalogue holds repositories but none of them is that
+   *     project's — a definite refusal for the caller, and never confused with "nothing could be
+   *     read", which stays an unanswered evaluation
+   */
+  public Evaluation evaluateNow(Arrival arrival, String projectScope) {
+    return evaluate(
+        arrival, System.nanoTime() + SECONDS.toNanos(triggerDeadlineSeconds), projectScope);
+  }
+
+  /**
+   * A scoped evaluation whose scope names no repository this instance can place in it.
+   *
+   * <p>A plain {@link RuntimeException} rather than anything web-shaped, for the reason every other
+   * type in this module is: the adapter turns it into a status code (403 — the token covers nothing
+   * here), and {@code ci} stays free of JAX-RS.
+   */
+  public static class NoRepositoriesInProject extends RuntimeException {
+
+    private final transient String project;
+
+    NoRepositoriesInProject(String project) {
+      super("no repository qits-ci can name belongs to project " + project);
+      this.project = project;
+    }
+
+    /** The scope that matched nothing — what a caller is told about its own token. */
+    public String project() {
+      return project;
+    }
   }
 
   private void evaluateQuietly(Arrival arrival) {
     try {
       evaluate(arrival);
     } catch (RuntimeException e) {
-      LOG.errorf(e, "Evaluating triggers for event %s failed unexpectedly", arrival.eventId());
+      // The owed row is deliberately NOT settled here: a throw is the one outcome a later sweep can
+      // improve on, and the dedupe makes re-evaluating whatever did get recorded a no-op.
+      LOG.errorf(
+          e,
+          "Evaluating triggers for event %s failed unexpectedly; it stays owed for the next sweep",
+          arrival.eventId());
+      return;
     }
+    settle(arrival.eventId());
   }
 
   /**
@@ -277,15 +470,22 @@ public class CiEventTriggerService {
    * holding a request open for it, and a candidate it gives up on is a run that never happens.
    */
   Evaluation evaluate(Arrival arrival) {
-    return evaluate(arrival, null);
+    return evaluate(arrival, null, null);
   }
 
-  private Evaluation evaluate(Arrival arrival, Long deadlineNanos) {
+  private Evaluation evaluate(Arrival arrival, Long deadlineNanos, String projectScope) {
     JsonNode payload = CiEventSelectionEvaluator.parsePayload(arrival.payload());
-    List<CiRepoRef> candidates = candidateRepos.candidates();
-    if (candidates.isEmpty()) {
+    List<CiRepoRef> catalogue = candidateRepos.candidates();
+    if (catalogue.isEmpty()) {
       LOG.debugf("No candidate repositories for event %s — nothing to evaluate", arrival.eventName());
       return new Evaluation(List.of(), 0, List.of());
+    }
+    List<CiRepoRef> candidates = inProject(catalogue, projectScope);
+    if (candidates.isEmpty()) {
+      // Only reachable with a scope: an empty catalogue answered above. This instance holds
+      // repositories and none of them is the caller's, which is an answer about the caller rather
+      // than about the git host — so it is a refusal and not an unanswered evaluation.
+      throw new NoRepositoriesInProject(projectScope);
     }
     List<String> runIds = new ArrayList<>();
     List<String> skipped = new ArrayList<>();
@@ -311,12 +511,23 @@ public class CiEventTriggerService {
         skipped.add(repo.repoId());
       }
     }
-    try {
-      evaluatePlatform(arrival, payload, candidates, heads, runIds);
-    } catch (RuntimeException e) {
-      // Never out of the evaluation: the candidates' own runs are already recorded and a platform
-      // pipeline's failure is not theirs.
-      LOG.warnf(e, "Could not evaluate platform triggers for event %s", arrival.eventId());
+    if (projectScope == null) {
+      try {
+        evaluatePlatform(arrival, payload, candidates, heads, runIds);
+      } catch (RuntimeException e) {
+        // Never out of the evaluation: the candidates' own runs are already recorded and a platform
+        // pipeline's failure is not theirs.
+        LOG.warnf(e, "Could not evaluate platform triggers for event %s", arrival.eventId());
+      }
+    } else {
+      // A platform pipeline is ONE repository's file acting on the whole catalogue, so firing one is
+      // a platform-wide act and the honest grant for it is every project. A project-scoped caller
+      // gets its own repositories' triggers and nothing else. Widening this later is additive; a
+      // scope that could reach the platform files would not be.
+      LOG.debugf(
+          "Event %s was evaluated for project %s only — platform pipelines are not part of a scoped"
+              + " evaluation",
+          arrival.eventId(), projectScope);
     }
     if (!skipped.isEmpty() && skipped.size() == candidates.size()) {
       // Every candidate silent means the answer is about the git host, not about the event. WARN
@@ -326,6 +537,32 @@ public class CiEventTriggerService {
           arrival.eventId(), arrival.eventName());
     }
     return new Evaluation(runIds, candidates.size() - skipped.size(), skipped);
+  }
+
+  /**
+   * The candidates one scope covers: everything when the scope is null, and otherwise the ones the
+   * catalogue places in that project.
+   *
+   * <p><b>A candidate whose project qits-ci cannot name is in no scope at all</b>, and that is the
+   * fail-closed half of the rule rather than an oversight. Two kinds of candidate have no {@code
+   * projectId}: one qits-ci knows only from its own run rows ({@code KnownCiRepos}), and every one of
+   * them when the qits-projects listing is unreachable and the git host's id-only listing is all
+   * there is. In both cases the honest answer is "this instance cannot prove that repository is
+   * yours", so a scoped caller does not reach it — an unreachable listing narrows a scoped
+   * evaluation to nothing (and its caller is told so) rather than quietly widening it to everybody.
+   * An unscoped evaluation is unaffected: a read failure must never shrink the candidate set.
+   */
+  private static List<CiRepoRef> inProject(List<CiRepoRef> catalogue, String projectScope) {
+    if (projectScope == null) {
+      return catalogue;
+    }
+    List<CiRepoRef> scoped = new ArrayList<>();
+    for (CiRepoRef repo : catalogue) {
+      if (projectScope.equals(repo.projectId())) {
+        scoped.add(repo);
+      }
+    }
+    return scoped;
   }
 
   /**
@@ -590,6 +827,99 @@ public class CiEventTriggerService {
       }
     }
     return null;
+  }
+
+  // --- the owed-event sweeps: what a process that did not finish left behind -----------------------
+
+  /**
+   * Boot: re-evaluate <b>every</b> owed event, whatever its age.
+   *
+   * <p>No grace, and that is a property of the deployment rather than an optimism. {@code
+   * .config/qits/deployments.yml} declares {@code update_order: stop-first} — one CI process at a
+   * time — so any row present at boot was accepted by a process that is gone, and waiting to be sure
+   * would only make the release request that is missing its QA run wait too.
+   *
+   * <p><b>On its own thread</b>, {@code ReleaseJoin.onStart}'s rule: a startup observer that blocks
+   * on the network loses the container healthcheck's race and cd kills the deployment. This one
+   * reads the git host once per candidate per row.
+   *
+   * <p><b>At {@code CiRunService.BOOT_SWEEP_PRIORITY}</b> rather than unordered, because it can
+   * record runs and hand them to the run worker: it must not precede {@code
+   * CiDaemonLauncher.onStart}'s container reap, which cannot tell a container this boot started from
+   * one the previous life left. Sharing the run sweep's rung is enough for that — the reap's is
+   * lower and the observers before it have returned — and the two do not otherwise interact: a run
+   * this sweep records is {@code QUEUED}, which the run sweep either re-enqueues or ignores, and
+   * both are correct.
+   */
+  void onStart(@Observes @Priority(CiRunService.BOOT_SWEEP_PRIORITY) StartupEvent event) {
+    if (LaunchMode.current() == LaunchMode.TEST) {
+      return;
+    }
+    Thread sweeper = new Thread(() -> sweepOwed(Instant.now()), "ci-trigger-owed-sweep");
+    sweeper.setDaemon(true);
+    sweeper.start();
+  }
+
+  /**
+   * The schedule underneath the boot pass, and it is not redundant with it.
+   *
+   * <p>A boot sweep is one attempt: a database that was not there yet when it ran, or a git host
+   * that answered nothing, leaves the events owed until the next deployment — which for a service
+   * whose release train rides those events is exactly the outage the ledger was written to end. The
+   * tick makes the recovery self-healing instead.
+   *
+   * <p>{@link Scheduled.ConcurrentExecution#SKIP} because a sweep is a fan-out and two of them are
+   * one storm at the git host; the grace is what keeps it from re-offering work this process is
+   * still doing.
+   */
+  @Scheduled(
+      every = "{qits.ci.trigger-owed-sweep-interval}",
+      concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
+  void sweepOwedTick() {
+    sweepOwed(Instant.now().minus(owedGrace));
+  }
+
+  /**
+   * Re-evaluates every event accepted before {@code cutoff} and never evaluated — package-private
+   * because both callers above skip or defer in a suite, so this is what a test drives to make a
+   * claim about a lost event.
+   *
+   * <p>One row at a time on this thread, and per-row containment: a row that throws stays owed for
+   * the next sweep, and the ones behind it are still swept. A row whose evaluation <em>returned</em>
+   * is settled even if no repository could be read — see the class javadoc for why that is not a
+   * retry this ledger owes.
+   */
+  void sweepOwed(Instant cutoff) {
+    List<CiOwedEvent> stale;
+    try {
+      stale = QuarkusTransaction.requiringNew().call(() -> owed.listAcceptedBefore(cutoff));
+    } catch (RuntimeException e) {
+      LOG.warnf(e, "Could not read the owed trigger events");
+      return;
+    }
+    if (stale.isEmpty()) {
+      return;
+    }
+    LOG.infof(
+        "Re-evaluating %d event(s) accepted by a process that did not finish with them", stale.size());
+    int recovered = 0;
+    for (CiOwedEvent row : stale) {
+      Arrival arrival = new Arrival(row.eventId, row.eventName, row.occurredAt, row.payload);
+      try {
+        Evaluation done = evaluate(arrival);
+        settle(row.eventId);
+        recovered++;
+        if (!done.runIds().isEmpty()) {
+          LOG.infof(
+              "Event %s (%s) was owed and is now evaluated: %d run(s) recorded",
+              row.eventId, row.eventName, done.runIds().size());
+        }
+      } catch (RuntimeException e) {
+        LOG.warnf(
+            e, "Could not re-evaluate owed event %s (%s); it stays owed", row.eventId, row.eventName);
+      }
+    }
+    LOG.infof("Owed-event sweep: %d of %d re-evaluated", recovered, stale.size());
   }
 
   /** Test hook: waits for the evaluation queued at this moment to drain. */
