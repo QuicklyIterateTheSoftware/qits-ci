@@ -613,10 +613,12 @@ web stack present. Check that before adding any extension that sounds like a web
   working tree has. The Mandrel builder stage has no node either, which is why that `mvnw` line
   passes `-Dquarkus.quinoa.package-manager-install=true` and a pinned `node-version` — on the command
   line rather than in `application.properties`, so a developer machine keeps using its own node.
-- **This repo's own CI.** The step container's clone is `--depth 50` and does not recurse, so
-  `.config/qits/ci-post-receive.yml` initialises the submodule itself before `docker build`. Without
-  that line the publish step fails on the empty directory, and the repo's CI is red for a reason that
-  has nothing to do with the push.
+- **This repo's own CI.** The step container's clone is `--depth 50` and does not recurse, so both
+  pipeline files initialise the submodule themselves — `.config/qits/ci-event-release-request.yml`
+  before the QA image build, `.config/qits/ci-event-release.yml` before the publish, each with a
+  `-c submodule.qits-ci-frontend.url` override deriving the sibling's address from
+  `$QITS_CI_REPOSITORY_URL`. Without those lines the step fails on the empty directory, and the run is
+  red for a reason that has nothing to do with the change under test.
 
 Note Quinoa is **disabled by default in test mode**, so no `@QuarkusTest` builds the client and the
 suite's runtime is unchanged. What the SPA is actually served as is proven by `package` plus the
@@ -1282,7 +1284,12 @@ names"), and what follows is what biting it feels like.
   standing reason with its sharpest edge: `gating: "false"` parsing as truthy would hold a commit for
   a failure nobody meant to gate on.
 - **The trigger file parser is strict where `ci-post-receive.yml` is lenient**, and the asymmetry is
-  the point rather than an inconsistency. In a pipeline an unread key costs a feature; in a
+  the point rather than an inconsistency. (Both halves of the rule are live code, and only one half
+  has users: no repository has shipped a `ci-post-receive.yml` since per-push CI retired on
+  2026-09-04. The push path stays because deleting a working intake buys nothing, and every
+  `ci-post-receive.yml` sentence on this page should be read as "the engine still does this" rather
+  than as a description of a file you will find in a tree.) In a pipeline an unread key costs a
+  feature; in a
   *selection* it costs correctness, because an absent `when:` means **unconditional** — so a mistyped
   `wehn:` would silently widen the trigger to every event of that name. Unknown top-level keys and
   duplicate keys are therefore errors in a trigger file and are not in a pipeline. The `steps:`
@@ -1487,7 +1494,7 @@ Four things reaching this code are attacker-controlled and must stay that way in
 
   **"A step container never gets a docker socket" was this section's invariant and it is now false.
   What replaced it is narrower and was chosen deliberately, not conceded:** a step container never
-  gets one *silently*. A step declares `docker: true` in `.config/qits/ci-post-receive.yml`, the
+  gets one *silently*. A step declares `docker: true` in its `.config/qits/` pipeline file, the
   spec carries `hostDockerSocket` for that step and no other, qits-containers is what mounts it (the
   socket's path is that service's deployment fact now — `qits.ci.docker-socket-path` is gone), the
   config diff shows the declaration, and the run row records that step like any other. Such a step is
@@ -1870,9 +1877,11 @@ contract, tested where it lives.
   request to exactly one story, so the startup JWKS fetch lands in whichever story drains first and
   that must be the story about it. The class orderer is installed the one way Quarkus
   permits, `junit.quarkus.orderer.secondary-orderer` in this module's test properties; a local
-  `junit-platform.properties` hard-fails surefire. `.config/qits/ci-event-userflows.yml` is the
-  non-gating per-commit pipeline that regenerates and publishes them as the docs bundle
-  `@userflows/qits-ci`.
+  `junit-platform.properties` hard-fails surefire. The **non-gating half of
+  `.config/qits/ci-event-release-request.yml`** is what regenerates and publishes them as the docs
+  bundle `@userflows/qits-ci`, versioned by the fold's merged sha — it was a separate
+  `ci-event-userflows.yml` until the single QA pipeline absorbed it, and `gating: false` on the step
+  is the whole of what that file was.
   <br>**`skipITs` stays `true` and this IT does not flip it.** The three docker-backed gates bind to
   the same failsafe run, and `qits.it.excluded-groups` — which would drop them by their `extended`
   tag — is empty by default on purpose. So the opt-in is per-run and per-class,

@@ -1,15 +1,20 @@
 # qits-ci
 
-The **in-repo CI pipeline**: a repository opts in by committing
-`.config/qits/ci-post-receive.yml`; when a push lands, ci reads that config back out of the pushed
-commit, runs each step's script in a fresh container of the step's declared image, and records a
-per-step pass/fail for the push — advisory, queryable over REST.
-
-There is a **second trigger**. A repository may also commit `.config/qits/ci-event-*.yml` files,
+The **in-repo CI pipeline**: a repository opts in by committing `.config/qits/ci-event-*.yml` files,
 each naming a domain event on the platform's bus and a selection over its payload; a matching event
-runs that file's pipeline against the head of `main`. That is the release train — a library
-releases, the repositories that declared an interest build themselves — and every hop of it is
-recorded, with the event that caused it, on the run and in the event log.
+runs that file's pipeline, one fresh container per step of the step's declared image, and records a
+per-step pass/fail — queryable over REST. Two of those files carry the platform's whole build story:
+**`ci-event-release-request.yml`**, the QA pipeline a release request's fold runs and whose verdict
+the release gate holds that fold on, and **`ci-event-release.yml`**, the release build that publishes
+the artifacts off an `SCMRelease`. Beside them runs the release train — a library releases, the
+repositories that declared an interest build themselves — and every hop of it is recorded, with the
+event that caused it, on the run and in the event log.
+
+There is a **second trigger, and nothing on the platform uses it**. The engine still reads
+`.config/qits/ci-post-receive.yml` back out of a pushed commit and runs it for the push, exactly as
+this document describes; **no repository ships that file any more**. Per-push CI was retired on
+2026-09-04 in favour of the release-request QA pipeline, and the push path is documented here because
+it is live code rather than because anything exercises it.
 
     git submodule update --init   # the Angular client at service/src/main/webui
     mvn verify                    # resolves qits-eventstream 1.0.0 from local qits-artifacts
@@ -288,10 +293,12 @@ records nothing, so a force-push cannot leave a red run blaming a commit whose b
 broken. The event path lists `.config/qits/` at `main`, takes the head from the header, and reads
 each file **at that sha**, so a push mid-evaluation cannot mix two commits into one run.
 
-## The file a repository commits
+## The push pipeline file: `.config/qits/ci-post-receive.yml`
 
-`.config/qits/ci-post-receive.yml` is a list of steps and nothing else. Everything additive since
-has stayed additive over that core:
+`ci-post-receive.yml` is a list of steps and nothing else, and everything additive since has stayed
+additive over that core. **No repository commits one today** — see the note at the top of this file —
+but the engine reads it unchanged, and the `steps:` grammar below is shared verbatim with the event
+trigger files every pipeline on the platform is now written as:
 
 ```yaml
 steps:
@@ -482,33 +489,34 @@ shape whichever way its run arrived. `$QITS_CI_REPOSITORY_URL` — what the chec
 the same rule: the public address when the pair is there, the id-addressed one when it is not.
 
 **`$QITS_WORKSPACES_URL` is injected on the same reading**, and it is qits-workspaces' root —
-scheme, host and port, no path. A step that asks for its own repository to be released after the
-tests it follows went green POSTs to `$QITS_WORKSPACES_URL/workspaces/api/branches/release`
-with `?projectId=$QITS_CI_PROJECT_ID&repositoryName=$QITS_CI_REPO_NAME` — the door takes the
-**public** pair and refuses the storage id above the seam; the path is the caller's to spell, and
-the address is never a literal in a pipeline. Like the npm pair and
-unlike `$QITS_REGISTRY`, it is dialled by the step container itself over the shared network, so the
-in-network alias is the value that is right for it.
+scheme, host and port, no path. It existed for one caller: a step that asked for its own repository
+to be released POSTed to that service's release door once the tests it followed went green. **That
+door is retired.** Releasing is a *release request* against qits-projects now — `POST
+/projects/api/repositories/<repoId>/release-requests` — which folds the request's sources onto
+`release/<id>`, gates the fold on the QA pipeline this engine runs, and lets Auto Release stamp the
+version and announce `SCMRelease`. No pipeline step opens one, and no qits-projects address is
+injected into a step container today. The variable stays because it is a step's only address for
+qits-workspaces; like the npm pair and unlike `$QITS_REGISTRY`, it is dialled by the step container
+itself over the shared network, so the in-network alias is the value that is right for it.
 
-**That POST must carry a bearer.** qits-workspaces runs with `QITS_AUTH_MACHINE_REQUIRED=true`, so
-an unauthenticated call is answered 401 — and because the release is the *last* leg of the
-maintenance bump train, a step that omits the header builds green and then strands its bump on its
-branch, silently. The credential is the run's own commissioned client, the same pair the docker
-block hands buildx and the same pair `qits-git-credential` exchanges: `POST
+**A step calling any platform service must carry a bearer**, and the recipe the retired release leg
+established is the general one. Services run with `QITS_AUTH_MACHINE_REQUIRED=true`, so an
+unauthenticated call is answered 401. The credential is the run's own commissioned client, the same
+pair the docker block hands buildx and the same pair `qits-git-credential` exchanges: `POST
 $QITS_GIT_AUTH_TOKEN_URL` with `grant_type=client_credentials`, HTTP Basic
-`$QITS_COMMISSIONED_CLIENT_ID:$QITS_COMMISSIONED_CLIENT_SECRET`, and an `audience` naming
-qits-workspaces. `$QITS_GIT_AUTH_TOKEN_URL` is the idp's plain token endpoint despite its name —
+`$QITS_COMMISSIONED_CLIENT_ID:$QITS_COMMISSIONED_CLIENT_SECRET`, and an `audience` naming the callee.
+`$QITS_GIT_AUTH_TOKEN_URL` is the idp's plain token endpoint despite its name —
 git's helper was merely its first caller, and it is the only idp address a step is given. The
-audience is not injected today; a step derives it from the host of `$QITS_WORKSPACES_URL`, which is
-the service alias qits-workspaces checks as its `QITS_AUTH_MACHINE_AUDIENCE`. A step that finds no
+audience is not injected; a step derives it from the host of the service's URL, which is the
+service alias that service checks as its `QITS_AUTH_MACHINE_AUDIENCE`. A step that finds no
 commissioned pair should send no header rather than fail — a deployment that commissions nothing
 has machine auth off too.
 
-## The other file a repository commits: `.config/qits/ci-event-*.yml`
+## The file every repository commits: `.config/qits/ci-event-*.yml`
 
-A push is not the only thing that can run a pipeline. A repository may also commit **event
-triggers**: files that name a domain event off the platform's bus and a selection over its payload,
-and run their own pipeline when both hold. The motivating shape is the release train — a library
+A push is not the only thing that can run a pipeline, and since 2026-09-04 it is not the thing that
+does. A repository commits **event triggers**: files that name a domain event off the platform's bus
+and a selection over its payload, and run their own pipeline when both hold. The motivating shape is the release train — a library
 releases, every consuming SPA's event pipeline commits the version bump, each SPA's own release
 fires the pipelines of the services embedding it — where each hop is one repository declaring, in
 its own tree, which upstream events it cares about.
@@ -573,9 +581,9 @@ steps:
   `SCMPublishTag` — cannot use `checkout:`; tag pipelines keep their script-level
   `git fetch refs/tags/…` dance.
 - **Decide at main, build at the event's commit.** Discovery, parsing and `when:` still read
-  `main`'s head — a branch cannot change its own event pipeline until merged. Repositories that
-  need per-commit pipeline self-description keep `ci-post-receive.yml`, which reads config at the
-  pushed sha.
+  `main`'s head — a branch cannot change its own event pipeline until merged. Per-commit pipeline
+  self-description is the one thing only `ci-post-receive.yml` gives, since it reads config at the
+  pushed sha; no repository takes that trade any more.
 - **A payload the paths do not resolve in is one WARN and no run** — there is no truthful
   (branch, sha) pair to record — and only that file's: the repository's other triggers still
   evaluate. Resolved values are validated as identifiers before they reach a row, a clone URL or an
@@ -712,7 +720,7 @@ parse error rather than a comparison against `"yes"`.
 what keeps every `repoId: { exact: qits-blobstore }` and every `repository: { exact: qits-blobstore }`
 in the estate working unedited after the identity cutover, where those id fields became opaque
 storage UUIDs. Two spellings because two services publish them: `repoId`/`repoName` on an `SCM*`
-event out of qits-githost, `repository`/`repositoryName` on an `SCMRelease` out of qits-workspaces.
+event out of qits-githost, `repository`/`repositoryName` on an `SCMRelease` out of qits-projects.
 The alias is the **exact top-level path only** — `repository.url` and `outer.repository` resolve
 literally, so a payload that means something else by the word is untouched.
 
@@ -737,11 +745,12 @@ repository's others.**
 > worth knowing.** It triggers on `SCMRelease` and publishes `SoftwareRelease` — two names, so the
 > circle does not close. Widen that `when:` to the event it publishes and it does.
 >
-> **The second shape needs no bus at all, and it is new with `branches:`.** A step bound to `prefix:
-> maintenance/` whose script force-pushes a `maintenance/*` ref re-triggers its own pipeline through
-> post-receive — a loop with no event, no trigger file and no dedupe anywhere near it. The release
-> train's own step cannot: it pushes only through qits-workspaces' release door, which targets
-> `main`.
+> **The second shape needs no bus at all, and it needs `branches:`.** A step bound to `prefix:
+> maintenance/` in a *push* pipeline whose script force-pushes a `maintenance/*` ref re-triggers its
+> own pipeline through post-receive — a loop with no event, no trigger file and no dedupe anywhere
+> near it. Nothing can reach it today, for the reason the top of this file gives: no repository ships
+> a `ci-post-receive.yml`, and the release train's own steps push no refs at all — a release is a
+> release request, and qits-projects is what folds it, tags it and announces it.
 >
 > **`checkout:` recreates that second shape with no post-receive file in sight.** A
 > `ci-event-*.yml` on `SCMPublishCommit` whose step pushes a commit re-triggers itself through the
@@ -896,7 +905,7 @@ that records them (`consumerId` `ci-release-facts`). A boot sweep pairs anything
 An announcement is published before its row is marked, so the failure this favours is announcing
 twice rather than not at all.
 
-The event's name and its three payload fields are strings on this side — qits-workspaces publishes
+The event's name and its three payload fields are strings on this side — qits-projects publishes
 no vocabulary jar — and `ScmReleaseContractTest` is what keeps them honest: a transcription of that
 record, named against its source file, serialized by the real `CanonicalJson` and driven through the
 real listener. Rename a field there and it is renamed here in the same campaign.
@@ -1486,7 +1495,7 @@ throwaway containers; a workspace is never involved.
 
 Retries, a non-advisory gate, and clone/dependency caching across the per-step containers are
 follow-ups, not omissions of the extraction. Per-step timeouts are not: a step may declare
-`timeout-seconds:` in `.config/qits/ci-post-receive.yml`, and one that declares none gets
+`timeout-seconds:` in its `.config/qits/` pipeline file, and one that declares none gets
 `qits.ci.step-timeout-seconds` — **30 minutes**. A step that hits its deadline is aborted, recorded
 `TIMED_OUT` rather than `FAILED`, and the rest are `SKIPPED`; the run finishes `TIMED_OUT` too,
 because running out of time is not a pipeline verdict.

@@ -24,7 +24,9 @@
 # (docs/project-setup-quinoa-angular.md), which excludes the client's dist/ as well: here dist/ is
 # the PAYLOAD. Since the webui took a dependency on @qits/ui-components — which exists only on the
 # platform's own npm registry, reachable from no address a docker build has — the bundle is built
-# BEFORE this image by .config/qits/ci-post-receive.yml, on qits-net where that registry answers.
+# BEFORE this image by the pipeline step that runs `docker build` — the gating half of
+# .config/qits/ci-event-release-request.yml, and .config/qits/ci-event-release.yml on a release — on
+# qits-net where that registry answers.
 # Excluding dist/ would fail the build at the `test -f` guard on the mvnw line.
 **/node_modules
 service/src/main/webui/.angular
