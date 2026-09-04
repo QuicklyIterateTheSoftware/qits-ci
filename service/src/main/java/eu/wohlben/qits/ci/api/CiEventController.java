@@ -3,9 +3,12 @@ package eu.wohlben.qits.ci.api;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.auth.MachineAuth;
+import eu.wohlben.qits.auth.MachineIdentity;
 import eu.wohlben.qits.auth.QitsClaims;
 import eu.wohlben.qits.ci.control.CiEventTriggerService;
 import eu.wohlben.qits.ci.error.BadRequestException;
+import io.quarkus.security.ForbiddenException;
+import io.quarkus.security.identity.SecurityIdentity;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
@@ -43,16 +46,49 @@ import org.jboss.logging.Logger;
  *
  * <h2>What the guard names</h2>
  *
- * <p><b>The manual trigger names no repository, so it demands them all</b> — {@code
- * requireProject(QitsClaims.ANY)}, a token granted {@code project=*}. An event is evaluated against
- * every candidate repository, so the narrowest honest grant for it is every project rather than one,
- * and a token scoped to a single repository is a 403 here.
+ * <p><b>It demanded {@code project=*} and it does not any more.</b> The argument was sound and its
+ * premise expired: an event names no repository, so the call is evaluated against every candidate,
+ * so the narrowest honest grant for it was every project — <em>because qits-ci could not name a
+ * project</em>. It can. A candidate is a {@code CiRepoRef} carrying {@code (repoId, projectId,
+ * name)}, and with {@code qits.ci.projects-url} set the catalogue is qits-projects' own listing, so
+ * "which project is this repository in" is a question this service answers on every evaluation
+ * already. The line in {@code SoftwareRelease}'s comment — "no projectId, qits-ci never learns one"
+ * — is two campaigns old.
  *
- * <p><b>qits-ci cannot name a project</b>, which is why the claim it reads is the coarse one. It has
- * no project entity, no lookup and no qits-projects client; {@code ci_run.repo_id} is a plain string
- * with no relation to anything (see V1's own comment, {@code CiCandidateRepos}, and {@code
- * SoftwareRelease}: "no projectId — qits-ci never learns one"). Revisit that when qits-ci gains a
- * real project seam — and change the grants in the same commit.
+ * <p>So the door admits a <b>project-scoped</b> machine caller, and what it grants is exactly what
+ * the token says: the evaluation is narrowed to the repositories the catalogue places in that
+ * project. A repository of another project is never asked, cannot match and cannot be made to run —
+ * <b>refused by construction rather than by a check</b>, which is the shape to prefer for a door
+ * whose request names no target. Measured 2026-09-04: a commissioned client holding {@code
+ * qits:system} was 403 here while every other {@code /ci/api} read answered the same bearer, which
+ * made the documented manual re-fire mechanism unusable by exactly the callers that need it — and
+ * the claim that token was refused over turned out to be one qits-idp never minted for it at all,
+ * which is the fifth arm of {@link #scopeOf()}.
+ *
+ * <p>Four things travel with that:
+ *
+ * <ul>
+ *   <li><b>{@code project=*} is unchanged</b> — the whole catalogue, platform pipelines included.
+ *   <li><b>A project qits-ci cannot place any repository in is a 403</b>, not an empty 200: the
+ *       token covers nothing here, and saying "evaluated, matched none" would read as a statement
+ *       about the event. That is also what an unreachable qits-projects listing produces for a
+ *       scoped caller, which is the fail-closed direction — a listing that cannot name projects
+ *       narrows a scoped call to nothing rather than widening it to everybody.
+ *   <li><b>Platform pipelines are not part of a scoped evaluation.</b> One repository's file acting
+ *       on the whole catalogue is a platform-wide act, and {@code project=*} is the honest grant for
+ *       it.
+ *   <li><b>A token with no {@code project} claim is admitted on a platform-tier role</b>, and
+ *       refused without one. That is the arm the live 403 actually landed on — the platform's
+ *       commissioned credentials carry no structured claims at all — and the argument for it is in
+ *       {@link #scopeOf()}, which is where to read before changing any of this.
+ * </ul>
+ *
+ * <p><b>The guard sits on the machine arm, like {@code CiRunController.cancelReleaseRequestRuns}'s
+ * does</b>, because this route has two real callers. A machine arrives with a bearer and is judged
+ * on its claims; an operator arrives on the edge's forwarded {@code X-Qits-User}/{@code
+ * X-Qits-Roles} session, carries no token at all, and is judged by the roles — which is why the
+ * method names the pair {@code {qits:admin, qits:system}} the cancellation names, rather than the
+ * class's machine-only role. A person invoking this on purpose is what the whole operation is for.
  */
 @Path("/events")
 @Produces(MediaType.APPLICATION_JSON)
@@ -70,6 +106,13 @@ public class CiEventController {
   @Inject ObjectMapper objectMapper;
 
   @Inject MachineAuth machineAuth;
+
+  /**
+   * Which caller this is, and nothing more. {@code isAnonymous} is not consulted anywhere here: what
+   * the guard turns on is whether a validated machine token is present, which is a different fact
+   * from whether the request has a name for an audit row.
+   */
+  @Inject SecurityIdentity identity;
 
   /** One domain event, supplied by the caller instead of by the bus. */
   public record TriggerEventRequest(
@@ -157,12 +200,14 @@ public class CiEventController {
    * type: the engine {@code readTree}s it and walks it, and inventing a canonicalization here would
    * be a second wire format.
    *
-   * <p>The guard demands a token granted every project ({@code project=*}). This call names no
-   * repository — it is evaluated against every candidate — so the repository-scoped grant it would
-   * need is "all of them".
+   * <p>The guard is the class javadoc's: a machine caller is evaluated against its own project's
+   * repositories, {@code project=*} against every one of them, and an operator's forwarded session
+   * against every one of them too. A scoped caller's 200 therefore means "every repository of your
+   * project was asked", and {@code repositoriesRead} is the count of those.
    */
   @POST
   @Path("/trigger")
+  @jakarta.annotation.security.RolesAllowed({"qits:admin", "qits:system"})
   @Operation(summary = "Run every event pipeline that selects a caller-supplied domain event")
   @APIResponse(
       responseCode = "200",
@@ -171,6 +216,11 @@ public class CiEventController {
   @APIResponse(
       responseCode = "400",
       description = "Blank name, missing payload, or an unparseable timestamp or id")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "The token covers no repository here — its project claim names a project this instance"
+              + " can place no repository in")
   @APIResponse(
       responseCode = "503",
       description = "Not evaluated — no candidate repository could be read. Retry.",
@@ -188,13 +238,23 @@ public class CiEventController {
     String eventId = eventId(request.eventId());
     Instant occurredAt = occurredAt(request.occurredAt());
 
-    machineAuth.requireProject(QitsClaims.ANY);
+    String projectScope = scopeOf();
     CiEventTriggerService.Evaluation done;
     try {
       done =
           triggers.evaluateNow(
               new CiEventTriggerService.Arrival(
-                  eventId, request.name(), occurredAt, payloadText(request.payload())));
+                  eventId, request.name(), occurredAt, payloadText(request.payload())),
+              projectScope);
+    } catch (CiEventTriggerService.NoRepositoriesInProject coversNothing) {
+      // A definite answer about the caller, so it is a refusal rather than the 503 below: this
+      // instance holds repositories and none of them is that project's. Named ahead of the general
+      // catch, which exists for evaluations that did not happen.
+      LOG.warnf(
+          "Event %s (%s) was refused: the caller's project %s holds no repository this instance can"
+              + " name",
+          eventId, request.name(), coversNothing.project());
+      throw new ForbiddenException("Token project claim covers no repository qits-ci can name");
     } catch (RuntimeException notEvaluated) {
       // The one thing this endpoint may never do is answer 2xx for an event it did not evaluate:
       // nothing will redeliver it. So the caller is told to come back, loudly.
@@ -212,6 +272,75 @@ public class CiEventController {
       return unavailable(result);
     }
     return Response.ok(result).build();
+  }
+
+  /**
+   * The platform-tier roles, in the two spellings qits-platform-idp grants them.
+   *
+   * <p>They are what a credential that acts <em>for the platform</em> carries, as against one that
+   * acts for a project — the same distinction {@code qits-platform:admin} draws on the deployments
+   * read surface. Spelled here rather than taken from {@code QitsClaims}, like every other role on
+   * this service's annotations, because a role is a string qits-idp issues and this repository holds
+   * no vocabulary for it.
+   */
+  private static final String PLATFORM_SYSTEM_ROLE = "qits-platform:system";
+
+  private static final String PLATFORM_ADMIN_ROLE = "qits-platform:admin";
+
+  /**
+   * The guard, and the whole of it: what this caller may have the event evaluated against.
+   *
+   * <p>{@code null} is every project; a non-null value narrows the evaluation to it. The order of
+   * the questions is the contract and each one has a status code behind it:
+   *
+   * <ol>
+   *   <li><b>Not a machine</b> — the operator's forwarded session, already judged by this method's
+   *       roles. Every project, exactly as the cancellation's forwarded arm is trusted.
+   *   <li><b>{@link MachineAuth#require()}</b> — 401 with no token once the gate is on, 403 for one
+   *       addressed to another service. Presence and audience only; the claim below is this
+   *       method's question rather than the library's, because "granted some project" is not an
+   *       equality check.
+   *   <li><b>{@code project=<p>}</b> — that project, and the narrowing is what admits the caller.
+   *   <li><b>{@code project=*}</b> — every project. Read on the token side only, so a caller cannot
+   *       widen its own check by naming {@code "*"} as a target: this method never compares it to
+   *       one.
+   *   <li><b>No {@code project} claim at all</b> — the token is not project-scoped, so the door asks
+   *       the other half of what qits-idp issues and demands a <b>platform-tier role</b>. See below.
+   * </ol>
+   *
+   * <p><b>That last arm is a ruling and it is the one to read before changing anything here.</b>
+   * "An absent claim is a mismatch, never a wildcard" is {@code MachineAuth.requireClaim}'s rule and
+   * it stays true of it: that method answers "does your claim cover <em>this target</em>", and for
+   * that question absence must never mean yes. This door asks a different question — "what may I
+   * evaluate <em>for</em> you" — and the platform's own answer, measured 2026-09-04, is that its
+   * agent and operator credentials carry <b>no structured claims at all</b>: a commissioned
+   * workspace client's token holds {@code groups} of {@code qits:system}, {@code
+   * qits-platform:system} and {@code qits:admin}, and nothing else, and it pushes protected refs at
+   * qits-githost on exactly that. Demanding a claim qits-idp does not mint made this the one door in
+   * the service no real machine caller could open, while {@code POST /ci/api/runs/{runId}/retry} —
+   * which starts a build for any repository at all — has always taken a role and no claim.
+   *
+   * <p>So an unscoped machine caller is admitted <b>on the platform-tier role</b> and not on the
+   * ordinary one. A project-scoped client that holds {@code qits:system} alone still cannot act
+   * across the catalogue: it must carry its {@code project} and gets narrowed to it. What widened is
+   * exactly the set of callers that already hold a platform-wide credential.
+   */
+  private String scopeOf() {
+    if (!MachineIdentity.isMachine(identity)) {
+      return null;
+    }
+    machineAuth.require();
+    String project = MachineIdentity.claim(identity, QitsClaims.PROJECT).orElse(null);
+    if (project == null) {
+      if (!identity.hasRole(PLATFORM_SYSTEM_ROLE) && !identity.hasRole(PLATFORM_ADMIN_ROLE)) {
+        throw new ForbiddenException(
+            "Token carries no "
+                + QitsClaims.PROJECT
+                + " claim and no platform-tier role, so it names nothing to evaluate");
+      }
+      return null;
+    }
+    return QitsClaims.ANY.equals(project) ? null : project;
   }
 
   /** 503 with the same body, and the standard way to say when to come back. */

@@ -59,19 +59,32 @@ import org.jboss.logging.Logger;
  * copy of the log. The engine's real selection stays where it can afford to be wrong — inside {@code
  * CiEventTriggerService}, per candidate repository, with per-repository containment.
  *
- * <h2>What {@link #onFrame} does, and the window it leaves open</h2>
+ * <h2>What {@link #onFrame} does, and the window that used to be open</h2>
  *
  * <p>It enqueues and returns. The caller is the bus's websocket worker (or the catch-up sweeper),
  * and evaluation reads the git host once per candidate repository — doing that here would stall the
  * whole subscription behind it, and it would hold the claiming transaction open across an HTTP
  * fan-out.
  *
- * <p><b>State the cost plainly: the claim commits when the event is ACCEPTED for evaluation, not
- * when the run row exists.</b> A crash in the gap between the two loses that event, which is a
- * narrower guarantee than the seam's "exactly-once effect" and is the deliberate trade for keeping
- * the fan-out off the dispatch thread. Everything either side of the gap is covered: a full queue is
- * a failure rather than a shrug (below), and an accepted run becomes a {@code QUEUED} row that
- * survives a restart on its own.
+ * <p><b>The cost that used to be stated here has been PAID rather than restated.</b> It read: the
+ * claim commits when the event is accepted for evaluation, not when the run row exists, so a crash
+ * in the gap loses that event — a narrower guarantee than the seam's "exactly-once effect", traded
+ * for keeping the fan-out off the dispatch thread. On 2026-09-04 a qits-ci redeploy landed in that
+ * gap: three release requests' {@code ReleaseRequestChanged} were claimed, the watermark moved past
+ * them, no QA run was ever recorded, and the requests hung PENDING under a gate that requires
+ * verdicts.
+ *
+ * <p>{@code CiEventTriggerService.onEvent} now makes the <b>acceptance</b> durable before it reports
+ * one — a {@code ci_owed_event} row on ci's own datasource, cleared when the evaluation returns —
+ * and sweeps at boot and on a schedule re-evaluate what a dead process left owed. So {@code true}
+ * out of the engine means "this event is recorded as work that must happen", which is what this
+ * listener has always taken it to mean, and the claim it settles is now settling something. The
+ * ledger's own rules are that class's javadoc; what matters here is that nothing about this method
+ * changed and the guarantee under it did.
+ *
+ * <p>Either side of the old gap is covered as it always was: a full queue is a failure rather than a
+ * shrug (below), and an accepted run becomes a {@code QUEUED} row that survives a restart on its
+ * own.
  *
  * <p><b>Duplicate delivery is now settled twice over, and both nets stay.</b> The claim row makes one
  * event reach {@code onEvent} at most once whatever mix of live frame and catch-up row produced the

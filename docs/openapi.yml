@@ -264,6 +264,9 @@ paths:
         "400":
           description: "Blank name, missing payload, or an unparseable timestamp or\
             \ id"
+        "403":
+          description: The token covers no repository here — its project claim names
+            a project this instance can place no repository in
         "503":
           description: Not evaluated — no candidate repository could be read. Retry.
           content:
@@ -272,12 +275,11 @@ paths:
                 $ref: "#/components/schemas/TriggerEventResult"
         "401":
           description: Not Authorized
-        "403":
-          description: Not Allowed
       tags:
       - Ci Event Controller
       security:
       - SecurityScheme:
+        - qits:admin
         - qits:system
   /ci/api/repositories:
     get:
@@ -526,4 +528,4 @@ paths:
         - qits:admin
 info:
   title: qits-ci API
-  version: 2026.903.100706
+  version: 2026.904.174454

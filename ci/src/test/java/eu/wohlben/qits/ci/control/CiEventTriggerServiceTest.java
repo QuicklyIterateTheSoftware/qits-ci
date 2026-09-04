@@ -10,8 +10,13 @@ import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerFile;
 import eu.wohlben.qits.ci.entity.CiRun;
 import eu.wohlben.qits.ci.entity.CiRunStatus;
 import eu.wohlben.qits.ci.entity.CiTriggerType;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+import eu.wohlben.qits.ci.entity.CiOwedEvent;
+import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -46,6 +51,17 @@ public class CiEventTriggerServiceTest extends CiTestSupport {
       steps:
         - image: alpine:3
           script: echo bump
+      """;
+
+  /** The platform's one QA pipeline, in the shape a repository really commits it. */
+  private static final String RELEASE_REQUEST_PATH = ".config/qits/ci-event-release-request.yml";
+
+  private static final String RELEASE_REQUEST_TRIGGER =
+      """
+      event: ReleaseRequestChanged
+      steps:
+        - image: alpine:3
+          script: echo qa
       """;
 
   private static final String PAYLOAD =
@@ -510,6 +526,209 @@ public class CiEventTriggerServiceTest extends CiTestSupport {
       awaitEvaluatorDrained();
       runService.awaitIdle();
     }
+  }
+
+  // --- the project scope: what a machine caller granted ONE project may have evaluated ---
+
+  /**
+   * <b>The manual trigger's guard, from the engine's side.</b> The door used to demand {@code
+   * project=*} because qits-ci could not name a project; a candidate carries one now, so a
+   * project-scoped caller is admitted and the evaluation is narrowed to that project's repositories.
+   *
+   * <p>What makes it a guard rather than a filter: the other project's repository is never asked, so
+   * there is no path from a scoped call to a run in it — refused by construction rather than by a
+   * check somebody has to remember to write.
+   */
+  @Test
+  public void aProjectScopedEvaluationAsksOnlyThatProjectsRepositories() throws Exception {
+    String foreignRepoId = "foreign-" + UUID.randomUUID().toString().substring(0, 8);
+    CiRepoRef mine = CiRepoRef.of(repoId, "project-alpha", "alpha-consumer");
+    CiRepoRef theirs = CiRepoRef.of(foreignRepoId, "project-beta", "beta-consumer");
+    fakeCandidates.setRefs(mine, theirs);
+    fakeConfig.putTriggers(repoId, "main", HEAD, new EventTriggerFile(TRIGGER_PATH, TRIGGER));
+    fakeConfig.putTriggers(foreignRepoId, "main", HEAD, new EventTriggerFile(TRIGGER_PATH, TRIGGER));
+
+    CiEventTriggerService.Evaluation done =
+        engine.evaluateNow(
+            arrival(UUID.randomUUID().toString(), "BuildSuccessful", PAYLOAD), "project-alpha");
+
+    assertEquals(1, done.repositoriesRead(), "one project, one candidate asked");
+    assertEquals(1, done.runIds().size());
+    runService.awaitIdle();
+    forgetLoadedEntities();
+    assertEquals(1, runService.runsFor(repoId).size());
+    assertEquals(
+        List.of(),
+        runService.runsFor(foreignRepoId),
+        "a repository of another project is not evaluated, so it cannot run");
+  }
+
+  @Test
+  public void anUnscopedEvaluationStillAsksEverybody() throws Exception {
+    String otherRepoId = "other-" + UUID.randomUUID().toString().substring(0, 8);
+    fakeCandidates.setRefs(
+        CiRepoRef.of(repoId, "project-alpha", "alpha-consumer"),
+        CiRepoRef.of(otherRepoId, "project-beta", "beta-consumer"));
+    fakeConfig.putTriggers(repoId, "main", HEAD, new EventTriggerFile(TRIGGER_PATH, TRIGGER));
+    fakeConfig.putTriggers(otherRepoId, "main", HEAD, new EventTriggerFile(TRIGGER_PATH, TRIGGER));
+
+    CiEventTriggerService.Evaluation done =
+        engine.evaluateNow(arrival(UUID.randomUUID().toString(), "BuildSuccessful", PAYLOAD), null);
+
+    assertEquals(2, done.repositoriesRead(), "null scope is every project, exactly as before");
+    assertEquals(2, done.runIds().size());
+    runService.awaitIdle();
+  }
+
+  /**
+   * A scope this instance can place no repository in is a <b>refusal</b>, not an empty answer: the
+   * catalogue is not empty, so "nothing matched" would be a statement about the event when the truth
+   * is a statement about the caller. The endpoint turns it into a 403.
+   */
+  @Test
+  public void aScopeNoCandidateBelongsToIsRefused() {
+    fakeCandidates.setRefs(CiRepoRef.of(repoId, "project-alpha", "alpha-consumer"));
+    seedTrigger(TRIGGER_PATH, TRIGGER);
+
+    CiEventTriggerService.NoRepositoriesInProject refused =
+        assertThrows(
+            CiEventTriggerService.NoRepositoriesInProject.class,
+            () ->
+                engine.evaluateNow(
+                    arrival(UUID.randomUUID().toString(), "BuildSuccessful", PAYLOAD),
+                    "project-beta"));
+
+    assertEquals("project-beta", refused.project());
+    assertEquals(List.of(), runService.runsFor(repoId));
+  }
+
+  /**
+   * The fail-closed half. A candidate qits-ci knows only from its own run rows carries no project,
+   * and so does every candidate when the qits-projects listing is unreachable and the git host's
+   * id-only listing is all there is. Unprovable is not "yours": a scoped caller reaches none of them,
+   * where the alternative — treating an unnamed project as a match — would widen a scoped token to
+   * the whole catalogue exactly when the platform is least able to say otherwise.
+   */
+  @Test
+  public void aCandidateWhoseProjectIsUnknownIsInNoScope() {
+    fakeCandidates.set(repoId);
+    seedTrigger(TRIGGER_PATH, TRIGGER);
+
+    assertThrows(
+        CiEventTriggerService.NoRepositoriesInProject.class,
+        () ->
+            engine.evaluateNow(
+                arrival(UUID.randomUUID().toString(), "BuildSuccessful", PAYLOAD), "project-alpha"));
+  }
+
+  // --- the owed-event ledger: an accepted event survives the process that accepted it ---
+
+  /**
+   * The acceptance is durable before it is reported, and settled when the evaluation returns.
+   *
+   * <p>Staged with the worker wedged, which is the only way to observe the middle of it: the row is
+   * written by {@code onEvent} on the caller's thread and cleared by the evaluation on the trigger
+   * worker, so parking the worker holds the ledger open.
+   */
+  @Test
+  public void anAcceptedEventIsOwedUntilItHasBeenEvaluated() throws Exception {
+    seedTrigger(TRIGGER_PATH, TRIGGER);
+    String eventId = UUID.randomUUID().toString();
+    fakeCandidates.wedgeTheTriggerWorker();
+    try {
+      assertTrue(engine.onEvent(arrival(eventId, "BuildSuccessful", PAYLOAD)));
+      fakeCandidates.awaitTriggerWorkerWedged();
+
+      CiOwedEvent recorded = owedRow(eventId);
+      assertNotNull(recorded, "the acceptance is on the record before the evaluation happens");
+      assertEquals("BuildSuccessful", recorded.eventName);
+      assertEquals(PAYLOAD, recorded.payload);
+      assertEquals(List.of(), runService.runsFor(repoId), "and no run exists yet");
+    } finally {
+      fakeCandidates.freeTheTriggerWorker();
+    }
+    engine.awaitIdle();
+    runService.awaitIdle();
+    forgetLoadedEntities();
+
+    assertEquals(1, runService.runsFor(repoId).size());
+    assertNull(owedRow(eventId), "an evaluated event is owed by nobody");
+  }
+
+  /**
+   * <b>The 2026-09-04 loss, and the whole reason the ledger exists.</b>
+   *
+   * <p>Three release requests created within a second of a qits-ci redeploy never got a QA run: the
+   * dying instance claimed their {@code ReleaseRequestChanged}, the watermark moved past it, and the
+   * evaluation that would have written the run row never ran. The claim is on the eventstream
+   * datasource and the run row is on ci's, so the two cannot be one transaction — what can be, and
+   * now is, is the acceptance.
+   *
+   * <p>This stages exactly that state — the acceptance committed, no run anywhere, the process that
+   * would have evaluated it gone — and asserts the sweep a later process runs recovers it.
+   */
+  @Test
+  public void anEventClaimedByADeadProcessIsRecoveredBySweepingWhatItLeftOwed() throws Exception {
+    seedTrigger(RELEASE_REQUEST_PATH, RELEASE_REQUEST_TRIGGER);
+    String eventId = UUID.randomUUID().toString();
+    ownedByADeadProcess(eventId, "ReleaseRequestChanged");
+    assertEquals(List.of(), runService.runsFor(repoId), "nothing ran: that is the loss");
+
+    engine.sweepOwed(Instant.now());
+
+    runService.awaitIdle();
+    forgetLoadedEntities();
+    List<CiRun> recorded = runService.runsFor(repoId);
+    assertEquals(1, recorded.size(), "the sweep is what the release request was waiting for");
+    assertEquals(eventId, recorded.get(0).triggerEventId);
+    assertNull(owedRow(eventId), "and it is not owed twice");
+  }
+
+  /**
+   * The sweep is at-least-once and that is safe by construction: {@code unique (trigger_event_id,
+   * repo_id, config_path)} refuses the second run. So a settle that was itself lost — the row still
+   * there for an event whose runs exist — costs a fan-out and nothing else.
+   */
+  @Test
+  public void sweepingAnEventThatAlreadyRanRecordsNoSecondRun() throws Exception {
+    seedTrigger(TRIGGER_PATH, TRIGGER);
+    String eventId = UUID.randomUUID().toString();
+    deliver(arrival(eventId, "BuildSuccessful", PAYLOAD));
+    assertEquals(1, runService.runsFor(repoId).size());
+    ownedByADeadProcess(eventId, "BuildSuccessful");
+
+    engine.sweepOwed(Instant.now());
+
+    runService.awaitIdle();
+    forgetLoadedEntities();
+    assertEquals(1, runService.runsFor(repoId).size(), "the dedupe holds, so the replay is a no-op");
+    assertNull(owedRow(eventId));
+  }
+
+  @Test
+  public void aSweepWithNothingOwedDoesNothingAtAll() {
+    seedTrigger(TRIGGER_PATH, TRIGGER);
+
+    engine.sweepOwed(Instant.now());
+
+    assertEquals(List.of(), runService.runsFor(repoId));
+  }
+
+  /** The state a process that died between the claim and the run leaves in ci's own store. */
+  private void ownedByADeadProcess(String eventId, String eventName) {
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              owedEvents.record(
+                  eventId, eventName, Instant.parse("2026-07-31T12:46:03Z"), PAYLOAD);
+              // Aged past any grace, which is what makes it the periodic sweep's business as well as
+              // the boot sweep's.
+              owedEvents.findById(eventId).acceptedAt = Instant.now().minus(Duration.ofMinutes(30));
+            });
+  }
+
+  private CiOwedEvent owedRow(String eventId) {
+    return QuarkusTransaction.requiringNew().call(() -> owedEvents.findById(eventId));
   }
 
   /**
