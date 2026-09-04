@@ -115,7 +115,9 @@ public class ReleaseJoin {
    * is the <b>preferred</b> half of the join key: after the identity cutover a run's {@code repoId}
    * is an opaque storage UUID while {@code SCMRelease} speaks the platform's public name, so a join
    * that only compared ids would silently never close. The id arm stays as the fallback, and it is
-   * what a pre-cutover platform — where the two agree — closes on.
+   * what a pre-cutover platform — where the two agree — closes on. It is <b>also</b> carried onto the
+   * owed row, for the reason {@code projectId} is: the two together are the address a deploy consumer
+   * reads the released repository's spec at.
    *
    * <p>{@code projectId} is carried for the announcement and for nothing else: it is no part of the
    * join key and no part of any lookup here. It travels because the announcement it ends up in may
@@ -197,6 +199,7 @@ public class ReleaseJoin {
       owed.runId = run.runId();
       owed.repoId = run.repoId();
       owed.projectId = run.projectId();
+      owed.repoName = run.repoName();
       owed.version = run.version();
       owed.packageType = type;
       owed.packageName = artifact.name();
@@ -286,6 +289,7 @@ public class ReleaseJoin {
                         row.runId,
                         row.repoId,
                         row.projectId,
+                        row.repoName,
                         row.version,
                         row.packageType,
                         row.packageName,

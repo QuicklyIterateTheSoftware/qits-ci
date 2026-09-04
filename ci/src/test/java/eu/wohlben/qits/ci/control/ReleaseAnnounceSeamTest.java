@@ -136,6 +136,12 @@ public class ReleaseAnnounceSeamTest extends CiTestSupport {
         npm.projectId(),
         "the project comes off the run's own repository reference, never off the event's payload —"
             + " the event names what released, this names what published");
+    assertEquals(
+        "qits-spa-ui-components",
+        npm.repoName(),
+        "and the public name beside it — a deploy consumer reads the released repository's"
+            + " deployments.yml at /git/<projectId>/<repoName>/blob/…, and the id-addressed"
+            + " fallback is refused to everyone but qits-projects");
     assertEquals("1.4.0", npm.version(), "the version comes out of the triggering event's payload");
     assertEquals("npm", npm.packageType());
     assertEquals("@qits/ui-components", npm.packageName());

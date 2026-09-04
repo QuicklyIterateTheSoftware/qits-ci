@@ -1,0 +1,22 @@
+-- The published artifact says which repository NAME it belongs to, beside the project V10 added.
+--
+-- `SoftwareRelease` gained `repoName`, and the reason is a live failure rather than symmetry:
+-- qits-deployments reads a released repository's deployments.yml name-addressed
+-- (/git/<projectId>/<repoName>/blob/...) when the event carries the name pair, and falls back to
+-- the id-addressed scheme when it does not — which qits-githost's storage-client guard refuses to
+-- everyone but qits-projects. An event carrying projectId and no name therefore reaches the
+-- deployer with an address it is 403'd on, and every bus-driven deploy fails its spec read.
+--
+-- Stored for V10's reason, unchanged: the announcement is NOT always made by the run that owes it.
+-- A tag-triggered run's announcement waits for the SCMRelease, and the boot sweep makes it in a
+-- later process entirely; neither can go back and read ci_run.repo_name. So the value is copied
+-- onto the obligation at the moment it is owed, beside project_id, finished_at and trigger_event_id.
+--
+-- Nullable, no default and no backfill, exactly as project_id is: a run whose candidate repository
+-- was answered id-addressed has no public name at all (ci_run.repo_name is nullable for the same
+-- reason, V5), so absent is an ordinary value and there is nothing an existing row could be filled
+-- with. CanonicalJson's NON_NULL inclusion then leaves the key out of the payload entirely.
+--
+-- Part of no constraint and no index: nothing looks a row up by name. The join key is
+-- (repo_id, version) and stays exactly as it is.
+alter table ci_release_announcement add column repo_name varchar(255);

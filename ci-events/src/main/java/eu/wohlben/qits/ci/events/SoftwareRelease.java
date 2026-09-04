@@ -20,14 +20,14 @@ import java.util.UUID;
  * CausationScope.current()} is a non-consuming read, so N siblings under one parent is an ordinary
  * shape rather than a special case.
  *
- * <p><b>{@code projectId} and {@code repoId} name the repository the way the platform does, and they
- * are additive.</b> This class used to argue that no {@code projectId} belonged here because "qits-ci
- * never learns one" — which stopped being true when a run started carrying its repository's public
- * coordinate ({@code ci_run.project_id}/{@code repo_name}, the identity campaign's V5). A consumer
- * that has to deploy what was published needs {@code (projectId, repoId)} to address the repository
- * at all, and making it look that pair up — against qits-projects, on the event's dispatch thread,
- * for a fact the publisher already holds — is a hop that can fail for a release that cannot. So the
- * pair rides along:
+ * <p><b>{@code projectId}, {@code repoId} and {@code repoName} name the repository the way the
+ * platform does, and they are additive.</b> This class used to argue that no {@code projectId}
+ * belonged here because "qits-ci never learns one" — which stopped being true when a run started
+ * carrying its repository's public coordinate ({@code ci_run.project_id}/{@code repo_name}, the
+ * identity campaign's V5). A consumer that has to deploy what was published needs an address for the
+ * repository at all, and making it look one up — against qits-projects, on the event's dispatch
+ * thread, for a fact the publisher already holds — is a hop that can fail for a release that cannot.
+ * So the coordinate rides along:
  *
  * <ul>
  *   <li>{@code repoId} is the git host's storage id of the repository whose pipeline published. It is
@@ -40,6 +40,13 @@ import java.util.UUID;
  *       carries none, and {@code CanonicalJson}'s {@code NON_NULL} inclusion then leaves the key out
  *       of the payload entirely rather than writing a null. A consumer that needs it must treat
  *       absence as "ask somebody", never as an id.
+ *   <li>{@code repoName} is the repository's public name, and it is the <b>other half of the only
+ *       address that works above the projects↔githost seam</b>: content is read
+ *       {@code /git/<projectId>/<repoName>/blob/…}, and the id-addressed scheme it falls back to is
+ *       guarded — qits-githost's storage-client check refuses it to everyone but qits-projects. So a
+ *       deploy consumer reading a released repository's spec with {@code projectId} alone cannot
+ *       read it at all. <b>Nullable</b> for exactly {@code projectId}'s reason and spelled the same
+ *       way: an id-addressed run has no name, and the key is then absent rather than null.
  * </ul>
  *
  * <p><b>What is deliberately still not here.</b> No {@code branch} — a release is a tag, and the
@@ -69,6 +76,7 @@ public record SoftwareRelease(
     String repository,
     String projectId,
     String repoId,
+    String repoName,
     String version,
     String packageType,
     String packageName,
@@ -86,10 +94,20 @@ public record SoftwareRelease(
       String repository,
       String projectId,
       String repoId,
+      String repoName,
       String version,
       String packageType,
       String packageName,
       Instant occurredAt) {
-    this(null, repository, projectId, repoId, version, packageType, packageName, occurredAt);
+    this(
+        null,
+        repository,
+        projectId,
+        repoId,
+        repoName,
+        version,
+        packageType,
+        packageName,
+        occurredAt);
   }
 }

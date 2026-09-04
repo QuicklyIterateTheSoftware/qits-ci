@@ -25,8 +25,10 @@ import java.time.Instant;
  * since the event existed. Naming the same value twice is what makes the pair additive: every
  * existing consumer's field keeps its exact bytes, and a consumer that needs to address a repository
  * reads a field whose name says what it holds, instead of guessing whether {@code repository} is an
- * id or a name on the platform it happens to be running on. The genuinely new fact is {@code
- * projectId}, which no consumer could have derived from this event at all.
+ * id or a name on the platform it happens to be running on. The genuinely new facts are {@code
+ * projectId} and {@code repoName}, which no consumer could have derived from this event at all —
+ * and which together are the only address a deploy consumer can read a released repository's files
+ * at, since the id-addressed scheme is refused to everyone but qits-projects.
  *
  * <p><b>qits-ci publishes this name and subscribes to nothing under it.</b> The wire name is the
  * simple class name, and qits-workspaces is simultaneously renaming <em>its</em> release event
@@ -44,6 +46,7 @@ public class SoftwareReleaseAnnouncer implements ReleaseAnnouncer {
       String runId,
       String repoId,
       String projectId,
+      String repoName,
       String version,
       String packageType,
       String packageName,
@@ -51,7 +54,7 @@ public class SoftwareReleaseAnnouncer implements ReleaseAnnouncer {
       String triggerEventId) {
     bus.publish(
         new SoftwareRelease(
-            repoId, projectId, repoId, version, packageType, packageName, finishedAt),
+            repoId, projectId, repoId, repoName, version, packageType, packageName, finishedAt),
         CausingEvent.parentOf(triggerEventId, runId));
   }
 }

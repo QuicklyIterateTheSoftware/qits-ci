@@ -52,6 +52,18 @@ public class CiReleaseAnnouncement extends PanacheEntityBase {
   @Column(name = "project_id")
   public String projectId;
 
+  /**
+   * The repository's public name, copied off the run beside {@link #projectId} and carried for the
+   * same reason: {@code (project_id, repo_name)} is the address a consumer reads the released
+   * repository's files at, and neither a later {@code SCMRelease} nor a boot sweep can ask the run
+   * row for it.
+   *
+   * <p>Nullable on exactly the runs {@link #projectId} is null on — an id-addressed candidate has no
+   * public name — and it is <b>not</b> part of the join key, which stays {@code (repo_id, version)}.
+   */
+  @Column(name = "repo_name")
+  public String repoName;
+
   /** Half of the join key, read out of the triggering event — see {@code ReleaseJoin}. */
   @Column(nullable = false)
   public String version;
