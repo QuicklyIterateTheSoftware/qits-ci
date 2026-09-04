@@ -246,9 +246,11 @@ public class ReleaseJoinTest extends CiTestSupport {
    * The project rides on the <b>owed row</b>, which is what makes it survive the gap the join exists
    * for.
    *
-   * <p>{@code SoftwareRelease} carries {@code projectId} and {@code repoId} so a deploy consumer can
-   * address the repository without asking qits-projects on its own dispatch thread. The run knows
-   * both; the announcement is made by whoever closes the join, and in the tag-first order that is the
+   * <p>{@code SoftwareRelease} carries {@code projectId}, {@code repoId} and {@code repoName} so a
+   * deploy consumer can address the repository without asking qits-projects on its own dispatch
+   * thread — and the name half is what makes the address usable at all, since the id-addressed read
+   * is refused to everyone but qits-projects. The run knows all three; the announcement is made by
+   * whoever closes the join, and in the tag-first order that is the
    * {@code SCMRelease} arriving later — a different thread, possibly a different process after a
    * restart, with no access to the run. So the value is copied onto the obligation at green, and this
    * is the order that proves it: had it been read from the run at announce time, this case would
@@ -264,16 +266,23 @@ public class ReleaseJoinTest extends CiTestSupport {
     assertEquals(1, releaseAnnouncer.published().size());
     FakeReleaseAnnouncer.Published published = releaseAnnouncer.published().get(0);
     assertEquals("p-42", published.projectId(), "the project the run recorded, off the owed row");
+    assertEquals(
+        "qits-thing-service",
+        published.repoName(),
+        "and the name beside it — the two are one address, so one surviving the gap without the"
+            + " other would be an address the deployer cannot use");
     assertEquals(repoId, published.repoId(), "and the repository that published it");
   }
 
   /**
-   * An id-addressed run has no project, and the announcement says so by carrying none.
+   * An id-addressed run has neither project nor name, and the announcement says so by carrying
+   * neither.
    *
    * <p>That is the shipped answer for a repository the candidate listing knows only by storage id —
    * every pre-cutover row, and any platform running without {@code qits.ci.projects-url}. The wire
-   * form then omits the key entirely (NON_NULL inclusion), which is the honest spelling of "qits-ci
-   * does not know" and is what stops a consumer reading an invented id.
+   * form then omits both keys entirely (NON_NULL inclusion), which is the honest spelling of "qits-ci
+   * does not know" and is what stops a consumer reading an invented id or building an address it
+   * would be refused on.
    */
   @Test
   public void anIdAddressedRunAnnouncesNoProjectRatherThanAGuessedOne() throws Exception {
@@ -281,6 +290,7 @@ public class ReleaseJoinTest extends CiTestSupport {
 
     assertEquals(1, releaseAnnouncer.published().size());
     assertNull(releaseAnnouncer.published().get(0).projectId());
+    assertNull(releaseAnnouncer.published().get(0).repoName());
   }
 
   // --- fixtures ---------------------------------------------------------------------------------

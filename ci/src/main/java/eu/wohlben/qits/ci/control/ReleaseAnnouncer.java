@@ -47,6 +47,10 @@ public interface ReleaseAnnouncer {
    *     can address the repository without a lookup of its own. <b>Null</b> where the run carries no
    *     public coordinate (an id-addressed candidate, and every row recorded before the identity
    *     campaign); absent is a supported value and must never be invented into one
+   * @param repoName the repository's public name, the other half of that address — a consumer reads a
+   *     released repository's files at {@code /git/<projectId>/<repoName>/…}, and the id-addressed
+   *     scheme it would otherwise fall back to is refused to everyone but qits-projects. <b>Null</b>
+   *     on exactly the runs {@code projectId} is null on, and for the same reason
    * @param version the version, read out of the triggering event's payload — {@code version} on an
    *     {@code SCMRelease}, {@code tagName} on an {@code SCMPublishTag}. qits-ci publishes nothing
    *     when neither is there: the declaration was written for a trigger that cannot feed it.
@@ -63,6 +67,7 @@ public interface ReleaseAnnouncer {
       String runId,
       String repoId,
       String projectId,
+      String repoName,
       String version,
       String packageType,
       String packageName,

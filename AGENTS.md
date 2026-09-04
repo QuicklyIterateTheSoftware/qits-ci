@@ -767,23 +767,29 @@ consumer read it as "the package exists", with an entire upstream build in the g
 
 Four things about that second seam are worth having in front of you:
 
-- **`SoftwareRelease` names the repository three times and that is the additive shape, not a
+- **`SoftwareRelease` names the repository four times and that is the additive shape, not a
   duplication to tidy up.** `repository` is what it always was — the run's `repo_id` — and every
   committed selection and every existing consumer reads it, so it is never repointed. `repoId` is the
-  same string under the name the platform addresses a repository by, and `projectId` is the fact
-  nothing on this event could previously supply. They exist for one reader: a consumer that has to
-  *deploy* what was published needs `(projectId, repoId)` to address the repository at all, and
-  making it look that up — against qits-projects, on its own dispatch thread, for something the
-  publisher already held — adds a hop that can fail to a release that cannot.
-  <br>**`projectId` is carried on the OWED ROW** (`ci_release_announcement.project_id`, V10), beside
-  `finished_at` and `trigger_event_id` and for the identical reason: the announcement is often made
-  by whoever closes the join later — a tag-triggered run waits for the `SCMRelease`, and the boot
-  sweep announces in a later process entirely — and neither can read the run row back.
-  `ReleaseJoinTest.theOwedAnnouncementCarriesTheProjectItWasOwedFor` is the case that fails if it is
-  ever read at announce time instead.
+  same string under the name the platform addresses a repository by, and `projectId`/`repoName` are
+  the facts nothing on this event could previously supply. They exist for one reader: a consumer that
+  has to *deploy* what was published needs an address for the repository at all, and making it look
+  one up — against qits-projects, on its own dispatch thread, for something the publisher already
+  held — adds a hop that can fail to a release that cannot.
+  <br>**`repoName` is the half that decides whether the read is allowed at all**, and it was added
+  after a live incident: qits-deployments reads a released repository's `deployments.yml`
+  name-addressed (`/git/<projectId>/<repoName>/blob/…`) when the event carries the name pair, and
+  falls back to the id-addressed scheme when it does not — which qits-githost's storage-client guard
+  403s for everyone but qits-projects. An event carrying `projectId` and no name therefore reached
+  the deployer with an address it is refused on, and every bus-driven deploy failed its spec read.
+  <br>**Both are carried on the OWED ROW** (`ci_release_announcement.project_id` V10, `repo_name`
+  V11), beside `finished_at` and `trigger_event_id` and for the identical reason: the announcement is
+  often made by whoever closes the join later — a tag-triggered run waits for the `SCMRelease`, and
+  the boot sweep announces in a later process entirely — and neither can read the run row back.
+  `ReleaseJoinTest.theOwedAnnouncementCarriesTheProjectItWasOwedFor` is the case that fails if either
+  is ever read at announce time instead.
   <br>**Null is a supported value and reaches the wire as an ABSENT KEY**, because `CanonicalJson`
-  includes `NON_NULL`. An id-addressed candidate has no project, so "qits-ci does not know" is
-  spelled by the key not being there; writing a null would have made absence a value.
+  includes `NON_NULL`. An id-addressed candidate has neither project nor name, so "qits-ci does not
+  know" is spelled by the keys not being there; writing a null would have made absence a value.
 - **The fan-out is `CiRunService`'s and the port takes one artifact.** N declarations are N calls, so
   a failure costs one announcement rather than the rest. The bus already supports siblings —
   the outbox enqueues one row per event in its own transaction and `CausationScope.current()` is a
@@ -1502,6 +1508,14 @@ release join's tables rather than `ci_run`, and it is the same shape a third tim
 index. It exists because `SoftwareRelease` gained `projectId` and the announcement is **not always
 made by the run that owes it** — see "There are two publishing seams". Nothing looks a row up by
 project; the join key is `(repo_id, version)` and is untouched.
+
+`V11__release_announcement_repo_name.sql` is that same shape a fourth time and its twin:
+`ci_release_announcement.repo_name`, nullable, no default, no backfill, part of no constraint and no
+index. `SoftwareRelease` gained `repoName` because a project id alone is half an address — the
+deployer's name-addressed content read (`/git/<projectId>/<repoName>/blob/…`) is the only one
+qits-githost's storage-client guard lets it make — and the column exists because the announcement
+outlives the run row that knows the name, exactly as V10's does. The two are written and read
+together and should be kept that way; nothing looks a row up by either.
 
 `V1__init.sql` is the rest of the schema. The nine H2 migrations it replaces (V1-V8 plus a Java V9) are
 history in this repository's log and are not a prefix of this lineage: the move off H2 is a

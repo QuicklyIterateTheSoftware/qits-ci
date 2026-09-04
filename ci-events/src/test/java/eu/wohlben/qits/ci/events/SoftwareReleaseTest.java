@@ -19,16 +19,19 @@ import org.junit.jupiter.api.Test;
  * BuildSuccessfulTest} is, for the same reason: an event class is data, and the serializer it is
  * asserted against builds its own mapper precisely so no container is needed to know what it emits.
  *
- * <p><b>The payload below is what every downstream release pipeline reads.</b> Six fields now, byte
+ * <p><b>The payload below is what every downstream release pipeline reads.</b> Seven fields now, byte
  * for byte, in the alphabetical order the canonical form fixes — a change here that is not also a
  * change in the repositories triggering on it is a cross-repo break rather than a refactor.
  *
- * <p><b>{@code projectId} and {@code repoId} were ADDED to those four and nothing was repointed</b>,
- * which is what the two byte assertions below are for: {@code repository} still carries what it
- * always carried, so a consumer selecting on it is unaffected, and the two new keys sit beside it for
- * a consumer that has to address the repository rather than recognise it. The null case has its own
- * test, because "absent" is the shipped answer for a repository the candidate listing knows only by
- * id and a consumer must read it as "ask somebody" rather than as an id.
+ * <p><b>{@code projectId}, {@code repoId} and {@code repoName} were ADDED to the original four and
+ * nothing was repointed</b>, which is what the byte assertions below are for: {@code repository}
+ * still carries what it always carried, so a consumer selecting on it is unaffected, and the new keys
+ * sit beside it for a consumer that has to address the repository rather than recognise it.
+ * {@code repoName} is the one the deployer cannot work without — a released repository's
+ * deployments.yml is read at {@code /git/<projectId>/<repoName>/blob/…}, and the id-addressed
+ * fallback is refused to everyone but qits-projects. The null cases have their own tests, because
+ * "absent" is the shipped answer for a repository the candidate listing knows only by id and a
+ * consumer must read it as "ask somebody" rather than as an address.
  */
 class SoftwareReleaseTest {
 
@@ -38,6 +41,7 @@ class SoftwareReleaseTest {
     return new SoftwareRelease(
         "qits-spa-ui-components",
         "p-1",
+        "qits-spa-ui-components",
         "qits-spa-ui-components",
         "1.4.0",
         "npm",
@@ -79,6 +83,7 @@ class SoftwareReleaseTest {
     assertEquals(
         "{\"packageName\":\"@qits/ui-components\",\"packageType\":\"npm\","
             + "\"projectId\":\"p-1\",\"repoId\":\"qits-spa-ui-components\","
+            + "\"repoName\":\"qits-spa-ui-components\","
             + "\"repository\":\"qits-spa-ui-components\",\"version\":\"1.4.0\"}",
         json.get("payload").asText());
   }
@@ -91,11 +96,19 @@ class SoftwareReleaseTest {
     // it stands.
     SoftwareRelease image =
         new SoftwareRelease(
-            "3f1c-uuid", "p-7", "3f1c-uuid", "2026.8.1", "docker", "qits/qits-stt", PUBLISHED);
+            "3f1c-uuid",
+            "p-7",
+            "3f1c-uuid",
+            "qits-stt-service",
+            "2026.8.1",
+            "docker",
+            "qits/qits-stt",
+            PUBLISHED);
 
     assertEquals(
         "{\"packageName\":\"qits/qits-stt\",\"packageType\":\"docker\",\"projectId\":\"p-7\","
-            + "\"repoId\":\"3f1c-uuid\",\"repository\":\"3f1c-uuid\",\"version\":\"2026.8.1\"}",
+            + "\"repoId\":\"3f1c-uuid\",\"repoName\":\"qits-stt-service\","
+            + "\"repository\":\"3f1c-uuid\",\"version\":\"2026.8.1\"}",
         CanonicalJson.payload(image));
   }
 
@@ -104,9 +117,10 @@ class SoftwareReleaseTest {
    *
    * <p>{@code repository} is unchanged and unrepointed — it is the id it always was — and {@code
    * repoId} is the same string under the name the platform uses for it, which is the whole of why
-   * adding it costs no consumer anything. {@code projectId} is the fact nothing on this event could
-   * previously supply, and the reason a deploy consumer no longer has to ask qits-projects on the
-   * dispatch thread for something the publisher already held.
+   * adding it costs no consumer anything. {@code projectId} and {@code repoName} are the facts
+   * nothing on this event could previously supply, and the reason a deploy consumer no longer has to
+   * ask qits-projects on the dispatch thread for something the publisher already held — {@code
+   * repoName} in particular, because the name-addressed read is the only one it is allowed to make.
    */
   @Test
   void theRepositoryIsAddressableWithoutALookup() {
@@ -114,22 +128,32 @@ class SoftwareReleaseTest {
 
     assertEquals("p-1", event.projectId());
     assertEquals("qits-spa-ui-components", event.repoId());
+    assertEquals("qits-spa-ui-components", event.repoName());
     assertEquals(event.repository(), event.repoId(), "the same value, under both names");
   }
 
   /**
-   * A run whose candidate repository was answered id-addressed carries no project, and the key is
-   * then <b>absent</b> rather than null.
+   * A run whose candidate repository was answered id-addressed carries neither project nor name, and
+   * both keys are then <b>absent</b> rather than null.
    *
    * <p>That is {@code CanonicalJson}'s NON_NULL inclusion doing what the wire rules say, and it is
    * asserted here because it is the shape a consumer actually has to handle: "the key is not there"
-   * is the only honest spelling of "qits-ci does not know", and a null would have been a value.
+   * is the only honest spelling of "qits-ci does not know", and a null would have been a value. A
+   * deploy consumer reading this one has no name-addressed read available to it and must say so,
+   * rather than building an id-addressed url the git host will refuse it.
    */
   @Test
-  void aRunWithNoProjectPublishesNoProjectKeyAtAll() {
+  void aRunWithNoPublicCoordinatePublishesNeitherKeyAtAll() {
     SoftwareRelease unaddressed =
         new SoftwareRelease(
-            "legacy-repo", null, "legacy-repo", "1.4.0", "npm", "@qits/ui-components", PUBLISHED);
+            "legacy-repo",
+            null,
+            "legacy-repo",
+            null,
+            "1.4.0",
+            "npm",
+            "@qits/ui-components",
+            PUBLISHED);
 
     assertEquals(
         "{\"packageName\":\"@qits/ui-components\",\"packageType\":\"npm\","
@@ -162,6 +186,7 @@ class SoftwareReleaseTest {
     assertEquals(published.repository(), received.repository());
     assertEquals(published.projectId(), received.projectId());
     assertEquals(published.repoId(), received.repoId());
+    assertEquals(published.repoName(), received.repoName());
     assertEquals(published.version(), received.version());
     assertEquals(published.packageType(), received.packageType());
     assertEquals(published.packageName(), received.packageName());
