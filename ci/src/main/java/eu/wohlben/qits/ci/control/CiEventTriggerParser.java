@@ -256,8 +256,9 @@ public class CiEventTriggerParser {
    *
    * <p><b>{@code optional: true} is the one loosening, and it is opt-in per file.</b> Without it, a
    * payload the paths do not resolve in costs this file its run, which is the right answer for a
-   * push pipeline whose entire subject is the pushed commit. A pipeline whose event GREW its
-   * coordinate needs the other answer: an {@code SCMRelease} from before {@code commitSha} existed —
+   * pipeline whose entire subject is the commit the event names — the release-request gate builds a
+   * FOLD, and an event naming none has nothing to gate. A pipeline whose event GREW its coordinate
+   * needs the other answer: an {@code SCMRelease} from before {@code commitSha} existed —
    * a replay, an older publisher — resolves {@code version} and not {@code commitSha}, and refusing
    * it would turn a strictly additive field into releases that silently never build. With the flag,
    * such an event is built at {@code main}'s head, which is precisely what this file did before it

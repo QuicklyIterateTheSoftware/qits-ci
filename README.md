@@ -555,8 +555,9 @@ steps:
   `clone --branch` takes a tag and `checkout --detach` takes the sha beside it. The engine holds no
   concept of a tag and should not grow one.
 - **`optional: true` (default `false`) makes a missing coordinate a fallback rather than a refusal.**
-  Without it the bullet below applies and the file loses its run, which is right for a push pipeline
-  whose entire subject is the pushed commit. With it, an event that carries neither value is built
+  Without it the bullet below applies and the file loses its run, which is right for a pipeline
+  whose entire subject is the commit the event names (the release-request gate builds a fold, and an
+  event naming none has nothing to gate). With it, an event that carries neither value is built
   at `main`'s head — exactly what the file did before it declared a checkout — logged at INFO. It
   exists for the case where an event *grew* its coordinate: `SCMRelease` did not always carry
   `commitSha`, and a replay of an older one must not turn a strictly additive field into releases
