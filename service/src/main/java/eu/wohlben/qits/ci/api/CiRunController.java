@@ -360,7 +360,7 @@ public class CiRunController {
    *
    * <p><b>The guard is the machine one, and a person still reaches it.</b> A machine caller is judged
    * on its token exactly as {@code CiEventController}'s is — see {@link #cancellationScope()} for the
-   * four arms and {@link #requireRepositoryInProject} for what a project-scoped one buys. A caller
+   * arms and {@link #requireRepositoryInProject} for what a project-scoped one buys. A caller
    * that presents no token is not a machine and never reaches the check: it has already been judged
    * by the class-level roles, which is the forwarded {@code X-Qits-User}/{@code X-Qits-Roles} session
    * an operator arrives on. Both callers are real for this route, which is why the check is on the
