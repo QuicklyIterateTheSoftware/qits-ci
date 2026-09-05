@@ -63,6 +63,11 @@ public class CiDaemonLauncherTest {
     launcher.artifactsRegistryHost = "qits-artifacts:8080";
     launcher.artifactsImageRepository = "qits";
     launcher.dockerAuthHosts = List.of("qits-artifacts:8080");
+    // The shipped state of the platform builder: on, with the in-network registry beside it. The
+    // address itself is qits-containers' to inject, which is why no BUILDKIT_HOST appears in any
+    // ON-state environment here — absence IS the contract (the orchestrator fills an absent key).
+    launcher.buildkitEnabled = true;
+    launcher.buildkitRegistryHost = "qits-platform-artifacts:8080";
     launcher.artifactsNpmHostedUrl = "http://qits-artifacts:8080/artifacts/npm/npm/";
     launcher.artifactsNpmProxyUrl = "http://qits-artifacts:8080/artifacts/npm/npmjs/";
     launcher.artifactsMavenRegistryUrl = "http://qits-artifacts:8080/artifacts/maven/maven";
@@ -243,10 +248,10 @@ public class CiDaemonLauncherTest {
 
     // And the sandbox does not relax for a publish step: capDropAll and noNewPrivileges cost a
     // socket client nothing and keeping them unconditional is what keeps them meaning something for
-    // the steps that never opt in. The diff is the socket plus the two BuildKit variables, which
-    // are a build MODE rather than a privilege — asserted as an exact residue rather than as spot
-    // checks, the same claim the old argv test made by deleting list elements and comparing the
-    // rest.
+    // the steps that never opt in. The diff is the socket plus the BuildKit variables (the two
+    // mode flags and $QITS_BUILD_REGISTRY), which are a build MODE rather than a privilege —
+    // asserted as an exact residue rather than as spot checks, the same claim the old argv test
+    // made by deleting list elements and comparing the rest.
     assertNotEquals(plain, withDocker);
     assertEquals(
         plain,
@@ -258,11 +263,12 @@ public class CiDaemonLauncherTest {
     assertTrue(withDocker.spec().security().noNewPrivileges());
   }
 
-  /** The two BuildKit variables taken back out, so the residue is comparable to a plain step's. */
+  /** The BuildKit variables taken back out, so the residue is comparable to a plain step's. */
   private static Spec withoutBuildKit(Spec original) {
     Map<String, String> env = new LinkedHashMap<>(original.env());
     env.remove("DOCKER_BUILDKIT");
     env.remove("BUILDX_NO_DEFAULT_ATTESTATIONS");
+    env.remove("QITS_BUILD_REGISTRY");
     return new Spec(
         original.image(),
         original.entrypoint(),
@@ -301,6 +307,39 @@ public class CiDaemonLauncherTest {
         original.explicitName(),
         original.user(),
         original.init());
+  }
+
+  @Test
+  public void aDockerStepUnderTheKillSwitchReadsEmptyAndNeverAbsent() {
+    // OFF is empty-never-absent, the mirror pair's shape: an empty BUILDKIT_HOST is what stops
+    // qits-containers filling the key in (it defers to any present key), and an empty
+    // QITS_BUILD_REGISTRY is what makes a converted recipe's `set -u` composition fail loudly
+    // rather than push to a ref built out of nothing.
+    CiDaemonLauncher off = launcher();
+    off.buildkitEnabled = false;
+
+    Map<String, String> env = off.buildWorkloadSpec(publishing()).spec().env();
+    assertEquals("", env.get("BUILDKIT_HOST"));
+    assertEquals("", env.get("QITS_BUILD_REGISTRY"));
+
+    // And the switch reaches ONLY the two buildkit keys — the socket, the mode flags and the rest
+    // of the environment stay exactly the ON state's, or flipping it mid-fleet would change more
+    // than it says.
+    Map<String, String> on =
+        new LinkedHashMap<>(launcher().buildWorkloadSpec(publishing()).spec().env());
+    on.put("QITS_BUILD_REGISTRY", "");
+    on.put("BUILDKIT_HOST", "");
+    assertEquals(on, env);
+  }
+
+  @Test
+  public void anOnStateDockerStepCarriesTheBuildRegistryAndNoAddress() {
+    Map<String, String> env = launcher().buildWorkloadSpec(publishing()).spec().env();
+    assertEquals("qits-platform-artifacts:8080", env.get("QITS_BUILD_REGISTRY"));
+    // No BUILDKIT_HOST: the address is qits-containers' deployment fact, injected there — an
+    // address spelled here too would be the two-copies drift the docker-socket-path deletion
+    // already paid for once.
+    assertFalse(env.containsKey("BUILDKIT_HOST"));
   }
 
   @Test
@@ -489,6 +528,7 @@ public class CiDaemonLauncherTest {
     Map<String, String> expected = contractEnv();
     expected.put("DOCKER_BUILDKIT", "1");
     expected.put("BUILDX_NO_DEFAULT_ATTESTATIONS", "1");
+    expected.put("QITS_BUILD_REGISTRY", "qits-platform-artifacts:8080");
     assertEquals(expected, publishingEnv);
     assertFalse(publishingEnv.containsKey("DOCKER_CONFIG"));
     assertFalse(publishingEnv.containsKey("QITS_CI_REGISTRY_AUTH_CONFIG"));

@@ -140,3 +140,11 @@ the far side of the mounted socket is a client; the host's daemon is what resolv
 negotiates TLS and performs both the build and the push. That is why the deployment prerequisite is
 about the *docker host's* view of the registry — resolvable from there, and in
 `insecure-registries` while it speaks plain HTTP.
+
+**A converted recipe replaces `Dockerd` in that diagram with the platform builder.** The step calls
+`buildctl` against `$BUILDKIT_HOST` — the `qits-buildkitd` container qits-containers owns on the
+platform network — and the *builder* pulls the bases (rewriting the committed vhost spellings to
+the in-network aliases via its own registry config) and pushes the ref the step composed from
+`$QITS_BUILD_REGISTRY`, all without the host daemon in the path. The socket stays mounted until the
+last recipe converts; see the README's `docker: true` section and the wrapper's
+`qits-buildkit-plan.md`.
