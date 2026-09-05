@@ -67,7 +67,7 @@ public class CiDaemonLauncherTest {
     // address itself is qits-containers' to inject, which is why no BUILDKIT_HOST appears in any
     // ON-state environment here — absence IS the contract (the orchestrator fills an absent key).
     launcher.buildkitEnabled = true;
-    launcher.buildkitRegistryHost = "qits-platform-artifacts:8080";
+    launcher.buildkitRegistryHost = "dev-qits-artifacts:8080";
     launcher.artifactsNpmHostedUrl = "http://qits-artifacts:8080/artifacts/npm/npm/";
     launcher.artifactsNpmProxyUrl = "http://qits-artifacts:8080/artifacts/npm/npmjs/";
     launcher.artifactsMavenRegistryUrl = "http://qits-artifacts:8080/artifacts/maven/maven";
@@ -335,7 +335,7 @@ public class CiDaemonLauncherTest {
   @Test
   public void anOnStateDockerStepCarriesTheBuildRegistryAndNoAddress() {
     Map<String, String> env = launcher().buildWorkloadSpec(publishing()).spec().env();
-    assertEquals("qits-platform-artifacts:8080", env.get("QITS_BUILD_REGISTRY"));
+    assertEquals("dev-qits-artifacts:8080", env.get("QITS_BUILD_REGISTRY"));
     // No BUILDKIT_HOST: the address is qits-containers' deployment fact, injected there — an
     // address spelled here too would be the two-copies drift the docker-socket-path deletion
     // already paid for once.
@@ -528,7 +528,7 @@ public class CiDaemonLauncherTest {
     Map<String, String> expected = contractEnv();
     expected.put("DOCKER_BUILDKIT", "1");
     expected.put("BUILDX_NO_DEFAULT_ATTESTATIONS", "1");
-    expected.put("QITS_BUILD_REGISTRY", "qits-platform-artifacts:8080");
+    expected.put("QITS_BUILD_REGISTRY", "dev-qits-artifacts:8080");
     assertEquals(expected, publishingEnv);
     assertFalse(publishingEnv.containsKey("DOCKER_CONFIG"));
     assertFalse(publishingEnv.containsKey("QITS_CI_REGISTRY_AUTH_CONFIG"));
