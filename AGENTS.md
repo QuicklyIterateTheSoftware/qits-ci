@@ -836,17 +836,27 @@ WP2; the class javadoc carries the argument in full and the short form is:
   `(repository, version)`, and the causation edge is the frame's own id rather than an expectation
   about who minted it. Anything that had recorded "qits-workspaces said so" — a producer filter, a
   source check, an expected parent — would have gone silently dead at the cutover, in the direction
-  that publishes without announcing. The event's shape did not move either: same signature, same
-  seven components, so `ScmReleaseContractTest`'s transcription is unchanged and only the file it
-  names moved (`qits-projects-service/service/…/bus/SCMRelease.java`).
+  that publishes without announcing. The event's shape did not move either at the cutover: same
+  signature, same seven components, so `ScmReleaseContractTest`'s transcription was unchanged and
+  only the file it names moved (`qits-projects-service/service/…/bus/SCMRelease.java`).
 - **What DID change is `branch`, and nothing here reads it.** It is the release request's backing
   branch (`release/<id>`) now, and that branch is **deleted in the same operation that creates the
-  tag** — so it does not exist by the time the event is evaluated. A release pipeline declares no
-  `checkout:`, so its run is recorded at `main` and the daemon clones `main`; the step then fetches
-  `refs/tags/$version` and checks it out detached, which is where the released tree comes from. The
-  version drives every coordinate. `ReleaseAnnounceSeamTest` and `ScmReleaseContractTest` pin both
-  halves, and `CiEventTriggerCausationTest`'s frame carries a `release/<uuid>` branch for the same
-  reason.
+  tag** — so it does not exist by the time the event is evaluated. The version drives every
+  coordinate. `ReleaseAnnounceSeamTest` and `ScmReleaseContractTest` pin both halves, and
+  `CiEventTriggerCausationTest`'s frame carries a `release/<uuid>` branch for the same reason.
+- **`commitSha` is the eighth component, and it is what a release run is now anchored at.** For as
+  long as the event named a deleted branch and a tag but no commit, a release pipeline could declare
+  no `checkout:` at all: its run was recorded at `main`, the daemon cloned `main`, and the step
+  script fetched `refs/tags/$version` and checked it out detached — so every release run on the
+  platform displayed as `main@<head>`, a run recorded against a commit it did not build. qits-projects
+  publishes the tag's commit now, and `.config/qits/ci-event-release.yml` spends it on
+  `checkout: { branch: version, sha: commitSha, optional: true }`. **A tag is a ref and that is the
+  whole mechanism** — `checkout.branch` resolves to a *ref name*, `git clone --branch` takes a tag,
+  and neither the engine nor the daemon learned anything about tags. `optional: true` is the
+  transition: `commitSha` is additive, so a replay or an older publisher carries none, and such a run
+  falls back to `main`'s head with its checkout **stripped**, which is why the per-ref burst collapse
+  cannot dedupe two distinct fallback releases. `CiEventCheckoutTest` pins all three arms; the step's
+  tag fetch stays as the fallback's mechanism and the anchored path's no-op.
 - **The two facts race on a real release, so both halves are rows.** `ci_release_announcement` holds
   what a green run owes (`announced_at` null is "still owed"), `ci_scm_release` holds what was really
   released. Either arrival order works and a restart between them costs nothing.
@@ -990,10 +1000,17 @@ the event's payload names ("decide at main, build at the event's commit" — dis
 recorded run's branch/sha come from the payload, validated through `CiIdentifiers` because a
 payload is attacker-shaped). Recording the payload pair on the row is the whole of the mechanism:
 the clone env, the restart snapshot and `announceRun`'s `BuildSuccessful` all read those two
-columns. A checkout run's burst collapses per branch (`supersedeByCheckoutBranch`, the run queue's
+columns. The `branch` path resolves to a **ref name** and a tag is one, which is how a release
+pipeline anchors at `{ branch: version, sha: commitSha }` without the engine or the daemon holding
+any concept of a tag. `optional: true` makes an unresolvable checkout a fallback to `main`'s head
+instead of a refusal — for the event that *grew* its coordinate, so an older `SCMRelease` does not
+cost a release pipeline its run — and such a run is accepted with its checkout stripped
+(`CiEventTrigger.withoutCheckout`) so every reader keyed on `checkout` sees the run it really is. A
+checkout run's burst collapses per ref (`supersedeByCheckoutBranch`, the run queue's
 third supersede — gated on the trigger declaring checkout, because non-checkout event runs share
-"main" as a convention and must never be branch-collapsed across distinct events). Platform
-triggers refuse the key (WARN + no run). The design is the superproject's
+"main" as a convention and must never be ref-collapsed across distinct events; the stripping above is
+what keeps fallback runs on the right side of that gate). Platform triggers refuse the key (WARN + no
+run). The design is the superproject's
 `ci-event-triggers-plan.md`, the format is `README.md` (see "Building the commit the event
 names"), and what follows is what biting it feels like.
 
