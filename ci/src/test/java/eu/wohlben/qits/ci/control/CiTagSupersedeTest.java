@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerFile;
@@ -59,6 +60,7 @@ public class CiTagSupersedeTest extends CiTestSupport {
 
   @Inject CiEventTriggerService engine;
   @Inject CiRunService service;
+  @Inject FakeRunAnnouncer announcer;
 
   /** Opened by the test, awaited on the worker inside the blocking run's first step. */
   private final CountDownLatch release = new CountDownLatch(1);
@@ -73,6 +75,7 @@ public class CiTagSupersedeTest extends CiTestSupport {
   void mintRepository() {
     repoId = "tagged-" + UUID.randomUUID().toString().substring(0, 8);
     fakeCandidates.set(repoId);
+    announcer.reset();
   }
 
   @AfterEach
@@ -168,6 +171,15 @@ public class CiTagSupersedeTest extends CiTestSupport {
     assertEquals(CiRunStatus.CANCELLED, loser.status);
     assertEquals(CiRunService.DEDUPED, loser.cancellationReason);
     assertNotNull(loser.finishedAt, "a superseded run is over");
+    // And it published no verdict either way. The row is written at accept time and reaches neither
+    // announcer, so the corrected status is a read surface and nothing downstream reads a new
+    // failure class off it — qits-projects' gate matches on (repoId, commitSha) and sees nothing.
+    assertTrue(
+        announcer.failed().stream().noneMatch(failure -> failure.runId().equals(loser.id)),
+        "a deduped run announces no BuildFailed");
+    assertTrue(
+        announcer.announced().stream().noneMatch(green -> green.runId().equals(loser.id)),
+        "and no BuildSuccessful either");
     // Each row names what beat it AT THE TIME, so tags arriving out of order leave a chain rather
     // than a star — every hop is a true statement, and the chain ends at the run that stands.
     String at = loser.supersededByRunId;

@@ -403,27 +403,44 @@ public class CiDaemonLauncher {
   String artifactsMavenRegistryUrl;
 
   /**
-   * qits-platform-mirror's Maven Central pull-through. Only the STEP plane can reach it, and that
-   * asymmetry is the point. The step-url is dialled by the step container itself over qits-net (a
-   * userflows mvnw), like the npm proxy — it works and it populates the mirror. The build-url is a
-   * docker-build arg, and it <b>ships empty</b>: a {@code docker build}'s maven resolve runs in the
-   * host network namespace with the image's own resolv.conf, where no mirror address resolves — not
-   * the qits-net alias, not {@code 127.0.0.1:8082} (the deployed mirror publishes no host port), not
-   * {@code mirror.dev.localhost}. What it reaches is repo1.maven.org directly, which an empty
-   * build-url selects. Measured 2026-09-01: a non-empty build-url reddened every image build.
+   * qits-platform-mirror's Maven Central pull-through, injected into every step container in
+   * <b>both</b> address planes — each naming the mirror by the route its own network can reach, and
+   * both on {@code /mirror/maven}, which is the mirror's own route.
+   *
+   * <p><b>The step-url is dialled by the step container itself</b>, over qits-net (a userflows
+   * mvnw), exactly like the npm proxy: {@code http://qits-platform-mirror:8080/mirror/maven/central},
+   * the in-network alias, read anonymously.
+   *
+   * <p><b>The build-url is a docker-build arg, and it ships NON-EMPTY</b> —
+   * {@code http://mirror.dev.localhost:8080/mirror/maven/central}. A pipeline passes it as
+   * {@code --build-arg QITS_MAVEN_CENTRAL_URL} to a {@code docker build --network host}, so the
+   * maven resolve inside a {@code RUN} sits in the HOST network namespace and resolves that vhost
+   * the way the {@code FROM} lines resolve theirs — to 127.0.0.1 on the host, which is the edge. The
+   * edge byte-caches those reads, which are anonymous and immutable, so the build plane gains the
+   * cache rather than merely reaching one. The route has to be {@code /mirror} and never {@code
+   * /artifacts}: the edge sends {@code /artifacts} to the hosted registry on every vhost, so a build
+   * asking there 404s — and an early {@code /artifacts} build-url answering <em>401</em> is how the
+   * edge was known to be reachable from a build at all. It must equally never be a qits-net alias,
+   * which a host-netns {@code RUN} cannot resolve.
+   *
+   * <p><b>That supersedes the reading of 2026-09-01</b>, when this shipped empty because no mirror
+   * address was believed resolvable from a build. What that measurement was missing is the edge
+   * vhost above; both planes have carried the mirror since 2026-09-03.
    *
    * <p><b>Off is injected as EMPTY, never as absence.</b> Every {@code .qits-maven-settings.xml}
-   * activates its central-proxy profile only on a non-empty {@code QITS_MAVEN_CENTRAL_URL}, so an
-   * empty value means that build resolves Maven Central directly — which is the permanent state of
-   * the build plane, and the state {@code enabled=false} puts both planes in (a bootstrap that has
-   * not started the mirror yet).
+   * activates its central-proxy profile only on a non-empty {@code QITS_MAVEN_CENTRAL_URL} (measured
+   * on Maven 3.9: an empty environment value does not activate a property-presence profile), so an
+   * empty value means that build resolves Maven Central directly — which is what {@code
+   * enabled=false} puts <b>both</b> planes in, the bootstrap lever for a platform whose mirror is
+   * not up yet.
    */
   @ConfigProperty(name = "qits.mirror.maven-central.enabled")
   boolean mavenCentralMirrorEnabled;
 
   // Optional, not a defaulted String: SmallRye's String converter treats an empty property value as
-  // null and fails a non-Optional injection point at boot (SRCFG00040) — and empty is exactly the
-  // shipped value here. Optional absorbs both empty and absent as Optional.empty, which the
+  // null and fails a non-Optional injection point at boot (SRCFG00040) — and empty is a value this
+  // key really takes, since blanking it is how a deployment whose build plane cannot reach the edge
+  // turns that plane off. Optional absorbs both empty and absent as Optional.empty, which the
   // injection below maps to an empty QITS_MAVEN_CENTRAL_MIRROR_URL (build plane resolves direct).
   @ConfigProperty(name = "qits.mirror.maven-central.build-url")
   Optional<String> mavenCentralMirrorBuildUrl;
