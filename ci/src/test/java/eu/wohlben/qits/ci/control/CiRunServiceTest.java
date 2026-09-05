@@ -697,6 +697,15 @@ public class CiRunServiceTest extends CiTestSupport {
     assertEquals(CiRunStatus.SUCCESS, newer.status);
     assertEquals(CiRunStatus.SUCCESS, otherBranch.status, "another branch is independent");
     assertEquals(0, service.stepsFor(older.id).size());
+    // The status is a READ surface and the change to it published nothing: a deduped row is written
+    // at accept time and reaches neither announcer, before this classification or after it. So
+    // qits-projects' build gate — which matches verdicts on (repoId, commitSha) — sees what it saw.
+    assertTrue(
+        announcer.failed().stream().noneMatch(failure -> failure.runId().equals(older.id)),
+        "a deduped run announces no BuildFailed — it is bookkeeping about the queue");
+    assertTrue(
+        announcer.announced().stream().noneMatch(green -> green.runId().equals(older.id)),
+        "and no BuildSuccessful either");
   }
 
   @Test

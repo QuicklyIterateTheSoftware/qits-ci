@@ -1003,8 +1003,11 @@ pipeline, four of them building a version nobody asked for.
 qits-ci collapses them instead. When a tag-triggered run is accepted and another **queued** run
 exists for the same repository and the same trigger file, the one with the **lower tag by version
 sort** is marked `DEDUPED` — the same columns the per-branch push supersede writes
-(`status FAILED`, `cancellationReason DEDUPED`, `supersededByRunId`), and it may be the run that was
-just accepted, since a fan-out arrives in no order. A push of N tags therefore leaves one run to do.
+(`status CANCELLED`, `cancellationReason DEDUPED`, `supersededByRunId`), and it may be the run that
+was just accepted, since a fan-out arrives in no order. A push of N tags therefore leaves one run to
+do. `CANCELLED` rather than `FAILED` for the reason every supersede settles that way: losing a queue
+slot is a statement about the queue, not a verdict about the commit, and a red row there is a false
+alarm in every listing.
 
 - **Version sort, not string order.** Digit runs compare as numbers, so `2026.810.184518` is newer
   than `2026.810.98` — which plain string order gets backwards. The rules are in `VersionSort`, and
