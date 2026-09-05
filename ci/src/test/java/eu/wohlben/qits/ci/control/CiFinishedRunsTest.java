@@ -179,8 +179,8 @@ public class CiFinishedRunsTest extends CiTestSupport {
     // saying the same thing the listing says.
     run.finishedAt =
         status == CiRunStatus.QUEUED || status == CiRunStatus.RUNNING ? null : createdAt.plusSeconds(30);
-    run.triggerType = CiTriggerType.POST_RECEIVE;
-    run.configPath = CiConfigParser.CONFIG_PATH;
+    run.triggerType = CiTriggerType.EVENT;
+    run.configPath = TEST_TRIGGER_PATH;
     runs.persist(run);
     return run.id;
   }

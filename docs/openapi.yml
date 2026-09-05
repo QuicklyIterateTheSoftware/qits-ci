@@ -530,4 +530,4 @@ paths:
         - qits:admin
 info:
   title: qits-ci API
-  version: 2026.904.222945
+  version: 2026.905.54128

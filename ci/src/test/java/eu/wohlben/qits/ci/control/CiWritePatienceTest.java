@@ -197,8 +197,8 @@ public class CiWritePatienceTest extends CiTestSupport {
               run.branch = "main";
               run.commitSha = HEAD;
               run.status = CiRunStatus.QUEUED;
-              run.triggerType = CiTriggerType.POST_RECEIVE;
-              run.configPath = CiConfigParser.CONFIG_PATH;
+              run.triggerType = CiTriggerType.EVENT;
+              run.configPath = TEST_TRIGGER_PATH;
               run.createdAt = Instant.now();
               runs.persist(run);
             });

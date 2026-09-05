@@ -43,12 +43,23 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * listener beans rather than leaving it to be remembered.
  *
  * <p><b>An event this service only CONSUMES is on this list for the mirror of the reason a
- * published-only one is.</b> {@link SCMPublishCommit} arrives from qits-githost and {@code
- * ScmPublishCommitListener} binds it with {@code CanonicalJson.payloadTo} — Jackson finding a
- * record's components by reflection again, on the reading side this time. Unregistered, the binary
- * would throw on every push and settle it unbuilt as poison: CI would stop, quietly, with one WARN
- * per push. That the class comes from a jar another repository publishes changes nothing — the
- * registration is a statement about this image.
+ * published-only one is.</b> {@link SCMPublishCommit} arrives from qits-githost and used to be
+ * <em>bound</em> here with {@code CanonicalJson.payloadTo} — Jackson finding a record's components
+ * by reflection again, on the reading side this time. Unregistered, the binary would have thrown on
+ * every push and settled it unbuilt as poison: CI stopping quietly, with one WARN per push. That
+ * the class comes from a jar another repository publishes changed nothing — the registration is a
+ * statement about this image.
+ *
+ * <p><b>Its binder retired on 2026-09-05 and the entry stays, deliberately.</b> {@code
+ * ScmPublishCommitListener} was the last {@code payloadTo} of this type; an ordinary push triggers
+ * nothing now, and the same event reaches the generic trigger engine, which <em>walks</em> payloads
+ * with {@code readTree} and owes no registration. So the entry buys the binary nothing today. It is
+ * kept because the type has not left this image's wire vocabulary — a repository may declare {@code
+ * event: SCMPublishCommit} in a trigger file, this repo's own suite round-trips the record through
+ * the real {@code CanonicalJson} ({@code bus/ScmPushFrames}), and the day anything binds it again the
+ * failure would be native-only and silent. Registering a type nothing binds costs image size;
+ * un-registering one something binds costs every occurrence of that event. That is not a symmetric
+ * trade.
  *
  * <p><b>An event this service only publishes is exactly as dependent on this list</b>, which is
  * worth stating because "nothing binds it back" reads like a reason to skip it. The failure is on

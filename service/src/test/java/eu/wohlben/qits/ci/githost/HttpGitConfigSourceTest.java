@@ -7,10 +7,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import eu.wohlben.qits.ci.control.CiConfigParser;
 import eu.wohlben.qits.ci.control.CiRepoRef;
 import eu.wohlben.qits.ci.control.CiTriggerScope;
-import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
+import eu.wohlben.qits.ci.control.CiConfigSource.CommitHeld;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerFile;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerLookup;
 import eu.wohlben.qits.ci.error.BadRequestException;
@@ -62,59 +61,55 @@ public class HttpGitConfigSourceTest {
     StubGitHost.deleteRecursively(root);
   }
 
-  // --- the push half: the config at the pushed commit ---
+  // --- the commit-held probe: does this repository still hold this sha ---
+  //
+  // It was `read(repo, branch, sha)` until 2026-09-05, and answered a whole ConfigLookup: the
+  // pipeline at a pushed commit, told apart from ABSENT/GONE/UNREACHABLE/INVALID. Per-push CI
+  // retired and nothing reads a pipeline out of a commit any more, so what is left is the one
+  // question the shared run path still asks — and it is answered by the tree read that used to be
+  // the second half of that method.
 
   @Test
-  public void theConfigIsReadAtThePushedCommit() throws Exception {
-    String repoId = "repo-with-config";
-    String sha = seed(repoId, "steps:\n  - image: alpine:3\n    script: 'true'\n");
+  public void aCommitTheRepositoryHoldsIsHeld() throws Exception {
+    String repoId = "repo-with-commit";
+    String sha = seed(repoId, "steps: []\n");
 
-    ConfigLookup lookup = source.read(id(repoId), BRANCH, sha);
-    assertEquals(ConfigLookup.Status.FOUND, lookup.status());
-    assertEquals("steps:\n  - image: alpine:3\n    script: 'true'\n", lookup.content());
-  }
-
-  @Test
-  public void aCommitWithoutTheFileIsAbsentRatherThanAnError() throws Exception {
-    // 404 on the blob is the opt-in case, and it is by far the common one: a repository that
-    // declares no pipeline must read as ABSENT, which discards the row, never as a failure.
-    String repoId = "repo-without-config";
-    String sha = seed(repoId, null);
-    assertEquals(ConfigLookup.Status.ABSENT, source.read(id(repoId), BRANCH, sha).status());
+    assertEquals(CommitHeld.HELD, source.commitHeld(id(repoId), sha));
   }
 
   @Test
   public void aCommitTheRepositoryDoesNotHoldIsGone() throws Exception {
-    // The tree probe is what tells this apart from the case above: the rev itself does not resolve,
-    // so there is no commit to describe and nothing is recorded for it.
+    // The 404 that means the rev does not resolve: there is no commit to describe, so a run about it
+    // describes a push that no longer exists and is discarded.
     String repoId = "repo-without-that-commit";
     seed(repoId, "steps: []\n");
+
     assertEquals(
-        ConfigLookup.Status.GONE,
-        source.read(id(repoId), BRANCH, "0123456789012345678901234567890123456789").status());
+        CommitHeld.GONE,
+        source.commitHeld(id(repoId), "0123456789012345678901234567890123456789"));
   }
 
   @Test
-  public void aCommitTheBranchHasMovedPastIsStillRead() throws Exception {
-    // The point of reading at the sha. A second push landed before ci got to the first one; the
-    // first commit's pipeline is still what that push declared, and it still runs.
+  public void aCommitTheBranchHasMovedPastIsStillHeld() throws Exception {
+    // HELD is about the repository holding the object, never about the branch pointing at it — the
+    // narrowing this answer took on when it stopped meaning "reachable from the tip". A commit a
+    // second push moved past is still a commit a run says something true about.
     String repoId = "repo-advanced";
     String first = seed(repoId, "steps: []\n");
     advance(repoId);
 
-    ConfigLookup lookup = source.read(id(repoId), BRANCH, first);
-    assertEquals(ConfigLookup.Status.FOUND, lookup.status());
-    assertEquals("steps: []\n", lookup.content());
+    assertEquals(CommitHeld.HELD, source.commitHeld(id(repoId), first));
   }
 
   @Test
-  public void anUnreachableHostIsUnreachableRatherThanAbsent() throws Exception {
-    // The distinction a red row would destroy: a read failure must not invent a gate, so it may
-    // never arrive as "this repository declares no pipeline".
+  public void anUnreachableHostIsUnknownRatherThanGone() throws Exception {
+    // The distinction the caller's decision rests on: a host that could not be asked has said
+    // nothing about the commit, and reading that as GONE would discard a run over a blip.
     String repoId = "repo-unreachable";
     String sha = seed(repoId, "steps: []\n");
     host.stop();
-    assertEquals(ConfigLookup.Status.UNREACHABLE, source.read(id(repoId), BRANCH, sha).status());
+
+    assertEquals(CommitHeld.UNKNOWN, source.commitHeld(id(repoId), sha));
   }
 
   @Test
@@ -126,28 +121,28 @@ public class HttpGitConfigSourceTest {
     String repoId = "repo-authenticated";
     String sha = seed(repoId, "steps: []\n");
 
-    assertEquals(ConfigLookup.Status.FOUND, source.read(id(repoId), BRANCH, sha).status());
+    assertEquals(CommitHeld.HELD, source.commitHeld(id(repoId), sha));
     assertEquals("Bearer machine-token", host.lastAuthorization());
 
     source.gitHostBearer = java.util.Optional::empty;
-    assertEquals(ConfigLookup.Status.FOUND, source.read(id(repoId), BRANCH, sha).status());
+    assertEquals(CommitHeld.HELD, source.commitHeld(id(repoId), sha));
     assertNull(host.lastAuthorization(), "a bearerless read must send no header at all");
   }
 
   @Test
   public void hostileIdentifiersAreRejectedBeforeTheyReachAUrl() {
-    assertThrows(BadRequestException.class, () -> source.read(id("../../etc"), BRANCH, "cafebabe0000"));
-    assertThrows(
-        BadRequestException.class, () -> source.read(id("repo-1"), "../../etc", "cafebabe0000"));
-    assertThrows(BadRequestException.class, () -> source.read(id("repo-1"), BRANCH, "not-a-sha"));
+    assertThrows(BadRequestException.class, () -> source.commitHeld(id("../../etc"), "cafebabe0000"));
+    assertThrows(BadRequestException.class, () -> source.commitHeld(id("repo-1"), "not-a-sha"));
     assertThrows(BadRequestException.class, () -> source.readEventTriggers(id("a/../b"), BRANCH));
+    assertThrows(
+        BadRequestException.class, () -> source.readEventTriggers(id("repo-1"), "../../etc"));
     // The name half, checked only when it is there — the pair reaches the same url.
     assertThrows(
         BadRequestException.class,
-        () -> source.read(CiRepoRef.of("repo-1", "../etc", "repo-1"), BRANCH, "cafebabe0000"));
+        () -> source.commitHeld(CiRepoRef.of("repo-1", "../etc", "repo-1"), "cafebabe0000"));
     assertThrows(
         BadRequestException.class,
-        () -> source.read(CiRepoRef.of("repo-1", "qits", "a/../b"), BRANCH, "cafebabe0000"));
+        () -> source.commitHeld(CiRepoRef.of("repo-1", "qits", "a/../b"), "cafebabe0000"));
   }
 
   @Test
@@ -157,7 +152,7 @@ public class HttpGitConfigSourceTest {
         "a rev is one path segment, so the slash cannot travel raw");
     assertEquals(
         host.gitHostUrl() + "/git/repo-1/blob/feature%2Fx/.config/qits/ci-post-receive.yml",
-        source.blobUrl(id("repo-1"), "feature/x", CiConfigParser.CONFIG_PATH));
+        source.blobUrl(id("repo-1"), "feature/x", ".config/qits/ci-post-receive.yml"));
   }
 
   @Test
@@ -171,7 +166,7 @@ public class HttpGitConfigSourceTest {
     assertEquals(
         host.gitHostUrl()
             + "/git/qits/qits-blobstore/blob/main/.config/qits/ci-post-receive.yml",
-        source.blobUrl(named, "main", CiConfigParser.CONFIG_PATH));
+        source.blobUrl(named, "main", ".config/qits/ci-post-receive.yml"));
   }
 
   @Test
@@ -182,7 +177,7 @@ public class HttpGitConfigSourceTest {
         host.gitHostUrl() + "/git/repo-1/tree/main", source.treeUrl(id("repo-1"), "main", ""));
     assertEquals(
         host.gitHostUrl() + "/git/repo-1/blob/main/.config/qits/ci-post-receive.yml",
-        source.blobUrl(id("repo-1"), "main", CiConfigParser.CONFIG_PATH));
+        source.blobUrl(id("repo-1"), "main", ".config/qits/ci-post-receive.yml"));
   }
 
   @Test
@@ -194,9 +189,7 @@ public class HttpGitConfigSourceTest {
     StubGitHost.alias("qits", "qits-blobstore", storageId);
     CiRepoRef named = CiRepoRef.of(storageId, "qits", "qits-blobstore");
 
-    ConfigLookup config = source.read(named, BRANCH, sha);
-    assertEquals(ConfigLookup.Status.FOUND, config.status());
-    assertEquals("steps: []\n", config.content());
+    assertEquals(CommitHeld.HELD, source.commitHeld(named, sha));
 
     EventTriggerLookup triggers = source.readEventTriggers(named, BRANCH);
     assertEquals(EventTriggerLookup.Status.FOUND, triggers.status());
@@ -212,7 +205,7 @@ public class HttpGitConfigSourceTest {
     seed(repoId, "steps: []\n", Map.of(".config/qits/ci-event-a.yml", "event: A\n"));
     String sha = branchOff(repoId, "feature/x");
 
-    assertEquals(ConfigLookup.Status.FOUND, source.read(id(repoId), "feature/x", sha).status());
+    assertEquals(CommitHeld.HELD, source.commitHeld(id(repoId), sha));
     EventTriggerLookup lookup = source.readEventTriggers(id(repoId), "feature/x");
     assertEquals(EventTriggerLookup.Status.FOUND, lookup.status());
     assertEquals(sha, lookup.headSha());
@@ -363,7 +356,7 @@ public class HttpGitConfigSourceTest {
       git(null, "init", "-q", "-b", BRANCH, work.toString());
       Files.writeString(work.resolve("readme.txt"), "hello\n");
       if (config != null) {
-        write(work, CiConfigParser.CONFIG_PATH, config);
+        write(work, ".config/qits/ci-post-receive.yml", config);
       }
       for (Map.Entry<String, String> extra : extraFiles.entrySet()) {
         write(work, extra.getKey(), extra.getValue());

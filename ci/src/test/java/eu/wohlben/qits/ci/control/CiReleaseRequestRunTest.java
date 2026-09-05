@@ -5,7 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerFile;
 import eu.wohlben.qits.ci.entity.CiRun;
 import eu.wohlben.qits.ci.entity.CiRunStatus;
@@ -200,30 +199,30 @@ public class CiReleaseRequestRunTest extends CiTestSupport {
   }
 
   @Test
-  public void aNonGatingStepIsAlsoAvailableToAPushPipeline() throws Exception {
-    // The step schema is ONE implementation, so the key means the same thing in both files — and it
-    // is not inert here: a push run is always gating as a file, and this is exactly the "this half
-    // must not cost the image" case the two-file split used to buy with a second file.
-    String pushRepo = UUID.randomUUID().toString();
+  public void aNonGatingStepAlsoWorksInAFileThatDeclaresNoFileLevelFlag() throws Exception {
+    // The AND, with the file's half left at its default: a gating file whose failing step said
+    // `gating: false` announces a non-gating red. This is the "this half must not cost the image"
+    // case the two-file split used to buy with a second file, and it is what lets a single QA
+    // pipeline carry both halves.
+    String repo = UUID.randomUUID().toString();
     String sha = UUID.randomUUID().toString().replace("-", "");
-    fakeConfig.put(
-        pushRepo,
-        sha,
-        ConfigLookup.found(
-            """
-            steps:
-              - image: alpine:3
-                script: build
-              - image: alpine:3
-                gating: false
-                script: publish-docs
-            """));
     fakeRunner.script(1, new CiStepRunner.StepResult(1, false, CiStepRunner.StepOutcome.OK, "boom"));
 
-    runService.execute(pushRepo, "main", sha);
+    executePipeline(
+        repo,
+        "main",
+        sha,
+        """
+        steps:
+          - image: alpine:3
+            script: build
+          - image: alpine:3
+            gating: false
+            script: publish-docs
+        """);
     forgetLoadedEntities();
 
-    CiRun run = runService.runsFor(pushRepo).get(0);
+    CiRun run = runService.runsFor(repo).get(0);
     assertEquals(CiRunStatus.FAILED, run.status);
     assertFalse(run.gating);
     assertFalse(announcer.failed().get(0).gating());

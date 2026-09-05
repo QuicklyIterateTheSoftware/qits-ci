@@ -6,8 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
-import eu.wohlben.qits.ci.bus.ScmPublishCommitListener;
-import eu.wohlben.qits.ci.bus.ScmPushFrames;
 import eu.wohlben.qits.ci.control.FakeCiStepRunner;
 import eu.wohlben.qits.ci.githost.FakeGitHostRepoListing;
 import eu.wohlben.qits.ci.githost.StubGitHost;
@@ -47,33 +45,31 @@ import org.junit.jupiter.api.Test;
  * literal would let one method's event fire another's repository, and "exactly one run" would stop
  * being a statement about the test making it.
  *
- * <p>The last case is the bootstrap this endpoint exists for, and it is the one the candidate list
- * used to block: a repository the git host lists but qits-ci has never seen. It belongs here rather
- * than beside the listing's own tests because only the whole engine can show the gap closed.
+ * <p><b>A repository becomes a candidate through the git host's LISTING here, and it used to become
+ * one by being pushed.</b> Each method opened with one push, whose accepted run put the repository
+ * into {@code KnownCiRepos} — a candidate list built from recorded runs, which was the whole reason
+ * the listing had to be added (a platform seeded straight onto the git host could not event-trigger
+ * at all). Per-push CI retired on 2026-09-05, so a push records nothing and cannot make a candidate
+ * of anything; the listing is what does it, and the case that was written to prove the gap closed is
+ * now simply how every case here works.
  */
 @QuarkusTest
 @WithTestResource(value = StubGitHost.class, scope = TestResourceScope.GLOBAL)
 public class CiManualTriggerTest {
 
-  private static final String ZERO_SHA = "0".repeat(40);
-
   private static final String TRIGGER_PATH = ".config/qits/ci-event-manual.yml";
-
-  private static final String POST_RECEIVE = "steps:\n  - image: alpine:3\n    script: echo push\n";
 
   private static final String TRIGGER = "/ci/api/events/trigger";
 
   @Inject FakeCiStepRunner fakeRunner;
-
-  @Inject ScmPublishCommitListener pushes;
 
   @Inject FakeGitHostRepoListing gitHostListing;
 
   @BeforeEach
   void resetFakes() {
     fakeRunner.reset();
-    // Empty is what every other method here wants: they make their repository a candidate by
-    // pushing, exactly as production did before the git host grew a listing.
+    // Empty by default, so a repository another method seeded is in nobody else's candidate set
+    // until the method that wants it says so.
     gitHostListing.set();
   }
 
@@ -81,7 +77,7 @@ public class CiManualTriggerTest {
   public void aSuppliedEventRunsTheTriggerFileThatSelectsIt() throws Exception {
     String upstream = upstream();
     String repoId = seedOrigin(upstream);
-    pushOnce(repoId);
+    makeCandidate(repoId);
 
     String eventId =
         trigger(
@@ -110,7 +106,7 @@ public class CiManualTriggerTest {
   public void anOmittedOccurredAtDefaultsToNow() throws Exception {
     String upstream = upstream();
     String repoId = seedOrigin(upstream);
-    pushOnce(repoId);
+    makeCandidate(repoId);
 
     long before = System.currentTimeMillis();
     trigger("""
@@ -125,7 +121,7 @@ public class CiManualTriggerTest {
   public void theSameExplicitIdTwiceRunsOnce() throws Exception {
     String upstream = upstream();
     String repoId = seedOrigin(upstream);
-    pushOnce(repoId);
+    makeCandidate(repoId);
 
     String eventId = UUID.randomUUID().toString();
     String body =
@@ -146,7 +142,7 @@ public class CiManualTriggerTest {
   public void twoDefaultedIdsForOnePayloadRunTwice() throws Exception {
     String upstream = upstream();
     String repoId = seedOrigin(upstream);
-    pushOnce(repoId);
+    makeCandidate(repoId);
 
     String body = """
         {"name":"SoftwareRelease","payload":%s}""".formatted(payload(upstream));
@@ -162,16 +158,17 @@ public class CiManualTriggerTest {
   }
 
   @Test
-  public void aRepositoryOnlyTheGitHostListsTriggersWithNoPushAtAll() throws Exception {
+  public void aRepositoryOnlyTheGitHostListsTriggersWithNoRunHistoryAtAll() throws Exception {
     String upstream = upstream();
     String repoId = seedOrigin(upstream);
 
-    // The production gap: no run row is precisely what KnownCiRepos answers "not a candidate" to,
-    // so before the listing this repository could not event-trigger at all — which is what blocked
-    // bootstrapping a platform seeded straight onto the git host. Note it is NOT pushed.
+    // The production gap this endpoint exists for: no run row is precisely what KnownCiRepos answers
+    // "not a candidate" to, so before the git host grew a listing a repository seeded straight onto
+    // it could not event-trigger at all. Asserted explicitly here, though every case in this file
+    // now takes the same route — a push records nothing to be known by.
     assertTrue(runsOf(repoId).isEmpty(), "the repository has no run history in qits-ci");
 
-    gitHostListing.set(repoId);
+    makeCandidate(repoId);
 
     String eventId =
         trigger(
@@ -200,7 +197,7 @@ public class CiManualTriggerTest {
   public void theAnswerNamesTheRunsItRecorded() throws Exception {
     String upstream = upstream();
     String repoId = seedOrigin(upstream);
-    pushOnce(repoId);
+    makeCandidate(repoId);
 
     JsonPath answer =
         triggerResult("""
@@ -215,14 +212,14 @@ public class CiManualTriggerTest {
     assertEquals(1, recorded.size());
     assertEquals(runIds.get(0), recorded.get(0).get("id"));
     assertEquals(answer.getString("eventId"), recorded.get(0).get("triggerEventId"));
-    awaitRuns(repoId, 2);
+    awaitRuns(repoId, 1);
   }
 
   @Test
   public void anEventNothingSelectsAnswersTwoHundredWithNoRuns() throws Exception {
     String upstream = upstream();
     String repoId = seedOrigin(upstream);
-    pushOnce(repoId);
+    makeCandidate(repoId);
 
     JsonPath answer =
         triggerResult(
@@ -313,19 +310,17 @@ public class CiManualTriggerTest {
   // --- plumbing, the shape CiEventTriggerCausationTest uses ---
 
   /**
-   * One push, so the repository is a candidate at all — qits-ci evaluates events only against
-   * repositories it has already heard of.
+   * Makes the repository a candidate: qits-ci evaluates an event only against repositories it can
+   * name, and the git host's listing is what names one it has recorded no run for.
    */
-  private void pushOnce(String repoId) throws Exception {
-    pushes.onFrame(ScmPushFrames.push(repoId, "main", ZERO_SHA, tipOf(repoId)));
-    awaitRuns(repoId, 1);
+  private void makeCandidate(String repoId) {
+    gitHostListing.set(repoId);
   }
 
   private String seedOrigin(String upstream) throws Exception {
     String repoId = "man-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
     Path seed = Files.createTempDirectory("ci-manual-trigger-seed");
     git(seed, "init", "-q", "-b", "main");
-    write(seed, ".config/qits/ci-post-receive.yml", POST_RECEIVE);
     write(seed, TRIGGER_PATH, triggerFile(upstream));
     git(seed, "add", ".");
     git(seed, "-c", "user.email=ci@test", "-c", "user.name=ci", "commit", "-q", "-m", "ci config");
@@ -340,10 +335,6 @@ public class CiManualTriggerTest {
     Path file = root.resolve(path);
     Files.createDirectories(file.getParent());
     Files.writeString(file, content);
-  }
-
-  private String tipOf(String repoId) throws Exception {
-    return git(gitHostRoot().resolve(repoId), "rev-parse", "main").trim();
   }
 
   private Path gitHostRoot() {
@@ -396,7 +387,7 @@ public class CiManualTriggerTest {
   }
 
   private List<Map<String, Object>> awaitEventRuns(String repoId, int expected) throws Exception {
-    awaitRuns(repoId, expected + 1);
+    awaitRuns(repoId, expected);
     return eventRunsOf(repoId);
   }
 

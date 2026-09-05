@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerFile;
 import eu.wohlben.qits.ci.entity.CiRun;
 import eu.wohlben.qits.ci.entity.CiRunStatus;
@@ -423,16 +422,12 @@ public class CiEventCheckoutTest extends CiTestSupport {
   }
 
   /**
-   * Parks an unrelated push inside its first step and returns once the worker is really in it —
+   * Parks an unrelated run inside its first step and returns once the worker is really in it —
    * {@code CiTagSupersedeTest}'s staging, so everything accepted afterwards is genuinely queued.
    */
   private void occupyTheWorker() throws Exception {
     String blocker = "blocker-" + UUID.randomUUID().toString().substring(0, 8);
     String sha = "f".repeat(40);
-    fakeConfig.put(
-        blocker,
-        sha,
-        ConfigLookup.found("steps:\n  - image: alpine:3\n    script: \"true\"\n"));
     CompletableFuture<String> inStepZero = new CompletableFuture<>();
     fakeRunner.during(
         0,
@@ -444,8 +439,8 @@ public class CiEventCheckoutTest extends CiTestSupport {
             Thread.currentThread().interrupt();
           }
         });
-    runService.onPostReceive(
-        CiRepoRef.of(blocker), "main", "0".repeat(40), sha, UUID.randomUUID().toString());
+    runService.onEventTrigger(
+        eventRun(blocker, "main", sha, "steps:\n  - image: alpine:3\n    script: \"true\"\n"));
     inStepZero.get(20, TimeUnit.SECONDS);
   }
 }

@@ -107,24 +107,12 @@ public class CiRunRepository implements PanacheRepositoryBase<CiRun, String> {
     return list("status = ?1 order by createdAt, id", CiRunStatus.QUEUED);
   }
 
-  /** Older queued push builds superseded by a newly accepted push on the same branch. */
-  public List<CiRun> listQueuedPushes(String repoId, String branch, String exceptRunId) {
-    return list(
-        "repoId = ?1 and branch = ?2 and status = ?3 and triggerType = ?4 and id <> ?5",
-        repoId,
-        branch,
-        CiRunStatus.QUEUED,
-        eu.wohlben.qits.ci.entity.CiTriggerType.POST_RECEIVE,
-        exceptRunId);
-  }
-
   /**
    * The other queued runs one trigger file has for one event name, the versionsort supersede's
    * candidates — see {@code CiRunService.supersedeByVersion}.
    *
-   * <p>Scoped by {@code configPath} rather than by branch, which is the event path's answer to the
-   * same question {@link #listQueuedPushes} asks: a push is one pipeline per branch, and a trigger
-   * file is one pipeline per file. The event NAME is in the predicate because two trigger files can
+   * <p>Scoped by {@code configPath} rather than by branch: a trigger file is one pipeline per
+   * file, so that is the unit a burst collapses onto. The event NAME is in the predicate because two trigger files can
    * be one file at two names only by coincidence — what supersedes what is decided by reading both
    * payloads, and two payloads of different events have no field in common to compare.
    */
@@ -144,8 +132,7 @@ public class CiRunRepository implements PanacheRepositoryBase<CiRun, String> {
   /**
    * {@link #listQueuedEventRuns} narrowed to one branch — the checkout collapse's question, which
    * only makes sense for runs whose branch came out of the payload (the caller gates on that): a
-   * burst of pushes to one branch is one pipeline per file per branch, {@link #listQueuedPushes}'
-   * question on the event path.
+   * burst of events naming one branch is one pipeline per file per branch.
    */
   public List<CiRun> listQueuedEventRunsOnBranch(
       String repoId, String configPath, String eventName, String branch, String exceptRunId) {

@@ -5,7 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.ci.control.CiConfigParser.CiConfigException;
 import eu.wohlben.qits.ci.control.CiEventSelection.Group;
 import eu.wohlben.qits.ci.control.CiEventSelection.Matcher;
 import eu.wohlben.qits.ci.control.CiEventSelection.PathCondition;
@@ -82,22 +81,12 @@ public class CiEventTriggerParserTest {
 
   @Test
   public void anEmptyTriggerFileIsAParseError() {
-    // Unlike ci-post-receive.yml, where an empty file is a visible opt-in with no steps: a trigger
-    // that names no event is not a trigger at all.
+    // A trigger that names no event is not a trigger at all, and must not look like one that simply
+    // never matched. (The retired push pipeline was the opposite: an empty ci-post-receive.yml was a
+    // visible opt-in with no steps. There is no such file any more, so the two-way rule that kept
+    // the pair apart went with it — `aPostReceiveFileDeclaringEventOrWhenIsAParseError` was here.)
     assertThrows(CiConfigException.class, () -> parser.parse(PATH, ""));
     assertThrows(CiConfigException.class, () -> parser.parse(PATH, "# only a comment\n"));
-  }
-
-  @Test
-  public void aPostReceiveFileDeclaringEventOrWhenIsAParseError() {
-    // The other half of the same rule, asserted here so the pair reads in one place.
-    CiConfigParser postReceive = new CiConfigParser();
-    assertThrows(
-        CiConfigException.class,
-        () -> postReceive.parse("event: BuildSuccessful\nsteps: []\n"));
-    assertThrows(
-        CiConfigException.class,
-        () -> postReceive.parse("when:\n  - repoId: { exact: x }\nsteps: []\n"));
   }
 
   @Test
@@ -267,8 +256,8 @@ public class CiEventTriggerParserTest {
 
   @Test
   public void anUnknownTopLevelKeyIsAParseError() {
-    // Strict where ci-post-receive.yml is lenient, and the reason is correctness rather than taste:
-    // a mistyped `wehn:` would otherwise parse as "no selection", and no selection means
+    // Strict at the top level where the step list is lenient, and the reason is correctness rather
+    // than taste: a mistyped `wehn:` would otherwise parse as "no selection", and no selection means
     // UNCONDITIONAL — silently widening the trigger to every event of that name.
     CiConfigException e =
         assertThrows(
@@ -340,20 +329,18 @@ public class CiEventTriggerParserTest {
   @Test
   public void aDuplicateKeyIsAParseErrorHereThoughNotInAPipeline() {
     // A silently dropped condition WIDENS a selection, which is the one failure this file may not
-    // have. ci-post-receive.yml keeps SnakeYAML's last-one-wins, because tightening it would turn
-    // config that works today into a CONFIG_ERROR run in every repository at once.
+    // have — so the whole document is loaded with strictDuplicateKeys. The flag exists because a
+    // plain pipeline would keep SnakeYAML's last-one-wins instead; the caller that passed false
+    // retired with per-push CI, and the argument is documented on CiConfigSchema.load.
     assertThrows(
         CiConfigException.class,
         () ->
             parser.parse(
                 PATH,
                 "event: E\nwhen:\n  - repoId: { exact: a }\n    repoId: { exact: b }\n"));
-    assertEquals(
-        1,
-        new CiConfigParser()
-            .parse("steps:\n  - image: a\n    script: x\n    script: y\n")
-            .steps()
-            .size());
+    assertThrows(
+        CiConfigException.class,
+        () -> parser.parse(PATH, "event: E\nsteps:\n  - image: a\n    script: x\n    script: y\n"));
   }
 
   @Test
@@ -521,30 +508,12 @@ public class CiEventTriggerParserTest {
   }
 
   @Test
-  public void artifactsInAPostReceiveFileIsAParseError() {
-    // The third member of the two-way rule, and it earns its place for its own reason: what a
-    // declaration announces is the TRIGGERING event's version, and a push carries none — so the key
-    // could only ever be inert here.
-    CiConfigException e =
-        assertThrows(
-            CiConfigException.class,
-            () ->
-                new CiConfigParser()
-                    .parse("artifacts:\n  - { type: npm, name: \"@qits/x\" }\nsteps: []\n"));
-    assertTrue(e.getMessage().contains("artifacts"), e.getMessage());
-    assertTrue(e.getMessage().contains(CiConfigParser.CONFIG_PATH), e.getMessage());
-  }
-
-  @Test
-  public void unknownKeysStayLenientInAPipelineAndStrictHere() {
-    // The asymmetry is unchanged by the new key: a pipeline still carries config for a newer
-    // qits-ci, a trigger file still refuses to.
-    assertEquals(
-        1,
-        new CiConfigParser()
-            .parse("steps:\n  - image: a\n    script: x\nfuture-key: whatever\n")
-            .steps()
-            .size());
+  public void anUnknownTopLevelKeyIsAParseErrorNamingWhatItAlmostWas() {
+    // Strict at the top level, and the message has to name the near-miss: a mistyped `artefacts:`
+    // that parsed as "no declaration" would be a release pipeline that silently publishes nothing.
+    // (The step list below stays lenient — a step schema that refused unknown keys would turn every
+    // forward-compatible pipeline into a parse error. That asymmetry used to be stated as one
+    // between two FILES, and the lenient one, ci-post-receive.yml, retired on 2026-09-05.)
     CiConfigException e =
         assertThrows(
             CiConfigException.class,

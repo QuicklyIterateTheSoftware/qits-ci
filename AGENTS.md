@@ -418,11 +418,21 @@ same reasoning, as qits-containers' client.
 
 ## The run queue, and what a run row means
 
-**A run is a row from the moment it is accepted.** `CiRunService.onPostReceive` and
-`onEventTrigger` both `INSERT` a `QUEUED` row before they return; the worker's first act is
-`startQueued`, which flips it to `RUNNING` inside its own transaction *and reads the status back in
-the same transaction*, so a run that was cancelled while it waited is never picked up. Everything
-from there down is unchanged.
+**A run is a row from the moment it is accepted.** `CiRunService.onEventTrigger` `INSERT`s a
+`QUEUED` row before it returns; the worker's first act is `startQueued`, which flips it to `RUNNING`
+inside its own transaction *and reads the status back in the same transaction*, so a run that was
+cancelled while it waited is never picked up. Everything from there down is unchanged.
+
+**There is ONE entry, and that is the 2026-09-05 change.** `onPostReceive` was the other: one
+accepted run per pushed branch ref, reading `.config/qits/ci-post-receive.yml` out of the pushed
+commit on this class's own worker. The platform runs no CI outside release requests, so every
+repository's file had been deleted on 2026-09-04 — and the engine arm outlived them, enqueueing a run
+per push against a file none of them carried (thirteen phantom `QUEUED` rows, measured). **An
+ordinary push triggers nothing now, and it does so because there is no code left that could**: the
+listener, the accept, the worker half, the config-at-a-sha read and `CiConfigParser` are all gone.
+`SCMPublishCommit` still reaches `CiEventTriggerListener` like every other event, so a repository
+that declares `event: SCMPublishCommit` is served by the ordinary grammar — a capability that stays,
+and one nothing declares today.
 
 **This revised the recording rule on purpose, and the old wording is worth having in front of you.**
 It read: *a run is only ever recorded when it says something true about a commit* — which was a
@@ -431,26 +441,40 @@ statement about when the `INSERT` happens, and it is what made the queue invisib
 > **A run row exists from the moment the work is accepted, and it is removed again if it turns out to
 > describe nothing that happened.**
 
-What a *finished* worker leaves behind is unchanged outcome for outcome. The three cases that
-recorded nothing still record nothing — no config file (opt-in), a commit force-pushed away, a git
-host that could not be reached — but they reach that by **discarding** a row that already exists
-rather than by never writing one, through the same `discardRun` the mid-run `SHA_GONE` backstop uses.
-`CONFIG_ERROR` and the green/red outcomes finish the accepted row instead of inserting a second one.
-The only observable difference is a transient `QUEUED` row in between, which `GET
-/ci/api/runs/active` and, briefly, a repository's own listing will show.
+The one case that records nothing still records nothing — a commit force-pushed away, discovered in
+a step container's own checkout and confirmed by `CiConfigSource.commitHeld` — and it reaches that by
+**discarding** a row that already exists rather than by never writing one (`discardRun`). The
+green/red outcomes finish the accepted row instead of inserting a second one. The only observable
+difference from the old rule is a transient `QUEUED` row in between, which `GET /ci/api/runs/active`
+and, briefly, a repository's own listing will show.
 
-Two of those three deserve their reasoning restated, because "there is a row, why not keep it" is the
-tempting wrong answer. A repository that declares no pipeline must not accumulate a row per push, or
-opt-in stops meaning anything. And an unreachable git host must not leave a red row: **a read failure
-must not invent a gate**, and a red row is exactly an invented gate — the commit is very likely fine
-and this process simply could not ask.
+**Two outcomes left this list with the push path and are worth knowing were once here**, because both
+are still reachable states on a historical row. A repository that declared no pipeline had its row
+discarded (opt-in: it must not accumulate a row per push), and a git host that could not be reached
+had it discarded too — **a read failure must not invent a gate**, and a red row is exactly an invented
+gate. Both were decided on the run worker, after the row existed. A trigger file is read and parsed by
+`CiEventTriggerService` *before* any row exists now, so a missing or broken one is a WARN and no run,
+and nothing writes `CONFIG_ERROR` any more. The rule those cases stated is unchanged and still
+load-bearing one seam over: an unreadable candidate is skipped, never a run.
+
+**The `commitHeld` probe carries the same rule in its third answer.** `HELD`/`GONE`/`UNKNOWN`, and
+`UNKNOWN` must never be collapsed into `GONE`: a host that could not be asked has said nothing about
+the commit, and discarding a run over that would erase a verdict on evidence nobody has.
 
 **`QUEUED` survives a restart.** `sweepInterrupted` re-enqueues those rows, oldest first, so a
-redeploy landing between acceptance and execution no longer eats either a push-triggered or an
-event-triggered build. A `RUNNING` push row is still marked `FAILED`; arbitrary push work may not be
-safe to repeat. A `RUNNING` event row is reset and restarted from its snapshot. Event-trigger scripts
-are therefore an at-least-once boundary and must be idempotent. Nothing here adds durability beyond
-the row.
+redeploy landing between acceptance and execution no longer eats a build. A `RUNNING` event row is
+reset and restarted from its snapshot; event-trigger scripts are therefore an at-least-once boundary
+and must be idempotent. Nothing here adds durability beyond the row.
+
+**What a predecessor's leftovers get is decided in `enqueue`, and it is not "nothing".** A
+`POST_RECEIVE` row is work this engine has no worker for: a `RUNNING` one is marked `FAILED` (its
+step died with its process, and arbitrary push work is not safe to replay even if there were a worker
+for it), and a `QUEUED` one is settled `CANCELLED` rather than left queued — a row nothing will ever
+run sits in `GET /ci/api/runs/active` forever, which is exactly the phantom the retirement is about.
+One INFO line says which and why, and the row says it too: `cancellation_reason` is
+`TRIGGER_RETIRED`, its own value beside `USER_CANCELLED`/`DEDUPED`/`RELEASE_REQUEST_CANCELLED`,
+because nobody cancelled it — the engine that would have run it is gone, and somebody reading the row
+a year from now should find that out from the row rather than from a changelog.
 
 **A dying process claims nothing, and the deployment is stop-first so it does not have to race.**
 `CiRunService.draining` is raised by a `ShutdownEvent` observer — which Quarkus fires before it
@@ -681,49 +705,44 @@ a watermark is paged forward from qits-events' log at startup and on a schedule,
 delay rather than a hole. `event-delivery-guarantees-plan.md` in the superproject is the design and
 `eventstream/AGENTS.md` is the contract; what follows is only what is qits-ci's to get right.
 
-**Each listener's `consumerId()` is STORAGE, not a label**, and the five shipped are literals in
+**Each listener's `consumerId()` is STORAGE, not a label**, and the four shipped are literals in
 `EventstreamDarknessTest` for that reason:
 
 | bean | `consumerId()` | `signatures()` | `selects` |
 |---|---|---|---|
-| `ScmPublishCommitListener` | `ci-push-runs` | `SCMPublishCommit` | default |
 | `CiEventTriggerListener` | `ci-event-triggers` | `["*"]` | default (see below) |
 | `BuildSuccessfulListener` | `ci-release-train` | `BuildSuccessful` | default |
 | `DaemonReleaseListener` | `ci-daemon-adopt` | `SoftwareRelease` | the daemon's own releases |
 | `ScmReleaseListener` | `ci-release-facts` | `SCMRelease` | default |
 
-**`ScmPublishCommitListener` is the push intake**, and it replaced an HTTP endpoint rather than
-joining one. `POST /ci/api/events/post-receive` is gone: qits-githost publishes `SCMPublishCommit`
-(one per successfully updated branch ref) and this bean calls the same `CiRunService.onPostReceive`
-the endpoint called, so validation, the `QUEUED` row and the supersede of an older queued push for
-the same `(repoId, branch)` are unchanged. Three things about it are worth knowing before touching
-it:
+**There were five, and `ci-push-runs` retired on 2026-09-05.** `ScmPublishCommitListener` was the
+push intake — it had itself replaced `POST /ci/api/events/post-receive` — and it called
+`CiRunService.onPostReceive` for every `SCMPublishCommit`, accepting one `QUEUED` run per pushed
+branch ref against `.config/qits/ci-post-receive.yml`. The platform runs no CI outside release
+requests and every repository's file was gone; the listener was not, so every push still cost a
+runner slot to discover that nothing was declared. It is deleted, along with the intake, the parser
+and `suppressCi`'s only reader. Four things about the retirement are worth keeping in front of you:
 
-- **`suppressCi` is honoured here and nowhere else.** `-o qits.no-ci` used to be the git host's
-  decision — it skipped the POST — and is a fact on the event now, so a run engine skips the build
-  while another consumer may ignore the flag entirely. Skipping records **no row**: nothing to
-  supersede, nothing to cancel.
-- **A push run carries the frame's id in `trigger_event_id`, and that is what closes the causation
-  chain.** `announceRun` reads it back off the row and `CausingEvent.parentOf` makes it the parent of
-  the run's `BuildSuccessful`, so release → push → commit event → CI run → deploy is **one** chain.
-  It used to be two halves with a root event in the middle, because the intake was an HTTP POST with
-  no event behind it to name. Carried as data on the row rather than in `CausationScope`, for the
-  reason the trigger engine already had: that scope is a `ThreadLocal` and the publish happens on
-  `ci-run-worker`, possibly after a restart.
-
-  **It puts push runs inside `unique (trigger_event_id, repo_id, config_path)`, which is a second
-  guarantee rather than a cost.** A push's config path is the constant `ci-post-receive.yml`, so the
-  event id is the whole of what tells one push row from the next — one announced push, one run. The
-  claim ledger settles a redelivery before the handler is called at all; the constraint is the net
-  underneath, on ci's own datasource where the claim is not. A duplicate is **settled**:
-  `acceptPostReceive` catches the violation, returns null, nothing is enqueued and nothing is
-  superseded (the flush threw before the supersede loop, which is right — a push already recorded
-  must not cancel the queue a second time). Throwing would leave a push owed forever over a run that
-  already exists. `NULL` there now means "nothing announced this", which is `CiRunService.execute`,
-  the synchronous test entry, and nothing in production.
-- **Its failure policy is the usual pair**: a payload that will not bind and an identifier
-  `CiIdentifiers` refuses are poison (WARN, settled — what was a 400 when there was a caller to
-  answer), and anything `onPostReceive` throws is left to throw.
+- **`SCMPublishCommit` still arrives, and that is deliberate.** `CiEventTriggerListener` subscribes
+  to `"*"`, so a repository declaring `event: SCMPublishCommit` in a `ci-event-*.yml` is served by
+  the ordinary grammar — matching, `when:` and `checkout:` — with no code special to pushes anywhere.
+  None does today. That capability is the reason the *engine* arm stays while the hard-coded one goes.
+- **`suppressCi` has no reader here any more.** `-o qits.no-ci` was the git host's decision (it
+  skipped the POST), then a fact on the event that this service honoured. Now it is a fact nothing in
+  qits-ci consumes: a trigger on that event spells `suppressCi: { exact: "false" }` as a `when:`
+  condition, and matchers compare JSON literals, so the string matches the boolean.
+- **`ci-push-runs` is an ABANDONED consumer id.** Its `consumed_event` rows and its
+  `consumer_watermark` are left where they are — no migration, no deletion — which is what
+  qits-platform-deployments did with `pd-build-succeeded`. The rows are pruned by the sweeper's own
+  horizon and the watermark is simply never read again. **The id must never be handed to a new
+  listener**: one inheriting it would inherit a watermark saying every push ever announced had
+  already been handled, and would silently skip everything up to the head of the log.
+  `EventstreamDarknessTest` asserts no live listener claims it.
+- **The causation chain lost a hop and did not break.** A push run carried the frame's id in
+  `trigger_event_id`, so release → push → commit event → CI run → deploy was one chain. There is no
+  push run to be a hop; a release request's `ReleaseRequestChanged` and a release's `SCMRelease` are
+  what cause runs now, and both are stamped exactly the same way. A null `trigger_event_id` — a run
+  nothing announced, publishing a root — is left only on historical push rows.
 
 The dependency this adds is `eu.wohlben.qits:qits-githost-events`, the vocabulary jar — four records
 and the bus, no client and no address. It is the only compile-time dependency this repo has on
@@ -875,8 +894,8 @@ WP2; the class javadoc carries the argument in full and the short form is:
   network loses the healthcheck race and cd kills the deployment.
 - **`ScmReleaseListener` writes in its own transaction, not the claim's.** The claim lives on the
   eventstream datasource and the fact row on ci's, and one JTA transaction does not take both —
-  measured, as `Enlisted connection used without active transaction`. `acceptPostReceive` already had
-  the same arrangement for the same reason. The fact is written before anything is announced, so the
+  measured, as `Enlisted connection used without active transaction`. `CiEventTriggerService`'s owed
+  ledger runs the same arrangement for the same reason. The fact is written before anything is announced, so the
   direction that can go wrong is a re-offered event finding the row already there, which is a no-op.
 - **`SCMRelease`'s name and its three payload fields are strings here**, like the tag event's, and
   their guard is `bus/ScmReleaseContractTest` — the same shape as the tag event's with one
@@ -1135,8 +1154,8 @@ names"), and what follows is what biting it feels like.
 
   **What is durable now is the ACCEPTANCE, because the effect could not be made so.** The claim is on
   the eventstream datasource and a run row is on ci's, and one JTA transaction does not take both
-  (`Enlisted connection used without active transaction`, the same measurement `acceptPostReceive`
-  and `ScmReleaseListener` already run under). So `onEvent` writes a `ci_owed_event` row on ci's own
+  (`Enlisted connection used without active transaction`, the same measurement `ScmReleaseListener`
+  already runs under). So `onEvent` writes a `ci_owed_event` row on ci's own
   datasource, in its own transaction, **before** it answers `true` — and `evaluateQuietly` deletes it
   when the evaluation returns. The orderings are exhaustive: die before the row commits and the
   accept answers `false`, the listener throws and the bus re-offers; die after it and the row is the
@@ -1183,9 +1202,9 @@ names"), and what follows is what biting it feels like.
   **It fires at accept now**, since the run row is written by `onEventTrigger` before it returns
   rather than by the worker later. Nothing about the semantics moved with it: a redelivery still hits
   the constraint and is still dropped as already-triggered, just on `ci-trigger-worker` instead of
-  `ci-run-worker`, and before a queue slot is spent rather than after. The push path reaches the same
-  constraint on the bus's dispatch thread, in `acceptPostReceive`, and answers a duplicate the same
-  way: null, and an INFO saying the first run stands.
+  `ci-run-worker`, and before a queue slot is spent rather than after. The retired push intake
+  reached the same constraint on the bus's dispatch thread and answered a duplicate the same way:
+  null, and an INFO saying the first run stands.
 
   **The durable claim sits above it and neither replaces the other.** A `consumed_event` row makes
   one event reach the engine at most once, so the constraint fires far less often than it used to —
@@ -1193,9 +1212,8 @@ names"), and what follows is what biting it feels like.
   a race between two evaluations and a restart mid-evaluation. Two nets, one of which is transactional
   with the run row. Deleting either for tidiness trades a guarantee for a diagram.
 - **There is a SECOND collapse on this path and it is not that one.** `CiRunService.supersedeByVersion`
-  is the event path's twin of the per-branch push supersede in `acceptPostReceive`, down to the
-  columns it writes, and it exists because **`SCMPublishTag` is announced once per tag ref of a
-  push**. The publisher is right to emit all of them — a tag is a fact and qits-projects' backup
+  is `supersedeByCheckoutBranch`'s sibling, down to the columns it writes, and it exists because
+  **`SCMPublishTag` is announced once per tag ref of a push**. The publisher is right to emit all of them — a tag is a fact and qits-projects' backup
   consumer needs every one — so a trigger file declaring `event: SCMPublishTag` would get one run per
   tag, four of five building a version nobody asked for. The collapse therefore belongs to the
   consumer that turns a fact into work.
@@ -1295,28 +1313,33 @@ names"), and what follows is what biting it feels like.
   has published whatever it publishes before a non-gating step can fail. So the non-gating steps go
   **last**, and that is a rule rather than a style: everything after a failure is `SKIPPED`.
 
-  It is legal in **both** file kinds, unlike `checkout:` and the file-level `gating:`. The `steps:`
-  schema is one implementation on purpose, and the key is not inert in `ci-post-receive.yml` either
-  — a push whose last step publishes docs is the same case. Only a YAML boolean is accepted, on the
-  standing reason with its sharpest edge: `gating: "false"` parsing as truthy would hold a commit for
-  a failure nobody meant to gate on.
-- **The trigger file parser is strict where `ci-post-receive.yml` is lenient**, and the asymmetry is
-  the point rather than an inconsistency. (Both halves of the rule are live code, and only one half
-  has users: no repository has shipped a `ci-post-receive.yml` since per-push CI retired on
-  2026-09-04. The push path stays because deleting a working intake buys nothing, and every
-  `ci-post-receive.yml` sentence on this page should be read as "the engine still does this" rather
-  than as a description of a file you will find in a tree.) In a pipeline an unread key costs a
-  feature; in a
-  *selection* it costs correctness, because an absent `when:` means **unconditional** — so a mistyped
-  `wehn:` would silently widen the trigger to every event of that name. Unknown top-level keys and
-  duplicate keys are therefore errors in a trigger file and are not in a pipeline. The `steps:`
-  schema is shared verbatim (`CiConfigSchema`), because a step must not mean two things.
+  It was legal in **both** file kinds while there were two, unlike `checkout:` and the file-level
+  `gating:`: the `steps:` schema is one implementation on purpose, and a push pipeline whose last
+  step published docs was the identical case. Only a YAML boolean is accepted, on the standing reason
+  with its sharpest edge: `gating: "false"` parsing as truthy would hold a commit for a failure
+  nobody meant to gate on.
+- **The trigger file is strict about unknown TOP-LEVEL keys and lenient about unknown per-step ones**,
+  and the asymmetry is the point rather than an inconsistency. In a pipeline an unread key costs a
+  feature that was not there yet; in a *selection* it costs correctness, because an absent `when:`
+  means **unconditional** — so a mistyped `wehn:` would silently widen the trigger to every event of
+  that name. Duplicate keys are errors for the same reason (a silently dropped condition widens),
+  which is why `CiConfigSchema.load` takes a `strictDuplicateKeys` flag at all: the lenient caller was
+  `CiConfigParser`, which retired with per-push CI on 2026-09-05, and the flag survives it because it
+  is the argument rather than the caller that is worth keeping.
+- **The per-step `branches:` filter went with the push path too, and its REFUSAL stayed.** A step
+  could bind itself to the run's branch while there was a pipeline file whose branch was the push's;
+  it was always a parse error in a trigger file, because an event run's branch is the trigger's
+  single decision made before any step exists, so a filter over it is inert decoration or a step that
+  can never run. With no other file kind left, `CiPipeline.BranchFilter`, the record component and
+  the SKIPPED-by-branch arm in `runSteps` are deleted — but `CiConfigSchema.steps` still refuses the
+  key by name, so a repository that carries one is told rather than having it ignored. `SKIPPED`
+  therefore means exactly one thing again: the loop never reached this step.
 - **`artifacts:` is the one key the trigger file adds rather than subtracts**, and it is what makes a
   file a *release pipeline*: a non-empty list of `{type: npm|maven|docker|daemon, name: …}`, strict in every
   direction (empty list, unknown type, blank name, extra key, wrong shape — all parse errors naming
-  the file). It is a parse error in `ci-post-receive.yml` for its own reason rather than by symmetry
-  with `branches:`: what a declaration announces is the *triggering* event's version, and a push
-  carries none, so the key could only ever be inert there. The declaration is a **claim**, never an
+  the file). It was a parse error in `ci-post-receive.yml` for its own reason: what a declaration
+  announces is the *triggering* event's version, and a push carries none, so the key could only ever
+  have been inert there. The declaration is a **claim**, never an
   observation — qits-ci cannot see what a step pushed — and it is declared rather than emitted
   because a declaration is statically readable, which is the whole of what the parked cycle-detection
   work needs. The daemon's return channel could not have carried an emission anyway: it is
@@ -1324,7 +1347,7 @@ names"), and what follows is what biting it feels like.
 - **The candidate list was the feature's one acknowledged compromise, and it is the worked example of
   a seam paying for itself.** It read: qits-artifacts exposes no listing, so `KnownCiRepos` answers
   with what qits-ci already knows — recorded runs' repo ids — and a
-  repository that has never pushed cannot event-trigger until it does. That cost was real: it blocked
+  repository qits-ci has recorded no run for cannot event-trigger. That cost was real: it blocked
   bootstrapping a platform seeded straight onto the git host, which is exactly what `POST
   /ci/api/events/trigger` exists for. The git host has since grown the listing, the swap was the one
   class the javadoc promised, and nothing in the engine moved.
@@ -1470,18 +1493,19 @@ in ci's **own** physical database; a foreign key cannot span it.
 
 Four things reaching this code are attacker-controlled and must stay that way in your head:
 
-- **The `SCMPublishCommit` payload.** It says what somebody pushed, so the repo id, the branch and
-  the sha on it are as attacker-shaped as the intake POST they replaced — a durable event with a
-  claim row behind it establishes *delivery*, never content.
-  `CiIdentifiers.require{RepoId,Branch,Sha}` validates all three *before* they reach a
-  filesystem path or an argv. **The payload's `projectId` and `repoName` join them, and they are
-  checked ONLY WHEN PRESENT** (`CiIdentifiers.requireRepo`): both reach the same clone URL as a path
-  segment, so a value that is there is validated to the same standard — and absence is the
-  compatibility arm rather than a refusal, because an id-addressed push announces neither. They are
-  read off the payload TREE rather than the bound record, so a `qits-githost-events` that predates
-  them still builds. Never widen those, never bypass them, never interpolate an identifier
-  into a shell string. What changed with the transport is only the answer to a refusal: a 400 to a
-  caller became a WARN and a settled event, because there is no caller.
+- **Any event payload a `checkout:` trigger reads.** It is another service's word about what
+  somebody did, so the branch and sha a trigger resolves out of it are as attacker-shaped as the
+  intake POST they replaced — a durable event with a claim row behind it establishes *delivery*,
+  never content. `CiIdentifiers.require{RepoId,Branch,Sha}` validates all three at the accept,
+  *before* they reach a filesystem path or an argv. **A candidate's `projectId` and `repoName` join
+  them, and they are checked ONLY WHEN PRESENT** (`CiIdentifiers.requireRepo`): both reach the same
+  clone URL as a path segment, so a value that is there is validated to the same standard — and
+  absence is the compatibility arm rather than a refusal, because a listing that answers ids alone
+  supplies neither. Every payload is read as a TREE (`readTree`) rather than bound to a record, which
+  is also why no `@RegisterForReflection` is owed for one. Never widen those, never bypass them,
+  never interpolate an identifier into a shell string. What changed when the intake left HTTP is only
+  the answer to a refusal: a 400 to a caller became a WARN and a settled event, because there is no
+  caller.
 - **The step's `image`.** It comes from a file in the repository being tested and still lands in a
   `docker run` argv as a positional argument — on the far side of the wire now — so it is checked
   here before it is sent and to the same standard: `CiIdentifiers.requireImage` rejects blank and
@@ -1564,9 +1588,9 @@ the row is owed for). A new entity that skips the decision fails the build namin
 
 `V4__run_started_at.sql` and `V5__run_repository_identity.sql` continue the same rule. The second is
 the repository-identity campaign's half of it: `ci_run.project_id` and `ci_run.repo_name`, both
-nullable, no backfill and part of no constraint. **Nullable is the design, not a shortcut** — the git
-host fills the pair from the address a push arrived on, so an id-addressed push announces neither and
-no historical row has them; a run with no pair builds id-addressed URLs, which is what this service
+nullable, no backfill and part of no constraint. **Nullable is the design, not a shortcut** — only a
+qits-projects listing can answer a public name, so a candidate that came off the git host's own
+listing carries neither and no historical row has them; a run with no pair builds id-addressed URLs, which is what this service
 did before names existed. `repo_id` is untouched and stays the key: the dedupe constraint is built on
 it and every existing row is found by it.
 
@@ -1574,8 +1598,8 @@ it and every existing row is found by it.
 and the last three are the release-flow set. `ci_run.gating` is the data form of "userflows are non-gating" — added with a
 default so every historical row fills as gating, then the default dropped, which is the V3-era
 lesson followed. `ci_run.release_request_id` is nullable with **no** default and no backfill,
-because null is the ordinary value rather than a value to be filled: every push run and every event
-run not triggered by a `ReleaseRequestChanged` has none, so there is nothing for an existing row to
+because null is the ordinary value rather than a value to be filled: every event run not triggered by
+a `ReleaseRequestChanged` has none, as does every historical push row, so there is nothing for an existing row to
 be and no reading of "absent" to get wrong. It carries a **partial** index (`where … is not null`),
 since an index over the nulls would be a second copy of the table for no query, and it is part of no
 constraint — the dedupe stays `(trigger_event_id, repo_id, config_path)` and the per-branch collapse
@@ -1642,6 +1666,9 @@ each of the schema's remaining decisions, and the check constraints in particula
 `QUEUED`, `EVENT` joined `POST_RECEIVE` — so the invariant lives where the writes are:
 `CiRunStatus`, `CiTriggerType` and `CiStepStatus` are `@Enumerated(EnumType.STRING)` and no code
 path writes a status any other way. **A new status value is one enum constant and no migration.**
+**A RETIRED one is not even that**: `POST_RECEIVE` and `CONFIG_ERROR` have no writer since
+2026-09-05 and both constants stay, because the column holds the STRING and rows carry it — deleting
+either would make history unreadable. There is no migration and no backfill for a retirement.
 V8's `ck_ci_daemon_pin_verdict` is the one check that stays, because a verdict is a closed statement
 about one probe's outcome rather than a growing catalogue — and because it is named, so widening it
 would cost one line. `CiSchemaTest` runs the real migration against a real postgres and pins all of
@@ -2056,8 +2083,9 @@ contract, tested where it lives.
 
   The stub they share is a trimmed second copy of the eventstream module's, duplicated for the
   reason both `FakeCiStepRunner`s are (the modules do not share a test classpath, and a test-jar to
-  bridge forty lines is worse). `BuildSuccessfulPublishTest` drives a real run to `SUCCESS` through
-  the real push path and asserts the *wire* contract the other side was built against: one PUT per green
+  bridge forty lines is worse). `BuildSuccessfulPublishTest` drives a real run to `SUCCESS` through a
+  trigger file it commits and fires by hand, and asserts the *wire* contract the other side was built
+  against: one PUT per green
   run, a v4 UUID in the path, `name` as the signature, and the run's coordinates in the canonical
   payload. Retries, the outbox and the three-way PUT semantics belong to the eventstream suite; the
   round trip through a real qits-events belongs to the platform.
@@ -2067,13 +2095,16 @@ contract, tested where it lives.
   Quarkus instance. So a trigger file in a test fixture must select something **unique to the
   repository that committed it**, or one test method's event fires an earlier method's repository and
   "exactly two runs, exactly two publishes" stops being a statement about the test making it.
-- `CiPipelineBoundaryTest` starts at an `SCMPublishCommit` handed to `ScmPublishCommitListener`, not
-  at a `git push`, because the git host is qits-githost. Assertions about which refs it announces —
-  and about the tag and delete events nothing here subscribes to — belong there. `bus/ScmPushFrames`
-  builds the frame from the real record, so a payload change is a compile error rather than a suite
-  that keeps passing against bytes nobody sends.
-- `CiDaemonGateIT` is **the** gate: the outline's whole lifecycle through the real push path, on
-  real containers. A two-step pipeline pushed into a real bare, the push announced, live chunks read
+- `CiPipelineBoundaryTest` is the whole loop at the seams this repo owns: a repository committing a
+  trigger file on `main`, an event supplied through `POST /ci/api/events/trigger`, and the run read
+  back over HTTP. It **started at a push** until 2026-09-05, when the intake retired; what is left of
+  that starting point is one pinning, `anOrdinaryPushIsConsumedAndTriggersNothing`, which hands the
+  generic engine a real `SCMPublishCommit` and asserts no run appears. `bus/ScmPushFrames` builds
+  that frame from the real record, so a payload change is a compile error rather than a suite that
+  keeps passing against bytes nobody sends. Assertions about which refs the git host announces — and
+  about the tag and delete events nothing here subscribes to — belong to qits-githost.
+- `CiDaemonGateIT` is **the** gate: the outline's whole lifecycle on real containers. A two-step
+  pipeline pushed into a real bare and accepted at that branch and sha, live chunks read
   off the `live` object mid-run, terminal per-step rows with host-stamped timestamps after, a
   cancellation honored mid-step, and a per-step timeout recorded as timed-out rather than failed. It
   deliberately includes a **noisy** step (`yes` for a second) — bounded memory under a chunk flood is
@@ -2095,7 +2126,9 @@ contract, tested where it lives.
 - `CiRestartReconciliationTest` is the boot half of the same story, and the only test that drives
   **both** startup observers at once: two runs left `RUNNING`, then `CiDaemonLauncher.destroyAllOwned`
   and `CiRunService.sweepInterrupted`, then the DELETE asserted to have carried `ci-step` and the
-  boot instant, the push run `FAILED` and the event run recovered from its own snapshot.
+  boot instant, the leftover push run `FAILED` — no live deployment writes one any more, and a
+  successor still has to settle the ones a predecessor left — and the event run recovered from its
+  own snapshot.
   **It is a plain `@QuarkusTest` now and needs no docker**, which is the cutover paying for itself:
   its predecessor (`CiRestartReconciliationIT`, tagged `extended`) started real containers, and its
   one irreplaceable assertion — that an **unlabelled** bystander survived — was the whole of what a

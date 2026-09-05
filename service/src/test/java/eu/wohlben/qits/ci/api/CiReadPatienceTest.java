@@ -172,8 +172,8 @@ public class CiReadPatienceTest {
               run.branch = "main";
               run.commitSha = "0".repeat(40);
               run.status = CiRunStatus.QUEUED;
-              run.triggerType = CiTriggerType.POST_RECEIVE;
-              run.configPath = ".config/qits/ci-post-receive.yml";
+              run.triggerType = CiTriggerType.EVENT;
+              run.configPath = ".config/qits/ci-event-suite.yml";
               run.createdAt = Instant.now();
               runs.persist(run);
             });

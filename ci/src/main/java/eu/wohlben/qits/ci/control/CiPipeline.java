@@ -1,13 +1,17 @@
 package eu.wohlben.qits.ci.control;
 
-import eu.wohlben.qits.ci.control.CiEventSelection.Matcher;
 import java.util.List;
 
 /**
- * The parsed {@code .config/qits/ci-post-receive.yml}: the ordered list of steps to run
- * sequentially against the pushed commit. The MVP schema is exactly this — later format extensions
- * (names, needs, caching, …) stay additive over the {@code steps} core, which is the path {@code
- * timeout-seconds} took.
+ * The {@code steps:} half of a parsed {@code .config/qits/ci-event-*.yml}: the ordered list of steps
+ * to run sequentially against the run's commit. The MVP schema is exactly this — later format
+ * extensions (names, needs, caching, …) stay additive over the {@code steps} core, which is the path
+ * {@code timeout-seconds} took.
+ *
+ * <p>It is a type of its own, rather than a field on {@link CiEventTrigger}, because it used to be
+ * what <em>two</em> file kinds shared: {@code ci-post-receive.yml} was nothing but a pipeline, and a
+ * step had to mean exactly the same thing in both. That file retired with per-push CI on 2026-09-05
+ * and the split is kept — a pipeline and the declaration that triggers one are still two things.
  */
 public record CiPipeline(List<CiStepDecl> steps) {
 
@@ -43,11 +47,6 @@ public record CiPipeline(List<CiStepDecl> steps) {
    * step could not use it anyway; refusing the pair is what keeps that from being discovered as a
    * permission denied halfway through a publish.
    *
-   * <p>{@code branches} is the step's own {@code branches:} filter, {@link #runsOnBranch evaluated}
-   * before the container launches. <b>Empty means the config declared none</b>, and the empty list
-   * has exactly one origin: {@code branches: []} in a file is a parse error, because both readings
-   * of it already have an unambiguous spelling (omit the key; delete the step).
-   *
    * <p><b>{@code gating} is whether THIS step's failure is a verdict about the commit</b>, and it is
    * what lets one file carry a gating half and a non-gating half. Absent means true, which is every
    * pipeline written before the key existed, byte for byte. A step declaring {@code gating: false}
@@ -69,46 +68,16 @@ public record CiPipeline(List<CiStepDecl> steps) {
       Integer timeoutSeconds,
       boolean docker,
       String user,
-      boolean gating,
-      List<BranchFilter> branches) {
+      boolean gating) {}
 
-    /**
-     * Whether this step's declaration binds it to the branch a run is on. An undeclared filter binds
-     * every branch — today's behaviour, byte for byte — and a declared one binds when <b>any</b>
-     * entry matches.
-     */
-    public boolean runsOnBranch(String branch) {
-      if (branches == null || branches.isEmpty()) {
-        return true;
-      }
-      for (BranchFilter filter : branches) {
-        if (filter.matches(branch)) {
-          return true;
-        }
-      }
-      return false;
-    }
-  }
-
-  /**
-   * One entry of a step's {@code branches:}: every matcher in it must hold. Entries are OR'd and a
-   * mapping's keys are AND'd — the {@code when:} DSL's composition rule minus the path level,
-   * because the subject is one scalar rather than a payload.
-   *
-   * <p>It carries {@link Matcher} rather than a second matcher type: one matcher implementation on
-   * this platform, not two. The vocabulary a branch filter may spell is narrower, and that is the
-   * parser's rule rather than this record's — {@code exists} over a value that is always present
-   * could only ever say yes.
-   */
-  public record BranchFilter(List<Matcher> matchers) {
-
-    public boolean matches(String branch) {
-      for (Matcher matcher : matchers) {
-        if (!CiEventSelectionEvaluator.matchesScalar(matcher, branch)) {
-          return false;
-        }
-      }
-      return true;
-    }
-  }
+  // A step could also declare `branches:` — a list of matchers over the run's branch, entries OR'd,
+  // absent meaning "every branch" — and it is GONE with per-push CI (2026-09-05). It was a pipeline
+  // key rather than a trigger key, and it was already a parse error in a trigger file for a reason
+  // that outlived the other file: an event-triggered run's branch is decided by the trigger, once,
+  // before any step exists, so a per-step filter over it is either inert decoration or a step that
+  // can never run — allow-but-inert, the trap the whole schema refuses. With `ci-post-receive.yml`
+  // retired there is no file left that could declare one, so the record component, the BranchFilter
+  // type and the SKIPPED-by-branch arm in CiRunService.runSteps went with it. The parse error stays
+  // (CiConfigSchema.steps), because a repository that still carries the key must be told rather
+  // than have it silently ignored.
 }

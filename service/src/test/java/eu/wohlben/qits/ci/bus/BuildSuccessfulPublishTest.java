@@ -9,7 +9,10 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import eu.wohlben.qits.ci.control.CiRepoRef;
 import eu.wohlben.qits.ci.control.FakeCiStepRunner;
+import eu.wohlben.qits.ci.githost.FakeGitHostRepoListing;
+import eu.wohlben.qits.ci.projects.FakeProjectsRepoListing;
 import eu.wohlben.qits.ci.githost.StubGitHost;
 import io.quarkus.test.common.TestResourceScope;
 import io.quarkus.test.common.WithTestResource;
@@ -28,8 +31,14 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The publish hook, end to end inside one JVM: a post-receive event arrives, the run goes green, and
- * a {@code BuildSuccessful} lands on qits-events as one idempotent PUT.
+ * The publish hook, end to end inside one JVM: a domain event matches a repository's trigger file,
+ * the run goes green, and a {@code BuildSuccessful} lands on qits-events as one idempotent PUT.
+ *
+ * <p>It drove the run through a push until 2026-09-05 — a {@code SCMPublishCommit} handed to the
+ * retired {@code ScmPublishCommitListener}, which was the shortest path to a green run. An ordinary
+ * push triggers nothing now, so the shortest path is the trigger type that is left; nothing about
+ * what is asserted below moved with it, because the publish hook hangs off a run finishing green and
+ * never off what caused the run.'
  *
  * <p><b>This is the only test in the repo that runs with the event bus switched on</b>, which is
  * half of what it is for. `%test.qits.eventstream.enabled=false` in the shipped
@@ -51,9 +60,6 @@ import org.junit.jupiter.api.Test;
 @WithTestResource(StubEventsServer.class)
 public class BuildSuccessfulPublishTest {
 
-  /** The all-zero sha git reports as the old id of a newly created branch. */
-  private static final String ZERO_SHA = "0".repeat(40);
-
   private static final String CONFIG_ONE_STEP =
       """
       steps:
@@ -71,21 +77,31 @@ public class BuildSuccessfulPublishTest {
 
   private final ObjectMapper json = new ObjectMapper();
 
+  /** This class's own event name, so no other suite's trigger file can be fired by one of these. */
+  private static final String EVENT_NAME = "CiPublishProbe";
+
+  private static final String TRIGGER_PATH = ".config/qits/ci-event-publish.yml";
+
   @Inject FakeCiStepRunner fakeRunner;
 
-  @Inject ScmPublishCommitListener pushes;
+  @Inject FakeGitHostRepoListing gitHostListing;
+
+  /** The platform catalogue, which is the only listing that can answer a public NAME. */
+  @Inject FakeProjectsRepoListing projectsListing;
 
   @BeforeEach
   void resetState() {
     fakeRunner.reset();
     StubEventsServer.reset();
+    gitHostListing.set();
+    projectsListing.unset();
   }
 
   @Test
   public void aGreenRunPublishesOneBuildSuccessfulCarryingTheRunsCoordinates() throws Exception {
     String repoId = seedOriginWithConfig(CONFIG_ONE_STEP);
     String sha = tipOf(repoId);
-    announcePush(repoId, "main", ZERO_SHA, sha);
+    fire(repoId);
 
     Map<String, Object> run = awaitTerminalRun(repoId);
     assertEquals("SUCCESS", run.get("status"));
@@ -119,8 +135,8 @@ public class BuildSuccessfulPublishTest {
     assertFalse(payload.has("imageDigest"), payload.toString());
     // Identity travels in the envelope's id, never in the payload.
     assertFalse(payload.has("eventId"), payload.toString());
-    // This push arrived id-addressed (no project/name), so the pair is omitted rather than nulled —
-    // the run addresses its image by the storage id, exactly as before names existed.
+    // This candidate came off a listing that answers ids only, so the pair is omitted rather than
+    // nulled — the run addresses its image by the storage id, exactly as before names existed.
     assertFalse(payload.has("projectId"), payload.toString());
     assertFalse(payload.has("repoName"), payload.toString());
   }
@@ -128,10 +144,11 @@ public class BuildSuccessfulPublishTest {
   @Test
   public void aNameAddressedRunCarriesTheProjectAndRepoNameOnTheWire() throws Exception {
     String repoId = seedOriginWithConfig(CONFIG_ONE_STEP);
-    // A name-addressed push: the git host serves the same bare under /git/<projectId>/<repoName>.
+    // A name-addressed candidate: the git host serves the same bare under /git/<projectId>/<repoName>
+    // and qits-projects' listing is what supplies the pair.
     StubGitHost.alias("acme", "widget", repoId);
-    String sha = tipOf(repoId);
-    pushes.onFrame(ScmPushFrames.named(repoId, "acme", "widget", "main", ZERO_SHA, sha));
+    projectsListing.set(new CiRepoRef(repoId, "acme", "widget"));
+    fire(repoId);
 
     Map<String, Object> run = awaitTerminalRun(repoId);
     assertEquals("SUCCESS", run.get("status"));
@@ -150,11 +167,11 @@ public class BuildSuccessfulPublishTest {
   @Test
   public void eachRunGetsItsOwnEventId() throws Exception {
     String first = seedOriginWithConfig(CONFIG_ONE_STEP);
-    announcePush(first, "main", ZERO_SHA, tipOf(first));
+    fire(first);
     awaitTerminalRun(first);
 
     String second = seedOriginWithConfig(CONFIG_ONE_STEP);
-    announcePush(second, "main", ZERO_SHA, tipOf(second));
+    fire(second);
     awaitTerminalRun(second);
 
     List<StubEventsServer.Put> puts = awaitPuts(2);
@@ -165,10 +182,20 @@ public class BuildSuccessfulPublishTest {
         "a reused id is a 400 from qits-events, not a second event");
   }
 
-  // --- the push, as qits-githost announces it ---
+  // --- the event, as the trigger engine is given one ---
 
-  private void announcePush(String repoId, String branch, String oldSha, String newSha) {
-    pushes.onFrame(ScmPushFrames.push(repoId, branch, oldSha, newSha));
+  /** Fires this class's event for one repository, through the same door an operator would use. */
+  private void fire(String repoId) {
+    io.restassured.RestAssured.given()
+        .contentType(io.restassured.http.ContentType.JSON)
+        .body(
+            """
+            {"name":"%s","occurredAt":"2026-09-05T09:00:00Z","payload":{"publishRepo":"%s"}}"""
+                .formatted(EVENT_NAME, repoId))
+        .when()
+        .post("/ci/api/events/trigger")
+        .then()
+        .statusCode(200);
   }
 
   // --- git plumbing (StubGitHost serves these bares as <base>/git/<repoId>) ---
@@ -182,15 +209,26 @@ public class BuildSuccessfulPublishTest {
     String repoId = UUID.randomUUID().toString();
     Path seed = Files.createTempDirectory("ci-bus-seed");
     git(seed, "init", "-q", "-b", "main");
-    Path configFile = seed.resolve(".config/qits/ci-post-receive.yml");
+    Path configFile = seed.resolve(TRIGGER_PATH);
     Files.createDirectories(configFile.getParent());
-    Files.writeString(configFile, config);
+    // The selection names this repository and nothing else: every repository this JVM has seeded is
+    // a candidate for every event evaluated in it, so a shared literal would let one method's event
+    // fire another's repository and "one green run is one publish" would stop being about this test.
+    Files.writeString(
+        configFile,
+        """
+        event: %s
+        when:
+          - publishRepo: { exact: %s }
+        %s"""
+            .formatted(EVENT_NAME, repoId, config));
     git(seed, "add", ".");
     git(seed, "-c", "user.email=ci@test", "-c", "user.name=ci", "commit", "-q", "-m", "ci config");
 
     Path origin = gitHostRoot().resolve(repoId);
     Files.createDirectories(origin.getParent());
     git(null, "clone", "-q", "--bare", seed.toString(), origin.toString());
+    gitHostListing.set(repoId);
     return repoId;
   }
 

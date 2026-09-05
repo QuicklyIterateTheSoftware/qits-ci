@@ -7,7 +7,8 @@ import eu.wohlben.qits.ci.persistence.CiScmReleaseRepository;
 import eu.wohlben.qits.ci.persistence.CiStepRepository;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.inject.Inject;
-import java.util.List;
+import java.time.Instant;
+import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 
 /**
@@ -31,6 +32,61 @@ public abstract class CiTestSupport {
   @Inject protected FakeCiConfigSource fakeConfig;
   @Inject protected FakeCandidateRepos fakeCandidates;
   @Inject protected CiRunService runService;
+  @Inject protected CiEventTriggerParser triggerParser;
+
+  /**
+   * The event name every run this class drives is triggered by. A name of its own rather than a real
+   * one, so a test that seeds a trigger file for a <em>real</em> event cannot be fired by one of
+   * these and vice versa — the candidate list is shared for the life of a Quarkus instance, which is
+   * the trap documented in {@code AGENTS.md} under the bus tests.
+   */
+  protected static final String TEST_EVENT_NAME = "CiTestEvent";
+
+  /** The trigger file path these runs record. A real {@code ci-event-*.yml} name, as identity. */
+  protected static final String TEST_TRIGGER_PATH = ".config/qits/ci-event-suite.yml";
+
+  /**
+   * Wraps a bare {@code steps:} document as the shortest trigger file that would declare it.
+   *
+   * <p><b>This is what replaced {@code CiRunService.execute}.</b> That entry accepted and ran a push
+   * in one call, and half this suite used it as the cheap way into {@code runSteps} — the step state
+   * machine, the announcer seams, the supersede rules — none of which is about pushes. The push arm
+   * retired on 2026-09-05, so the same shortcut is spelled as the one trigger type there is. What
+   * changes for a converted test is exactly two things, and both are the event path being the event
+   * path: the row is {@code EVENT} with a {@code trigger_event_id}, and its step containers get the
+   * four {@code QITS_EVENT_*} variables instead of an empty map.
+   */
+  protected static String triggerFile(String stepsYaml) {
+    return "event: " + TEST_EVENT_NAME + "\n" + stepsYaml;
+  }
+
+  /** One resolved trigger, ready for {@code executeEventRun}/{@code onEventTrigger}. */
+  protected CiRunService.EventRun eventRun(String repoId, String branch, String sha, String stepsYaml) {
+    return eventRun(CiRepoRef.of(repoId), branch, sha, stepsYaml);
+  }
+
+  /** The same, for a repository carrying its public coordinate. */
+  protected CiRunService.EventRun eventRun(
+      CiRepoRef repo, String branch, String sha, String stepsYaml) {
+    String content = triggerFile(stepsYaml);
+    return new CiRunService.EventRun(
+        repo,
+        branch,
+        sha,
+        triggerParser.parse(TEST_TRIGGER_PATH, content),
+        // A fresh event id per call, because two runs under one id are one announcement built twice
+        // and the unique constraint on (trigger_event_id, repo_id, config_path) refuses the second.
+        UUID.randomUUID().toString(),
+        TEST_EVENT_NAME,
+        Instant.now(),
+        "{}",
+        content);
+  }
+
+  /** Accept and run one pipeline synchronously, with no worker timing to wait out. */
+  protected void executePipeline(String repoId, String branch, String sha, String stepsYaml) {
+    runService.executeEventRun(eventRun(repoId, branch, sha, stepsYaml));
+  }
 
   /**
    * Drop everything this test thread has already loaded, so the next read really goes to the
@@ -62,9 +118,6 @@ public abstract class CiTestSupport {
             });
     fakeRunner.reset();
     fakeConfig.reset();
-    // No patience by default: a test that stages an unreachable git host asserts the decision, not
-    // the shipped five minutes of sitting out a redeploy. The retry test arms its own schedule.
-    runService.unreachableRetryDelays(List.of());
     // Empty by default, so no suite evaluates a trigger it did not ask for — the same reason the
     // eventstream module's recording raw listeners want nothing until a test arms them.
     fakeCandidates.reset();

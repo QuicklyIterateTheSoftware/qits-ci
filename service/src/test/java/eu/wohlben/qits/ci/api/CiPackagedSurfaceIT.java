@@ -275,14 +275,14 @@ public class CiPackagedSurfaceIT {
    * migrations survived as resources, Panache writes the row, and the shipped datasource expression
    * resolved to the database this JVM injected.
    *
-   * <p><b>It is driven by the manual trigger rather than by a push, and the swap is forced.</b> A
-   * push is an {@code SCMPublishCommit} off the event log now — there is no HTTP door to it, and
-   * standing a real qits-events up beside a launched artifact to deliver one would be a second
-   * integration entirely. {@code POST /ci/api/events/trigger} builds the same {@code Arrival} the bus
-   * builds and records a run the same way, so what this test can still see through the artifact's own
-   * surface is unchanged: YAML, Flyway, Panache and the store it wrote to. The push path's own
-   * semantics are a {@code @QuarkusTest}'s ({@code ScmPublishCommitListenerTest},
-   * {@code CiPipelineBoundaryTest}).
+   * <p><b>It is driven by the manual trigger, and there is nothing else it could be driven by.</b>
+   * A domain event arrives off the event log, and standing a real qits-events up beside a launched
+   * artifact to deliver one would be a second integration entirely; {@code POST
+   * /ci/api/events/trigger} builds the same {@code Arrival} the bus builds and records a run the same
+   * way. (It was a push until 2026-09-05 and the swap was already forced then, for the same reason —
+   * that intake has since retired outright.) So what this test can still see through the artifact's
+   * own surface is unchanged: YAML, Flyway, Panache and the store it wrote to. The engine's own
+   * semantics are a {@code @QuarkusTest}'s ({@code CiPipelineBoundaryTest}).
    */
   @Test
   public void aTriggeredRunGoesThroughYamlFlywayAndPanache() throws Exception {

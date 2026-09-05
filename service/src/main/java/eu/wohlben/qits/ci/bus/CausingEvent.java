@@ -12,8 +12,8 @@ import org.jboss.logging.Logger;
  * run's own row rather than out of {@code CausationScope}, because there is no ambient value left to
  * read: the engine consumed the frame on the bus's dispatch thread and the publish happens later on
  * {@code ci-run-worker}. An explicit non-null argument outranks the ambient context by design,
- * precisely for this case. A push passes null and publishes a root, which is correct — a push is not
- * caused by an event.
+ * precisely for this case. A null passes through and publishes a root, which is what a historical
+ * push row does — a push was not caused by an event.
  */
 final class CausingEvent {
 

@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerFile;
 import eu.wohlben.qits.ci.entity.CiRun;
 import eu.wohlben.qits.ci.entity.CiRunStatus;
@@ -109,13 +108,12 @@ public class CiTagSupersedeTest extends CiTestSupport {
   }
 
   /**
-   * Parks an unrelated push inside its first step and returns once the worker is really in it.
+   * Parks an unrelated run inside its first step and returns once the worker is really in it.
    * Everything accepted after this call is genuinely queued.
    */
   private void occupyTheWorker() throws Exception {
     String blocker = "blocker-" + UUID.randomUUID().toString().substring(0, 8);
     String sha = "b".repeat(40);
-    fakeConfig.put(blocker, sha, ConfigLookup.found(CONFIG_ONE_STEP));
     CompletableFuture<String> inStepZero = new CompletableFuture<>();
     fakeRunner.during(
         0,
@@ -127,8 +125,7 @@ public class CiTagSupersedeTest extends CiTestSupport {
             Thread.currentThread().interrupt();
           }
         });
-    service.onPostReceive(
-        CiRepoRef.of(blocker), "main", "0".repeat(40), sha, UUID.randomUUID().toString());
+    service.onEventTrigger(eventRun(blocker, "main", sha, CONFIG_ONE_STEP));
     inStepZero.get(20, TimeUnit.SECONDS);
   }
 

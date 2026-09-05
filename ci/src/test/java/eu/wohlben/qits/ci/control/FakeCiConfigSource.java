@@ -11,20 +11,29 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The pipeline config for the ci suite: an in-memory map the tests populate per (repoId, sha).
- * Unknown commits read as {@link ConfigLookup#absent()}. The production implementation is {@code
- * service/…/githost/HttpGitConfigSource}, which this module ships none of.
+ * The {@link CiConfigSource} for the ci suite: an in-memory catalogue of trigger files per (repoId,
+ * branch, scope), plus per-commit answers to the commit-held probe.
  *
- * <p>Lookups are a <b>queue</b> per commit, because the service legitimately reads twice: once to
- * find the config, and again after a failed workspace setup to ask whether the commit is still
- * reachable. Queue several values to model a repository that changed in between; the last value
- * stands for every further read.
+ * <p><b>It used to carry a third thing and the push arm took it with it.</b> {@code read(repo,
+ * branch, sha)} answered a whole {@code ConfigLookup} — FOUND with content, ABSENT, GONE,
+ * UNREACHABLE, INVALID — because the push path read a pipeline out of a commit on the run worker.
+ * Nothing reads a pipeline out of a commit any more: a trigger file is read at a branch head by
+ * {@code CiEventTriggerService}, and the only per-commit question left is whether the repository
+ * still holds the sha a step container failed to check out.
+ *
+ * <p>So a commit is {@link CommitHeld#HELD} unless a test says otherwise, which is the interesting
+ * default rather than a neutral one: it is what a healthy git host answers, and staging a discard
+ * therefore has to be deliberate.
  */
 @Mock
 @ApplicationScoped
 public class FakeCiConfigSource implements CiConfigSource {
 
-  private final Map<String, Deque<ConfigLookup>> byCommit = new HashMap<>();
+  /**
+   * Queued answers per commit, so a test can model a repository that changed between two probes.
+   * The last value stands for every further read.
+   */
+  private final Map<String, Deque<CommitHeld>> byCommit = new HashMap<>();
 
   /**
    * The event half, per (repoId, branch, scope). Unseeded repositories answer {@link
@@ -36,13 +45,11 @@ public class FakeCiConfigSource implements CiConfigSource {
    */
   private final Map<String, EventTriggerLookup> triggersByBranch = new HashMap<>();
 
-  /** Every config {@code read} this fake was asked, in order — the requeue bound's own assertion. */
-  private final List<String> configReads = Collections.synchronizedList(new ArrayList<>());
+  /** Every commit-held probe this fake was asked, in order. */
+  private final List<String> commitProbes = Collections.synchronizedList(new ArrayList<>());
 
   /** Every {@code readEventTriggers} this fake was asked, in order — the listing's own assertion. */
   private final List<String> triggerReads = Collections.synchronizedList(new ArrayList<>());
-
-  private final Map<String, Runnable> duringReads = new HashMap<>();
 
   /**
    * Every reference this fake was addressed with, in order — how a test says whether a read went out
@@ -51,19 +58,12 @@ public class FakeCiConfigSource implements CiConfigSource {
    */
   private final List<CiRepoRef> addressed = Collections.synchronizedList(new ArrayList<>());
 
-  /** Appends a lookup: the first {@code put} answers the first read, the second the next, … */
-  public void put(String repoId, String sha, ConfigLookup lookup) {
-    byCommit.computeIfAbsent(repoId + "@" + sha, k -> new ArrayDeque<>()).add(lookup);
-  }
-
   /**
-   * Run something on the worker thread <b>while</b> this commit's config is being read, once — the
-   * read-path analogue of {@link FakeCiStepRunner#during}. It is how a test stages what only exists
-   * mid-read (a cancellation arriving while the row is {@code RUNNING} inside the fetch) without a
-   * sleep and without a race.
+   * Appends an answer to the commit-held probe: the first {@code put} answers the first probe, the
+   * second the next, … An unseeded commit is {@link CommitHeld#HELD}.
    */
-  public void duringRead(String repoId, String sha, Runnable action) {
-    duringReads.put(repoId + "@" + sha, action);
+  public void putCommit(String repoId, String sha, CommitHeld held) {
+    byCommit.computeIfAbsent(repoId + "@" + sha, k -> new ArrayDeque<>()).add(held);
   }
 
   /** Seeds the trigger files a repository's branch head carries. */
@@ -95,8 +95,8 @@ public class FakeCiConfigSource implements CiConfigSource {
     return repoId + "@" + branch + "#" + scope;
   }
 
-  public List<String> configReads() {
-    return List.copyOf(configReads);
+  public List<String> commitProbes() {
+    return List.copyOf(commitProbes);
   }
 
   public List<String> triggerReads() {
@@ -110,26 +110,21 @@ public class FakeCiConfigSource implements CiConfigSource {
   public void reset() {
     byCommit.clear();
     triggersByBranch.clear();
-    configReads.clear();
+    commitProbes.clear();
     triggerReads.clear();
     addressed.clear();
-    duringReads.clear();
   }
 
   @Override
-  public ConfigLookup read(CiRepoRef repo, String branch, String sha) {
+  public CommitHeld commitHeld(CiRepoRef repo, String sha) {
     String repoId = repo.repoId();
     addressed.add(repo);
-    configReads.add(repoId + "@" + sha);
-    Runnable midRead = duringReads.remove(repoId + "@" + sha);
-    if (midRead != null) {
-      midRead.run();
-    }
-    Deque<ConfigLookup> queued = byCommit.get(repoId + "@" + sha);
+    commitProbes.add(repoId + "@" + sha);
+    Deque<CommitHeld> queued = byCommit.get(repoId + "@" + sha);
     if (queued == null || queued.isEmpty()) {
-      return ConfigLookup.absent();
+      return CommitHeld.HELD;
     }
-    // Keep the last value standing so repeated reads stay answerable.
+    // Keep the last value standing so repeated probes stay answerable.
     return queued.size() == 1 ? queued.peek() : queued.poll();
   }
 

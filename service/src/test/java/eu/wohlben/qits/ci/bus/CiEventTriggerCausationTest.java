@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.ci.control.FakeCiStepRunner;
+import eu.wohlben.qits.ci.githost.FakeGitHostRepoListing;
 import eu.wohlben.qits.eventstream.control.EventDispatcher;
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import eu.wohlben.qits.ci.githost.StubGitHost;
@@ -62,10 +63,6 @@ import org.junit.jupiter.api.Test;
 @WithTestResource(StubEventsServer.class)
 public class CiEventTriggerCausationTest {
 
-  private static final String ZERO_SHA = "0".repeat(40);
-
-  private static final String POST_RECEIVE = "steps:\n  - image: alpine:3\n    script: echo push\n";
-
   private static final String TRIGGER_PATH = ".config/qits/ci-event-upstream.yml";
 
   /**
@@ -91,7 +88,7 @@ public class CiEventTriggerCausationTest {
 
   @Inject FakeCiStepRunner fakeRunner;
 
-  @Inject ScmPublishCommitListener pushes;
+  @Inject FakeGitHostRepoListing gitHostListing;
 
   @Inject EventDispatcher dispatcher;
 
@@ -99,6 +96,7 @@ public class CiEventTriggerCausationTest {
   void resetState() {
     fakeRunner.reset();
     StubEventsServer.reset();
+    gitHostListing.set();
   }
 
   @Test
@@ -121,30 +119,11 @@ public class CiEventTriggerCausationTest {
     String upstream = upstream();
     String repoId = seedOrigin(upstream);
 
-    // A push first: it makes the repository one qits-ci has heard of, which is what the shipped
-    // candidate source means by a candidate — and it is the push half of the causation assertion.
-    String pushEventId = announcePush(repoId, tipOf(repoId));
-    Map<String, Object> pushed = awaitRuns(repoId, 1).get(0);
-    assertEquals("POST_RECEIVE", pushed.get("triggerType"));
-    assertEquals(".config/qits/ci-post-receive.yml", pushed.get("configPath"));
-    assertEquals(
-        pushEventId,
-        pushed.get("triggerEventId"),
-        "the SCMPublishCommit that announced the push is what caused this run");
-
-    List<StubEventsServer.Put> afterPush = awaitPuts(1);
-    JsonNode pushEnvelope = json.readTree(afterPush.get(0).body());
-    assertEquals(
-        pushEventId,
-        pushEnvelope.get("parentId").asText(),
-        "a push run's BuildSuccessful is caused by the push event, which is what keeps"
-            + " release → push → build → deploy one chain");
-
-    // Now the event. It arrives exactly as the socket would deliver it.
+    // The event, exactly as the socket would deliver it.
     String eventId = UUID.randomUUID().toString();
     dispatcher.dispatch(frame(eventId, upstream));
 
-    List<Map<String, Object>> runs = awaitRuns(repoId, 2);
+    List<Map<String, Object>> runs = awaitRuns(repoId, 1);
     Map<String, Object> triggered =
         runs.stream()
             .filter(run -> "EVENT".equals(run.get("triggerType")))
@@ -154,7 +133,6 @@ public class CiEventTriggerCausationTest {
     assertEquals(eventId, triggered.get("triggerEventId"));
     assertEquals("BuildSuccessful", triggered.get("triggerEventName"));
     assertEquals(TRIGGER_PATH, triggered.get("configPath"));
-    assertNotEquals(pushed.get("id"), triggered.get("id"));
 
     // The step container saw the whole event.
     Map<String, String> env =
@@ -169,8 +147,8 @@ public class CiEventTriggerCausationTest {
     assertEquals(payload(upstream), env.get("QITS_EVENT_PAYLOAD"));
 
     // And the edge: the run's OWN BuildSuccessful names the event that triggered it as its parent.
-    List<StubEventsServer.Put> puts = awaitPuts(2);
-    JsonNode envelope = json.readTree(puts.get(1).body());
+    List<StubEventsServer.Put> puts = awaitPuts(1);
+    JsonNode envelope = json.readTree(puts.get(0).body());
     assertEquals("BuildSuccessful", envelope.get("name").asText());
     assertEquals(eventId, envelope.get("parentId").asText(), "the first automatic causation edge");
 
@@ -184,55 +162,61 @@ public class CiEventTriggerCausationTest {
   public void aRedeliveredFrameRecordsNoSecondRunAndPublishesNothingFurther() throws Exception {
     String upstream = upstream();
     String repoId = seedOrigin(upstream);
-    announcePush(repoId, tipOf(repoId));
-    awaitRuns(repoId, 1);
-    awaitPuts(1);
 
     String eventId = UUID.randomUUID().toString();
     dispatcher.dispatch(frame(eventId, upstream));
-    awaitRuns(repoId, 2);
-    awaitPuts(2);
+    awaitRuns(repoId, 1);
+    awaitPuts(1);
 
-    // The same event again — legal on this bus, and the future catch-up feature will do it on
-    // purpose. Observable from outside as "the run list did not grow".
+    // The same event again — legal on this bus, and the catch-up sweep does it on purpose.
+    // Observable from outside as "the run list did not grow".
     dispatcher.dispatch(frame(eventId, upstream));
     Thread.sleep(1_500);
-    assertEquals(2, runsOf(repoId).size(), "a redelivered event is dropped, not re-run");
-    assertEquals(2, StubEventsServer.puts().size(), "and so nothing further is published");
+    assertEquals(1, runsOf(repoId).size(), "a redelivered event is dropped, not re-run");
+    assertEquals(1, StubEventsServer.puts().size(), "and so nothing further is published");
   }
 
   @Test
   public void anEventNoTriggerSelectsRecordsNothing() throws Exception {
     String repoId = seedOrigin(upstream());
-    announcePush(repoId, tipOf(repoId));
-    awaitRuns(repoId, 1);
 
     // A real BuildSuccessful, from a repository nothing declares a selection for.
     dispatcher.dispatch(frame(UUID.randomUUID().toString(), "a-repo-nobody-listens-for"));
     Thread.sleep(1_500);
-    assertEquals(1, runsOf(repoId).size());
+    assertEquals(0, runsOf(repoId).size());
+  }
+
+  @Test
+  public void anOrdinaryPushReachesTheEngineAndMatchesNothing() throws Exception {
+    // The 2026-09-05 ruling on the bus itself: SCMPublishCommit still arrives — the engine
+    // subscribes to "*" and a repository that declares `event: SCMPublishCommit` would be served by
+    // the ordinary grammar — and no repository declares one, so a push records nothing. What used to
+    // happen is a hard-coded listener accepting one run per pushed branch ref.
+    String repoId = seedOrigin(upstream());
+
+    dispatcher.dispatch(pushFrame(repoId));
+    Thread.sleep(1_500);
+
+    assertEquals(0, runsOf(repoId).size(), "an ordinary push records no run");
+    assertEquals(List.of(), StubEventsServer.puts(), "and announces nothing");
   }
 
   @Test
   public void aReleasePipelineFansOutOneSoftwareReleasePerDeclaredArtifact() throws Exception {
     String released = upstream();
     String repoId = seedOriginWith(releaseTrigger(released));
-    announcePush(repoId, tipOf(repoId));
-    awaitRuns(repoId, 1);
-    awaitPuts(1);
 
     String eventId = UUID.randomUUID().toString();
     dispatcher.dispatch(scmReleaseFrame(eventId, released));
-    awaitRuns(repoId, 2);
+    awaitRuns(repoId, 1);
 
-    // One green run, four events in total: the push's BuildSuccessful, the triggered run's own
-    // BuildSuccessful — unchanged, every green run still announces itself — and then one
-    // SoftwareRelease per declaration.
-    List<StubEventsServer.Put> puts = awaitPuts(4);
-    assertEquals(4, puts.size(), "a build announcement plus two artifacts");
-    assertEquals("BuildSuccessful", json.readTree(puts.get(1).body()).get("name").asText());
+    // One green run, three events in total: the run's own BuildSuccessful — unchanged, every green
+    // run still announces itself — and then one SoftwareRelease per declaration.
+    List<StubEventsServer.Put> puts = awaitPuts(3);
+    assertEquals(3, puts.size(), "a build announcement plus two artifacts");
+    assertEquals("BuildSuccessful", json.readTree(puts.get(0).body()).get("name").asText());
 
-    JsonNode npm = json.readTree(puts.get(2).body());
+    JsonNode npm = json.readTree(puts.get(1).body());
     assertEquals("SoftwareRelease", npm.get("name").asText());
     assertEquals(eventId, npm.get("parentId").asText(), "N siblings under one parent");
     // repoId is the same string `repository` carries, under the name the platform addresses a
@@ -247,7 +231,7 @@ public class CiEventTriggerCausationTest {
             + "\",\"version\":\"1.4.0\"}",
         npm.get("payload").asText());
 
-    JsonNode image = json.readTree(puts.get(3).body());
+    JsonNode image = json.readTree(puts.get(2).body());
     assertEquals("SoftwareRelease", image.get("name").asText());
     assertEquals(eventId, image.get("parentId").asText());
     assertEquals(
@@ -260,7 +244,7 @@ public class CiEventTriggerCausationTest {
 
     // Every event is its own occurrence: the PUT path is the idempotency key, and two artifacts that
     // shared one would be a 400 on the second.
-    assertNotEquals(puts.get(2).id(), puts.get(3).id());
+    assertNotEquals(puts.get(1).id(), puts.get(2).id());
   }
 
   // --- the frame, as the socket would deliver it ---
@@ -325,14 +309,18 @@ public class CiEventTriggerCausationTest {
 
   // --- plumbing, the same shape BuildSuccessfulPublishTest uses ---
 
-  /** @return the announcing event's id, which is what the run it records is caused by */
-  private String announcePush(String repoId, String newSha) {
-    EventFrame frame = ScmPushFrames.push(repoId, "main", ZERO_SHA, newSha);
-    pushes.onFrame(frame);
-    return frame.id();
+  /** A real push, as the JSON the socket delivers — the bytes qits-githost publishes. */
+  private String pushFrame(String repoId) throws Exception {
+    EventFrame frame = ScmPushFrames.push(repoId, "main", "0".repeat(40), tipOf(repoId));
+    return "{\"id\":\""
+        + frame.id()
+        + "\",\"name\":\"SCMPublishCommit\",\"occurredAt\":\""
+        + frame.occurredAt()
+        + "\",\"payload\":"
+        + json.writeValueAsString(frame.payload())
+        + ",\"description\":null,\"parentId\":null}";
   }
 
-  /** A bare origin carrying both trigger types, so one repository exercises both paths. */
   private String seedOrigin(String upstream) throws Exception {
     return seedOriginWith(trigger(upstream));
   }
@@ -341,7 +329,6 @@ public class CiEventTriggerCausationTest {
     String repoId = "trg-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
     Path seed = Files.createTempDirectory("ci-trigger-seed");
     git(seed, "init", "-q", "-b", "main");
-    write(seed, ".config/qits/ci-post-receive.yml", POST_RECEIVE);
     write(seed, TRIGGER_PATH, triggerContent);
     git(seed, "add", ".");
     git(seed, "-c", "user.email=ci@test", "-c", "user.name=ci", "commit", "-q", "-m", "ci config");
@@ -349,6 +336,10 @@ public class CiEventTriggerCausationTest {
     Path origin = gitHostRoot().resolve(repoId);
     Files.createDirectories(origin.getParent());
     git(null, "clone", "-q", "--bare", seed.toString(), origin.toString());
+    // A candidate at all: this repository has no run history to be known by, so the git host's
+    // listing is what names it. It used to be made one by a push, whose accepted run put it into
+    // KnownCiRepos — an intake that retired on 2026-09-05.
+    gitHostListing.set(repoId);
     return repoId;
   }
 

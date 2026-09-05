@@ -9,8 +9,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-import eu.wohlben.qits.ci.bus.ScmPublishCommitListener;
-import eu.wohlben.qits.ci.bus.ScmPushFrames;
+import eu.wohlben.qits.ci.control.CiEventTriggerParser;
+import eu.wohlben.qits.ci.control.CiRepoRef;
+import eu.wohlben.qits.ci.control.CiRunService;
 import eu.wohlben.qits.ci.githost.StubGitHost;
 import io.quarkus.arc.ClientProxy;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -156,7 +157,17 @@ public class CiDaemonGateIT {
 
   @Inject CiDaemonLauncher launcher;
 
-  @Inject ScmPublishCommitListener pushes;
+  @Inject CiRunService runService;
+
+  @Inject CiEventTriggerParser triggerParser;
+
+  /**
+   * The pipeline the branch just pushed declares. It travels on the trigger rather than being read
+   * out of the commit: per-push CI retired on 2026-09-05, so a run is accepted from a parsed trigger
+   * file and the engine never reads a pipeline out of a repository's commit again. What the
+   * container clones is still the branch and sha below.
+   */
+  private String pipeline;
 
   @Inject CiStepRelay relay;
 
@@ -266,7 +277,7 @@ public class CiDaemonGateIT {
                   echo step-two-done
             """
                 .formatted(IMAGE, IMAGE));
-    announcePush(repoId, "gate-green", sha);
+    startRun(repoId, "gate-green", sha);
 
     String runId = awaitRunId(repoId);
 
@@ -333,7 +344,7 @@ public class CiDaemonGateIT {
                 script: echo never-runs
             """
                 .formatted(IMAGE, IMAGE));
-    announcePush(repoId, "gate-cancel", sha);
+    startRun(repoId, "gate-cancel", sha);
 
     String runId = awaitRunId(repoId);
     awaitLiveStep(runId, 0, "step-one-is-slow");
@@ -375,7 +386,7 @@ public class CiDaemonGateIT {
                 script: echo never-runs
             """
                 .formatted(IMAGE, IMAGE));
-    announcePush(repoId, "gate-timeout", sha);
+    startRun(repoId, "gate-timeout", sha);
 
     String runId = awaitRunId(repoId);
     JsonPath detail = awaitTerminalRun(runId);
@@ -432,7 +443,7 @@ public class CiDaemonGateIT {
                   echo the-socket-answered
             """
                 .formatted(IMAGE, IMAGE));
-    announcePush(repoId, "gate-docker", sha);
+    startRun(repoId, "gate-docker", sha);
 
     String runId = awaitRunId(repoId);
     JsonPath detail = awaitTerminalRun(runId);
@@ -468,7 +479,7 @@ public class CiDaemonGateIT {
                 script: echo should-never-run
             """
                 .formatted(IMAGE_WITHOUT_THE_CONTRACT));
-    announcePush(repoId, "gate-never-registers", sha);
+    startRun(repoId, "gate-never-registers", sha);
 
     String runId = awaitRunId(repoId);
     JsonPath detail = awaitTerminalRun(runId);
@@ -490,10 +501,27 @@ public class CiDaemonGateIT {
     assertEquals(0, containersLabelled(runId));
   }
 
-  // --- the push, as qits-githost announces it ---------------------------------------------------
+  // --- the run, as the trigger engine accepts one ------------------------------------------------
 
-  private void announcePush(String repoId, String branch, String newSha) {
-    pushes.onFrame(ScmPushFrames.push(repoId, branch, ZERO_SHA, newSha));
+  /** This IT's own event name, so nothing else in the JVM can be fired by one of these. */
+  private static final String EVENT_NAME = "CiGateEvent";
+
+  private static final String TRIGGER_PATH = ".config/qits/ci-event-gate.yml";
+
+  /** Accepts one run at the pushed branch and sha, carrying the pipeline that branch declared. */
+  private void startRun(String repoId, String branch, String newSha) {
+    String content = "event: " + EVENT_NAME + "\n" + pipeline;
+    runService.onEventTrigger(
+        new CiRunService.EventRun(
+            CiRepoRef.of(repoId),
+            branch,
+            newSha,
+            triggerParser.parse(TRIGGER_PATH, content),
+            UUID.randomUUID().toString(),
+            EVENT_NAME,
+            Instant.now(),
+            "{}",
+            content));
   }
 
   // --- polling the read surface, which is the only way this test looks at anything ---------------
@@ -580,9 +608,12 @@ public class CiDaemonGateIT {
     Files.delete(clone); // git clone wants to create the target itself
     git(null, "clone", "-q", gitHostRoot().resolve(repoId).toString(), clone.toString());
     git(clone, "checkout", "-q", "-b", branch);
-    Path configFile = clone.resolve(".config/qits/ci-post-receive.yml");
+    // The pipeline travels on the trigger now; the file is still committed so the tree a container
+    // clones is the one the run is about.
+    Path configFile = clone.resolve(TRIGGER_PATH);
     Files.createDirectories(configFile.getParent());
     Files.writeString(configFile, config);
+    pipeline = config;
     commitAll(clone, "add ci config");
     String sha = git(clone, "rev-parse", "HEAD").trim();
     git(clone, "push", "-q", "origin", branch);

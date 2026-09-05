@@ -10,11 +10,14 @@ the artifacts off an `SCMRelease`. Beside them runs the release train — a libr
 repositories that declared an interest build themselves — and every hop of it is recorded, with the
 event that caused it, on the run and in the event log.
 
-There is a **second trigger, and nothing on the platform uses it**. The engine still reads
-`.config/qits/ci-post-receive.yml` back out of a pushed commit and runs it for the push, exactly as
-this document describes; **no repository ships that file any more**. Per-push CI was retired on
-2026-09-04 in favour of the release-request QA pipeline, and the push path is documented here because
-it is live code rather than because anything exercises it.
+**An ordinary push triggers nothing.** There was a second trigger — `.config/qits/ci-post-receive.yml`,
+read back out of a pushed commit and run for the push — and per-push CI was retired on 2026-09-04 in
+favour of the release-request QA pipeline. Every repository's file was deleted then; the engine arm
+outlived them and kept accepting one run per pushed branch ref against a file none of them carried,
+so on **2026-09-05** the listener, the intake, the parser and the per-step `branches:` filter were
+removed with it. `SCMPublishCommit` still reaches the trigger engine like every other event, so a
+repository that declares `event: SCMPublishCommit` is served by the ordinary grammar — that is a
+capability rather than a leftover — and none does.
 
     git submodule update --init   # the Angular client at service/src/main/webui
     mvn verify                    # resolves qits-eventstream 1.0.0 from local qits-artifacts
@@ -24,7 +27,7 @@ it is live code rather than because anything exercises it.
 | Module | What |
 |---|---|
 | `ci/` | `eu.wohlben.qits.ci.*` — entity, persistence, dto, mapper, control, error. The pipeline itself. No web, no JAX-RS. |
-| `service/` | `eu.wohlben.qits.ci.api` — the run read surface, the manual event trigger and the exception mapper — plus `…ci.bus`, where a push arrives as `SCMPublishCommit`, and `…ci.daemonhost`, the step-container control plane (below). There is no filter in front of the one write: it calls `MachineAuth` (qits-auth-core) itself. |
+| `service/` | `eu.wohlben.qits.ci.api` — the run read surface, the manual event trigger and the exception mapper — plus `…ci.bus`, where every domain event arrives, and `…ci.daemonhost`, the step-container control plane (below). There is no filter in front of the one write: it calls `MachineAuth` (qits-auth-core) itself. |
 | `ci-daemon-protocol/` | `eu.wohlben.qits.cidaemon.protocol` — the ci-daemon wire contract, **vendored** from [qits-ci-daemon](https://github.com/QuicklyIterateTheSoftware/qits-ci-daemon) and never edited here. Framework-free; `diff -r` is the drift detector. |
 | `ci-events/` | `eu.wohlben.qits.ci.events` — the events this service announces: `BuildSuccessful` for every green run, `SoftwareRelease` once per artifact a release pipeline declared. Depends on the published `qits-eventstream` jar and nothing else. |
 
@@ -100,7 +103,7 @@ rest of qits it reaches over a URL it is configured with:
 
 | Direction | Surface | Config |
 |---|---|---|
-| in | `SCMPublishCommit` off the event bus — one per updated branch ref of a push, carrying the head commit's metadata and `suppressCi` | not an HTTP surface and not machine-guarded: what authenticates an event is the bus that carried it. Consumed durably as `ci-push-runs` (`bus/ScmPublishCommitListener`) |
+| in | every event off the bus, `SCMPublishCommit` included | not an HTTP surface and not machine-guarded: what authenticates an event is the bus that carried it. Consumed durably as `ci-event-triggers` (`bus/CiEventTriggerListener`, which subscribes to `"*"`); it fires only what a repository's own `ci-event-*.yml` selects |
 | in | `POST /ci/api/events/trigger` — `{name, payload, occurredAt?, eventId?}` → 200 `{eventId, runIds, repositoriesRead, repositoriesSkipped}`, one domain event supplied by hand instead of by the bus; it **evaluates before it answers**, and a 503 means it could not ("Triggering one by hand") | two real callers, like the cancellation below: an operator on the edge's forwarded session (`qits:admin`), and a machine token of this service's audience. `project=*` evaluates the whole catalogue; a token scoped to **one project** is admitted and the evaluation is narrowed to that project's repositories, so a cross-project trigger is impossible rather than refused. A project this instance can place no repository in is a 403 |
 | in | `GET /ci/api/runs?repositoryId={repoId}[&limit={n}]`, `GET /ci/api/runs/{runId}` | not machine-guarded; they carry build logs, so a deployment must keep them behind its auth policy. **Every read here takes `qits:admin` OR `qits:system`** — `qits:system` is the machine role and `qits:admin` the human one, and a peer polling a run it asked for (qits-platform-maintenance waits out a bump this way) must not be granted a person's role to do it. `POST /ci/api/runs/{runId}/cancel` is not widened with them and stays `qits:admin` |
 | in | `GET /ci/api/runs/active` → `{"runs": [...]}` — every `QUEUED` or `RUNNING` run on the instance, all repositories, newest first, no parameters | same; unscoped, because "what is CI doing right now" has no repository to scope to |
@@ -165,24 +168,21 @@ instant in each answer. It needs no `?limit=`: what is active is bounded by acce
 configured worker pool, not by uptime. It became answerable only when a queued run became a row
 (below).
 
-The push sender is
-[qits-githost-service](https://github.com/QuicklyIterateTheSoftware/qits-githost-service), which
-publishes one `SCMPublishCommit` per successfully updated branch ref through the qits-eventstream
-outbox. qits-ci consumes it durably (`bus/ScmPublishCommitListener`, consumer id `ci-push-runs`).
+**There is no push intake, and the two it used to be are both gone.** It was `POST
+/ci/api/events/post-receive` — fire-and-forget, so a qits-ci that was down when a push landed simply
+never built it — then `bus/ScmPublishCommitListener`, a durable consumption that read the same push
+back off the log. On 2026-09-05 the listener went too: the platform runs no CI outside release
+requests. Two consequences worth stating:
 
-**This replaced `POST /ci/api/events/post-receive`**, and the endpoint is gone rather than deprecated.
-That call was fire-and-forget — the sender swallowed delivery failures at debug — so a qits-ci that
-was down, restarting or mid-cutover when a push landed simply never built it, with nothing anywhere
-to say so and "replay the post-receive by hand" as the only cure. A durable consumer reads the same
-push back off the log instead. Two consequences worth stating:
-
-- **`-o qits.no-ci` is not a suppressed event any more.** The git host used to decide for its
-  consumers by not POSTing; the option now travels as `suppressCi` on the event, and this service
-  is what decides that it means "record no run". A consumer that wants to act on a suppressed push
-  (a backup trigger, say) can.
+- **`-o qits.no-ci` is a fact on the event and nothing here reads it.** The git host used to decide
+  for its consumers by not POSTing; the option travels as `suppressCi` on `SCMPublishCommit`, and a
+  repository that declares a trigger on that event spells it as a `when:` condition (below).
 - **There is no address to keep in step.** Nothing in another repository spells a qits-ci path for
-  pushes, so a prefix change here cannot silently stop CI. What can is a listener that does not
-  subscribe, which is why `EventstreamDarknessTest` asserts the bean exists.
+  pushes. What can silently stop CI is a listener that does not subscribe, which is why
+  `EventstreamDarknessTest` asserts the trigger engine's bean exists.
+- **`ci-push-runs` is a retired consumer id.** Its `consumed_event` rows and its watermark are left
+  where they are rather than migrated away, and the id must never be handed to a new listener — one
+  inheriting it would inherit a watermark saying every push ever announced had been handled.
 
 **The arrangement does NOT repeat one hop down, and it used to.** A green run was announced to
 [qits-deployments-platform-service](https://github.com/QuicklyIterateTheSoftware/qits-deployments-platform-service)'s
@@ -254,10 +254,10 @@ from the event log at startup and on a schedule, so a disconnect is a delay inst
 subscribe frame is the union of all three, `"*"` collapsing it to `["*"]`.
 
 **Every qits-ci listener is durable**, because each of them acts on something a lost event would
-silently not do: a push that is never built, a release train that stops triggering, a daemon release
+silently not do: a pipeline that never runs, a release train that stops triggering, a daemon release
 that is never adopted, a release nobody announces. Their consumer ids — the stable names their
-bookkeeping is keyed on — are `ci-push-runs`, `ci-event-triggers`, `ci-release-train`,
-`ci-daemon-adopt` and `ci-release-facts`.
+bookkeeping is keyed on — are `ci-event-triggers`, `ci-release-train`, `ci-daemon-adopt` and
+`ci-release-facts`.
 
 **The trigger engine says `"*"` permanently**, so this service's
 subscribe frame *is* `["*"]`: the event names it cares about live in other repositories' files and
@@ -270,10 +270,9 @@ chain in the log rather than a set of rows distinguishable from coincidence only
 timestamps. It is envelope data, stamped by `QitsEventBus.publish` and never declared by an event
 class, and it is filled in from an explicit argument or from `CausationScope`, the ambient
 thread-local the dispatcher establishes around each listener call. **Every run qits-ci records has a
-cause and says so**: an event-triggered run's `BuildSuccessful` carries the event that triggered it,
-and a push-triggered run's carries the `SCMPublishCommit` that announced the push — which is what
-makes release → push → build → deploy one chain rather than two halves with a root in the middle.
-A root is what is left for a run nothing announced. The rules that bite are in AGENTS.md under "The event bus" and, for the library itself, in
+cause and says so**: a run's `BuildSuccessful` carries the event that triggered it, which is what
+makes release → build → deploy one chain rather than a set of halves with roots in the middle. A
+root is what is left for a run nothing announced, which today means only a historical push row. The rules that bite are in AGENTS.md under "The event bus" and, for the library itself, in
 qits-eventstream-javalib's own AGENTS.md.
 
 Both halves are **dark in `%dev` and `%test`** (`qits.eventstream.enabled`), the same posture the
@@ -286,19 +285,21 @@ for a run that carries the public pair and `…/git/<repoId>/blob/…` for one t
 a sha or a ref name and the resolved commit answered in a `Git-Commit-Sha` header. So it runs on a
 machine with no shared filesystem with qits, no local mirror and no `git` binary.
 
-**The push path reads at the pushed sha itself**, which is the whole of why there is no mirror: a
-second push landing first changes nothing, and a 404 means the commit declares no pipeline. A commit
-the repository no longer holds at all is told apart by one more read (the tree at that sha) and
-records nothing, so a force-push cannot leave a red run blaming a commit whose build was never
-broken. The event path lists `.config/qits/` at `main`, takes the head from the header, and reads
-each file **at that sha**, so a push mid-evaluation cannot mix two commits into one run.
+**The trigger path lists `.config/qits/` at `main`, takes the head from the header, and reads each
+file at that sha**, so a push landing mid-evaluation cannot mix two commits into one run.
 
-## The push pipeline file: `.config/qits/ci-post-receive.yml`
+**There is one other read, and it is not about config at all.** When a step container reports it
+could not check the run's commit out, ci asks the host whether the repository still *holds* that sha
+(one tree read at the sha). Gone means the commit was force-pushed away after the run was accepted,
+so the run is discarded rather than left red blaming a commit whose build was never broken; held
+means the clone failed for some other reason and the red stays. A host that could not be asked says
+neither, and is never read as gone. This used to be the second half of the push path's config read;
+it is `CiConfigSource.commitHeld` now.
 
-`ci-post-receive.yml` is a list of steps and nothing else, and everything additive since has stayed
-additive over that core. **No repository commits one today** — see the note at the top of this file —
-but the engine reads it unchanged, and the `steps:` grammar below is shared verbatim with the event
-trigger files every pipeline on the platform is now written as:
+## The `steps:` grammar
+
+Every pipeline on the platform is the `steps:` half of a `.config/qits/ci-event-*.yml`. It is a list
+of steps and nothing else, and everything additive since has stayed additive over that core:
 
 ```yaml
 steps:
@@ -308,8 +309,7 @@ steps:
   - image: qits/build-images/ci-base:latest
     docker: true                               # optional, default false — see the warning below
     timeout-seconds: 3600                      # optional — else 30 minutes (qits.ci.step-timeout-seconds)
-    branches:                                  # optional — else the step runs on every branch
-      - exact: main
+    gating: false                              # optional, default true — see "Gating"
     script: |
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-gateway:$QITS_CI_SHA"
       docker build -t "$ref" -f docker/Dockerfile .
@@ -317,10 +317,22 @@ steps:
       docker rmi "$ref" || true
 ```
 
-Unknown keys — top level or per step — are never read, so a repo may carry config for a newer
-qits-ci. Keys that *are* known and unreadable (`timeout-seconds: soon`, `docker: yes-please`,
-`branches: []`, `user: build:root`) are a `CONFIG_ERROR` run instead: a repo that meant to bound a
-step, to ask for a socket, to scope a step or to drop root must find out.
+Unknown **per-step** keys are never read, so a repo may carry config for a newer qits-ci; unknown
+**top-level** keys are a parse error, because at that level an unread key is a selection that
+silently widens (see "The file every repository commits"). Keys that *are* known and unreadable
+(`timeout-seconds: soon`, `docker: yes-please`, `gating: "false"`, `user: build:root`) name the file
+and record no run: a repo that meant to bound a step, to ask for a socket, to classify a failure or
+to drop root must find out.
+
+**A step could once declare `branches:`** — a list of matchers over the run's branch, absent meaning
+every branch, with a skipped step recorded `[step not bound to branch <branch>]`. It was a
+`ci-post-receive.yml` feature and always a parse error in a trigger file, because an event-triggered
+run's branch is the trigger's single decision, made once before any step exists: a per-step filter
+over it is decoration or a step that can never run, which reads exactly like one that never got its
+turn. Per-push CI retired and the filter went with it on 2026-09-05. **The key is still refused**,
+loudly and by name, so a repository that still carries one is told rather than having it ignored;
+"release only if the tests passed" needs no filter anyway, because steps are sequential and a failing
+one stops the loop. `SKIPPED` therefore means one thing again: the loop never reached this step.
 
 ### Running a step as somebody
 
@@ -343,49 +355,7 @@ cannot make a directory at the root of the filesystem.
 root: the socket's ownership is the host's fact and not a repository's. Split the work into two
 steps, which is what every publishing pipeline here already does.
 
-### Binding a step to branches
-
-`branches:` is a **list of matcher mappings**: entries are **OR**'d, and a mapping's keys are
-**AND**'d — the `when:` DSL's composition rule minus the path level, because the subject is one
-scalar, the branch the run is on. The whole vocabulary is **`exact`** and **`prefix`**. There is no
-`exists` (a branch is always there, so it could only ever say yes) and no `regex` (`prefix:
-maintenance/` spells the requirement that asked for this feature, with no anchoring, escaping or
-ReDoS question).
-
-```yaml
-steps:
-  - image: qits/build-images/node-base:latest   # no branches: — runs on every push
-    script: npm ci && npm test
-  - image: qits/build-images/node-base:latest
-    branches:
-      - prefix: maintenance/                    # …this one only on a maintenance push
-    script: ./release.sh
-```
-
-- **Absent means the step runs on every branch** — exactly the behaviour every pipeline had before
-  this key existed.
-- **An empty list is a config error.** Both readings of `[]` already have an unambiguous spelling:
-  omit the key for "every branch", delete the step for "none".
-- **A step the branch does not bind is recorded `SKIPPED` and stops nothing.** No container is
-  launched, the run's verdict is untouched, and the steps after it run. A run whose every step is
-  branch-skipped is a trivially green run, like a pipeline with no steps.
-- **"Release only if the tests passed" needs no machinery** — it is step order. A failing step still
-  stops the loop, so a later scoped step is never reached.
-
-The two kinds of `SKIPPED` are told apart **by the step's output**:
-
-| Output | Why the step was skipped |
-|---|---|
-| `[step not bound to branch <branch>]` | its `branches:` did not bind this run's branch |
-| *empty* | the loop never reached it — an earlier step failed, or the run was cancelled |
-
-`branches:` on a step in a **`ci-event-*.yml` is a parse error**, naming the file and the reason:
-the run's branch is the trigger's single decision — `main` by convention, or the payload's via
-`checkout:`, resolved once before any step exists — so a per-step filter over it is decoration or a
-step that can never run, which reads exactly like one that never got its turn. A condition over the
-*event's* branch is what `when:` already spells.
-
-**Publishing an image is not a feature here, it is a step.** Steps are sequential, so a push runs
+**Publishing an image is not a feature here, it is a step.** Steps are sequential, so the push runs
 only after the build steps went green; a failed push is a failed step is a **failed run**, so the
 `BuildSuccessful` announcement (`SUCCESS` only) keeps implying the image exists. The tag is the whole contract
 with qits-platform-deployments, which pulls `<registry>/<repository>/<application>:<sha>` where
@@ -514,9 +484,9 @@ has machine auth off too.
 
 ## The file every repository commits: `.config/qits/ci-event-*.yml`
 
-A push is not the only thing that can run a pipeline, and since 2026-09-04 it is not the thing that
-does. A repository commits **event triggers**: files that name a domain event off the platform's bus
-and a selection over its payload, and run their own pipeline when both hold. The motivating shape is the release train — a library
+This is the only thing that runs a pipeline. A repository commits **event triggers**: files that name
+a domain event off the platform's bus and a selection over its payload, and run their own pipeline
+when both hold. The motivating shape is the release train — a library
 releases, every consuming SPA's event pipeline commits the version bump, each SPA's own release
 fires the pipelines of the services embedding it — where each hop is one repository declaring, in
 its own tree, which upstream events it cares about.
@@ -527,7 +497,7 @@ event: BuildSuccessful          # the event NAME (its signature), matched exactl
 when:                           # the selection — omit it to fire on every event of that name
   - repoId: { exact: qits-spa-ui-components }
     branch: { exact: main }
-steps:                          # exactly the schema ci-post-receive.yml uses
+steps:                          # the `steps:` grammar above
   - image: qits/build-images/node-base:latest
     script: ./bump-ui-components.sh
 ```
@@ -542,23 +512,22 @@ steps:                          # exactly the schema ci-post-receive.yml uses
 - **Which repositories an event is evaluated against**: the union of what the git host lists (`GET
   <qits.ci.git-host-url>/git` → `{"repositories": [...]}`) and what qits-ci already knows — the
   repositories it has runs for. So a repository seeded straight onto the
-  git host is a candidate before its first push, which is what makes bootstrapping by hand ("Triggering
-  one by hand") work at all. If the listing cannot be read, that is one WARN naming the url and the
+  git host is a candidate before it has ever run anything, which is what makes bootstrapping by hand
+  ("Triggering one by hand") work at all — and, since a push records nothing, it is now the only way
+  a repository becomes one. If the listing cannot be read, that is one WARN naming the url and the
   known set answers alone: an unreachable git host never shrinks the candidate list and never fails
   an evaluation.
-- **The two trigger types never blur.** A `ci-post-receive.yml` containing `event:`, `when:` or
-  `artifacts:` is a config error, and a `ci-event-*.yml` without `event:` is one too.
-- `steps:` is the same schema, `docker: true` and `timeout-seconds:` included, with the same
-  meanings and the same warnings. The one key it subtracts is **`branches:`**, which is a parse
-  error here — see "Binding a step to branches" for why refusing it beats ignoring it.
+- **A file without `event:` is a parse error**, rather than a trigger that never matches: a trigger
+  that names no event can never fire, and it must not look like one whose selection simply never
+  held.
+- `steps:` is the grammar above, `docker: true`, `timeout-seconds:` and the step-level `gating:`
+  included. The one key it refuses is **`branches:`** — see the note there.
 - The one key it **adds** is **`artifacts:`**, optional, which turns the file into a *release
-  pipeline* — see below. It is a parse error in `ci-post-receive.yml`.
+  pipeline* — see below.
 - The other added key is **`checkout:`**, optional, which makes the run build the event's own
-  commit — see "Building the commit the event names". Also a parse error in `ci-post-receive.yml`,
-  where the checkout IS the push.
+  commit — see "Building the commit the event names".
 - The third added key is **`gating:`**, optional, default `true`: whether a red run of this pipeline
-  should stand in the way of releasing its commit — see "Gating: what a red run is worth". Inert and
-  therefore a parse error in `ci-post-receive.yml`, where a push run is always gating.
+  should stand in the way of releasing its commit — see "Gating: what a red run is worth".
 
 ### Building the commit the event names — `checkout:`
 
@@ -594,8 +563,8 @@ steps:
   that silently never build. Garbage is still refused; this arm is about **absence**.
 - **Decide at main, build at the event's commit.** Discovery, parsing and `when:` still read
   `main`'s head — a branch cannot change its own event pipeline until merged. Per-commit pipeline
-  self-description is the one thing only `ci-post-receive.yml` gives, since it reads config at the
-  pushed sha; no repository takes that trade any more.
+  self-description is what the retired `ci-post-receive.yml` gave, since it read config at the pushed
+  sha; nothing offers that trade any more, and nothing asked for it.
 - **A payload the paths do not resolve in is one WARN and no run** — there is no truthful
   (ref, sha) pair to record — and only that file's: the repository's other triggers still
   evaluate. Unless the file says `optional: true`, above. Resolved values are validated as
@@ -603,16 +572,18 @@ steps:
   `optional:` does not soften that — a value that is *there* and hostile is a refusal, never a
   fallback.
 - **A burst collapses per ref.** Queued runs of the same file, event name and ref are
-  superseded by the newest accepted one (`DEDUPED`, exactly the push path's per-branch collapse);
-  a run already `RUNNING` keeps running. Runs of triggers *without* `checkout:` are never
+  superseded by the newest accepted one (`DEDUPED`); a run already `RUNNING` keeps running. It is
+  modelled on the per-branch collapse the push intake did at accept, which retired with it — a
+  release request's re-folds are what burst now. Runs of triggers *without* `checkout:` are never
   collapsed this way — their "main" is a convention shared by distinct events — **and a run that
   took the `optional:` fallback counts as one of those**, because it is one: it is accepted with the
   checkout stripped, so nothing downstream has to remember the difference.
 - **Not available in platform pipelines** (`ci-platform-event-*.yml`): a platform run's head comes
   from the candidate pass, and a checkout there would build an arbitrary sha of a repository a
   third repository's file named. Declared anyway, it is one WARN per event and no run.
-- `suppressCi` stays a `when:` condition, not engine knowledge: matchers compare JSON literals, so
-  `exact: "false"` matches the boolean. Every `SCMPublishCommit` trigger should carry it.
+- `suppressCi` is a `when:` condition and nothing in the engine reads it: matchers compare JSON
+  literals, so `exact: "false"` matches the boolean. It used to be honoured by the push listener,
+  which is gone, so **every `SCMPublishCommit` trigger must carry it** — nothing else will.
 
 ### Gating: what a red run is worth
 
@@ -633,12 +604,10 @@ steps:
 - **Absent is `true` at both levels**, so every pipeline written before either key existed keeps its
   behaviour byte for byte, and a gating build's event payload stays byte-identical too: `gating` is
   omitted from the wire when it is true and written as an explicit `false` only when it is not.
-- **The file-level key is trigger-files-only.** A push run is always gating as a file, so the key
-  would be inert in `ci-post-receive.yml` and is a parse error there — the same two-way rule
-  `checkout:` and `artifacts:` carry.
-- **The step-level key is legal in both files**, because the `steps:` schema is one implementation
-  and a step must not mean two things — and it is not inert in a push pipeline: a push whose last
-  step publishes docs is exactly the case it exists for.
+- **There are two levels and the run's verdict is the AND of them.** The file-level key says what a
+  whole pipeline is worth to a release gate; the step-level one says what one step is worth. A
+  non-gating file cannot be made gating by a step, and a gating file's non-gating step produces a
+  non-gating red.
 - **A non-gating step that fails still fails the run.** The row is `FAILED`, a person sees the red,
   the remaining steps are `SKIPPED` — what changes is only what a release gate reads. That is why
   **the non-gating steps go last**: everything after a failure is skipped, which is right for a
@@ -655,8 +624,9 @@ steps:
 The platform runs **no CI outside release requests**. qits-projects keeps, per open release request,
 a backing branch `release/<id>` — an octopus merge of the request's sources, refolded whenever the
 set changes — and publishes **`ReleaseRequestChanged`** on every successful fold. That branch is
-written by qits-githost's merge primitive, which fires no `post-receive` and therefore publishes no
-`SCMPublishCommit`: without this event the fold exists and nothing builds it.
+written by qits-githost's merge primitive, which fires no server-side hook and therefore publishes no
+`SCMPublishCommit`: without this event the fold exists and nothing builds it. (And a push would build
+nothing anyway — see the top of this file.)
 
 So a repository commits **one** QA pipeline, and it is an ordinary event trigger:
 
@@ -742,7 +712,7 @@ literally, so a payload that means something else by the word is untouched.
 
 **An absent or empty `when:` means unconditional**: the trigger fires on every event of the name it
 declared. That is the documented default, and it is why this file is **strict about unknown
-top-level keys** where `ci-post-receive.yml` is lenient about them — a mistyped `wehn:` would
+top-level keys** where the step list is lenient about them — a mistyped `wehn:` would
 otherwise parse as "no selection", and no selection means *every* event. Unknown matcher keys,
 non-string match values, malformed structure and duplicate keys are all parse errors too, logged at
 WARN naming the repository and the file. **One unparseable trigger file never disables the
@@ -761,14 +731,13 @@ repository's others.**
 > worth knowing.** It triggers on `SCMRelease` and publishes `SoftwareRelease` — two names, so the
 > circle does not close. Widen that `when:` to the event it publishes and it does.
 >
-> **The second shape needs no bus at all, and it needs `branches:`.** A step bound to `prefix:
-> maintenance/` in a *push* pipeline whose script force-pushes a `maintenance/*` ref re-triggers its
-> own pipeline through post-receive — a loop with no event, no trigger file and no dedupe anywhere
-> near it. Nothing can reach it today, for the reason the top of this file gives: no repository ships
-> a `ci-post-receive.yml`, and the release train's own steps push no refs at all — a release is a
-> release request, and qits-projects is what folds it, tags it and announces it.
+> **A second shape used to need no bus at all**: a *push* pipeline whose script force-pushed a ref
+> re-triggered its own pipeline through the post-receive hook — a loop with no event, no trigger file
+> and no dedupe anywhere near it. It is unreachable by construction now: an ordinary push triggers
+> nothing, and the release train's own steps push no refs anyway — a release is a release request,
+> and qits-projects is what folds it, tags it and announces it.
 >
-> **`checkout:` recreates that second shape with no post-receive file in sight.** A
+> **`checkout:` recreates that shape on the bus.** A
 > `ci-event-*.yml` on `SCMPublishCommit` whose step pushes a commit re-triggers itself through the
 > very event its own push publishes — the per-branch collapse thins a burst, it does not break the
 > cycle (each hop is a new event id). A checkout trigger whose steps push nothing — an image build,
@@ -1035,7 +1004,7 @@ pipeline, four of them building a version nobody asked for.
 
 qits-ci collapses them instead. When a tag-triggered run is accepted and another **queued** run
 exists for the same repository and the same trigger file, the one with the **lower tag by version
-sort** is marked `DEDUPED` — the same columns the per-branch push supersede writes
+sort** is marked `DEDUPED` — the same columns the per-branch collapse writes
 (`status CANCELLED`, `cancellationReason DEDUPED`, `supersededByRunId`), and it may be the run that
 was just accepted, since a fan-out arrives in no order. A push of N tags therefore leaves one run to
 do. `CANCELLED` rather than `FAILED` for the reason every supersede settles that way: losing a queue
@@ -1284,10 +1253,16 @@ finishes as `CANCELLED`, not as a failed pipeline verdict. A run still
 recorded `CANCELLED` with no steps and the worker never picks it up. Cancelling a run that has already
 finished is a 409. Like every other operation this service serves, it is in `docs/openapi.yml`;
 nothing is hidden there any more, since the one hidden operation was the machine-only push intake.
-A queued push is also cancelled automatically when a
-newer push for the same repository and branch is accepted: it records `DEDUPED` and the newer run's
-id, which the run detail links to. Event-triggered runs are excluded because distinct trigger files
-on one branch are independent pipelines, not duplicates.
+A queued run is also cancelled automatically when a newer one supersedes it — a re-fold of the same
+release request, or a newer tag of the same push: it records `DEDUPED` and the newer run's id, which
+the run detail links to. Runs of triggers *without* `checkout:` are excluded, because distinct events
+sharing `main` by convention are independent pipelines rather than duplicates.
+
+**One more reason exists and no live path writes it.** A `QUEUED` row a successor cannot execute —
+a `POST_RECEIVE` leftover from a deployment that predates the 2026-09-05 retirement — is settled
+`CANCELLED` with `TRIGGER_RETIRED` at the boot sweep, rather than left sitting in
+`/ci/api/runs/active` waiting for a worker that no longer exists. Nobody cancelled it; the engine
+that would have run it is gone, and the row is where that is written down.
 
 **A cancelled run announces nothing at all.** Not `BuildSuccessful`, not `BuildFailed` — a person
 withdrawing a question is not an answer to it, and the release gate on the other side reads every
@@ -1325,15 +1300,15 @@ release request is one chain in the log rather than an unexplained root.
 
 ## What a restart costs
 
-**A run is a row from the moment it is accepted.** The push listener and the trigger engine both
-`INSERT` before they return, with status `QUEUED`, and the worker flips it to `RUNNING` when it
-dequeues it. Before that, a queued run was a closure on a single-threaded executor and nothing else —
-invisible to every read surface, and gone with the process. That was the lossy intake: a redeploy
-landing between the push and the build lost the build with no row anywhere to say so, and the fix was
-to POST the post-receive again by hand. **Both halves of that loss are closed now**, and by different
-mechanisms: the row covers a restart between accept and execution, and the durable claim covers a
-restart before the push was ever accepted — a push announced while this process was away is read back
-off the event log rather than needing a replay.
+**A run is a row from the moment it is accepted.** The trigger engine `INSERT`s before it returns,
+with status `QUEUED`, and the worker flips it to `RUNNING` when it dequeues it. Before that, a queued
+run was a closure on a single-threaded executor and nothing else — invisible to every read surface,
+and gone with the process. That was the lossy intake: a redeploy landing between acceptance and the
+build lost the build with no row anywhere to say so, and the fix was to replay the event by hand.
+**Both halves of that loss are closed now**, and by different mechanisms: the row covers a restart
+between accept and execution, and the durable claim covers a restart before the event was ever
+accepted — an event announced while this process was away is read back off the event log rather than
+needing a replay.
 
 **The third half was the one that was still open, and it cost three release requests.** A run row
 covers a restart *after* the event was evaluated, and the durable claim covers a restart *before* the

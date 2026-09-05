@@ -137,7 +137,13 @@ public class CiRestartReconciliationTest {
 
   // --- the rows a dead process would have left behind ------------------------------------------
 
-  /** A push-triggered run caught mid-step: claimed by the worker, pinned to a daemon, never ended. */
+  /**
+   * A leftover push run caught mid-step: claimed by a predecessor's worker, pinned to a daemon,
+   * never ended. Per-push CI retired on 2026-09-05 so no live deployment writes such a row, and a
+   * successor still has to say something honest about the ones already in its database — which is
+   * FAILED, because its step died with its process and this engine has no worker that could replay
+   * repository-authored work even if replaying it were safe.
+   */
   private void insertRunningPushRun(String runId) {
     QuarkusTransaction.requiringNew()
         .run(
@@ -151,7 +157,7 @@ public class CiRestartReconciliationTest {
               run.createdAt = Instant.now();
               run.triggerType = CiTriggerType.POST_RECEIVE;
               run.daemonVersion = "dead-daemon";
-              run.configPath = CiConfigParser.CONFIG_PATH;
+              run.configPath = ".config/qits/ci-post-receive.yml";
               runs.persist(run);
             });
   }
