@@ -589,20 +589,34 @@ public class CiRunService {
     return run.triggerType == CiTriggerType.EVENT && run.triggerConfig != null;
   }
 
-  /** Settles a row no engine here can run, with the one line and the one reason that say why. */
+  /**
+   * Settles a row no engine here can run, with the one line and the one reason that say why.
+   *
+   * <p><b>Only a row that is still {@code QUEUED}</b>, and the status is re-read inside the writing
+   * transaction — {@code startQueued}'s discipline, for {@code startQueued}'s reason. A person can
+   * cancel such a row through the API between the sweep reading it and this running, and settling it
+   * a second time would overwrite their reason with this one.
+   */
   private void retireUnrunnable(CiRun run) {
-    LOG.infof(
-        "CI run %s (%s, %s@%s) cannot be executed by this engine — an ordinary push triggers"
-            + " nothing since 2026-09-05, so it is settled CANCELLED/%s",
-        run.id, run.triggerType, run.repoId, run.branch, TRIGGER_RETIRED);
-    QuarkusTransaction.requiringNew()
-        .run(
-            () -> {
-              CiRun row = runs.findById(run.id);
-              row.status = CiRunStatus.CANCELLED;
-              row.finishedAt = Instant.now();
-              row.cancellationReason = TRIGGER_RETIRED;
-            });
+    boolean settled =
+        QuarkusTransaction.requiringNew()
+            .call(
+                () -> {
+                  CiRun row = runs.findById(run.id);
+                  if (row == null || row.status != CiRunStatus.QUEUED) {
+                    return false;
+                  }
+                  row.status = CiRunStatus.CANCELLED;
+                  row.finishedAt = Instant.now();
+                  row.cancellationReason = TRIGGER_RETIRED;
+                  return true;
+                });
+    if (settled) {
+      LOG.infof(
+          "CI run %s (%s, %s@%s) cannot be executed by this engine — an ordinary push triggers"
+              + " nothing since 2026-09-05, so it is settled CANCELLED/%s",
+          run.id, run.triggerType, run.repoId, run.branch, TRIGGER_RETIRED);
+    }
   }
 
   /**
