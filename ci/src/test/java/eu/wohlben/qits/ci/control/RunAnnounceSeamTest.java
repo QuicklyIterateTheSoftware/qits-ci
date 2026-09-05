@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
 import eu.wohlben.qits.ci.entity.CiRun;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -57,16 +56,22 @@ public class RunAnnounceSeamTest extends CiTestSupport {
     announcer.reset();
   }
 
+  private String pipeline;
+
   private void seedConfig(String content) {
     repoId = UUID.randomUUID().toString();
     sha = UUID.randomUUID().toString().replace("-", "");
-    fakeConfig.put(repoId, sha, ConfigLookup.found(content));
+    pipeline = content;
+  }
+
+  private void run() {
+    executePipeline(repoId, "main", sha, pipeline);
   }
 
   @Test
   public void aGreenRunIsAnnouncedOnceWithTheTimestampOnItsRow() {
     seedConfig(CONFIG_ONE_STEP);
-    service.execute(repoId, "main", sha);
+    run();
 
     CiRun run = service.runsFor(repoId).get(0);
     assertEquals(1, announcer.announced().size());
@@ -76,7 +81,7 @@ public class RunAnnounceSeamTest extends CiTestSupport {
     assertEquals(repoId, announced.repoId());
     assertEquals("main", announced.branch());
     assertEquals(sha, announced.commitSha());
-    assertTrue(announced.gating(), "a push run is always gating");
+    assertTrue(announced.gating(), "a file that declares nothing is gating");
     assertNotNull(announced.finishedAt(), "an event with no occurredAt is a 400 on the wire");
 
     // The same instant as the row's, to within the microsecond H2 ROUNDS the column to — the two
@@ -94,7 +99,7 @@ public class RunAnnounceSeamTest extends CiTestSupport {
     seedConfig(CONFIG_ONE_STEP);
     fakeRunner.script(
         0, new CiStepRunner.StepResult(1, false, CiStepRunner.StepOutcome.OK, "boom"));
-    service.execute(repoId, "main", sha);
+    run();
 
     CiRun run = service.runsFor(repoId).get(0);
     assertEquals(List.of(), announcer.announced());
@@ -108,24 +113,18 @@ public class RunAnnounceSeamTest extends CiTestSupport {
     assertNotNull(failure.finishedAt(), "an event with no occurredAt is a 400 on the wire");
   }
 
-  @Test
-  public void aConfigErrorAnnouncesItsFailureWithItsOwnWord() {
-    // A CONFIG_ERROR run never reaches the step loop, but it is a terminal verdict about the
-    // commit — a pipeline that cannot be parsed cannot be built — so the ledger hears about it.
-    seedConfig("steps: [unclosed\n");
-    service.execute(repoId, "main", sha);
-
-    assertEquals(List.of(), announcer.announced());
-    assertEquals(1, announcer.failed().size());
-    assertEquals("CONFIG_ERROR", announcer.failed().get(0).outcome());
-  }
+  // There used to be a third case here, `aConfigErrorAnnouncesItsFailureWithItsOwnWord`: a pipeline
+  // that could not be parsed was a CONFIG_ERROR row and a red announcement. It went with the push
+  // arm on 2026-09-05 — a trigger file is read and parsed by CiEventTriggerService BEFORE a row
+  // exists, so an unparseable one is a WARN and no run at all, and nothing writes CONFIG_ERROR any
+  // more. What a broken trigger file does is CiEventTriggerServiceTest's.
 
   @Test
   public void anEmptyPipelineIsStillAGreenRunAndAnnounces() {
     // The trivially green run: config present, zero steps. It records SUCCESS, so it announces —
     // and what a subscriber does about a build that published no image is the subscriber's answer.
     seedConfig("steps: []\n");
-    service.execute(repoId, "main", sha);
+    run();
 
     assertEquals(1, announcer.announced().size());
   }

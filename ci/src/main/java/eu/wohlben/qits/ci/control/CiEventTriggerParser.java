@@ -1,6 +1,5 @@
 package eu.wohlben.qits.ci.control;
 
-import eu.wohlben.qits.ci.control.CiConfigParser.CiConfigException;
 import eu.wohlben.qits.ci.control.CiEventSelection.Group;
 import eu.wohlben.qits.ci.control.CiEventSelection.Matcher;
 import eu.wohlben.qits.ci.control.CiEventSelection.PathCondition;
@@ -11,9 +10,8 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Parses a repo-committed {@code .config/qits/ci-event-*.yml}: the existing pipeline schema (shared
- * with {@link CiConfigParser} through {@link CiConfigSchema}) plus the two keys that make it a
- * trigger — {@code event:}, the exact envelope name, and {@code when:}, the selection — and the
+ * Parses a repo-committed {@code .config/qits/ci-event-*.yml}: the pipeline schema ({@link
+ * CiConfigSchema}) plus the two keys that make it a trigger — {@code event:}, the exact envelope name, and {@code when:}, the selection — and the
  * optional {@code artifacts:} declaration of what the pipeline publishes.
  *
  * <pre>{@code
@@ -58,31 +56,35 @@ import java.util.Set;
  *     script: ./publish-tag.sh
  * }</pre>
  *
- * <h2>The two-way rule</h2>
+ * <h2>{@code event:} is mandatory, and the missing-key failure is loud</h2>
  *
- * <p>A {@code ci-event-*.yml} <b>without</b> {@code event:} is a parse error, exactly as a {@code
- * ci-post-receive.yml} <b>with</b> {@code event:}/{@code when:} is one on the other side. The two
- * trigger types never blur, and neither mistake is allowed to be silent — a trigger that cannot be
- * parsed must not quietly never fire, which is indistinguishable from a selection that never matched.
+ * <p>A {@code ci-event-*.yml} <b>without</b> {@code event:} is a parse error rather than a file that
+ * matches nothing. Neither mistake is allowed to be silent — a trigger that cannot be parsed must not
+ * quietly never fire, which is indistinguishable from a selection that never matched.
  *
- * <h2>Strict where {@link CiConfigParser} is lenient, and that asymmetry is deliberate</h2>
+ * <p>This used to be half of a <b>two-way rule</b>, and the other half went with per-push CI on
+ * 2026-09-05: {@code event:}, {@code when:}, {@code artifacts:} and {@code checkout:} were parse
+ * errors in {@code ci-post-receive.yml}, so a selection written into the wrong file could not be
+ * mistaken for a trigger that never matched. There is no other file left for a declaration to be in.
  *
- * <p>{@code ci-post-receive.yml} ignores unknown top-level keys so a repository can carry config for
- * a newer qits-ci. This file does not: {@code event}, {@code when}, {@code steps} and {@code
- * artifacts} are the whole vocabulary and anything else is an error. The reason is what the two files' unknown keys mean. In
- * a pipeline, an unread key costs a feature that was not there yet. In a <b>selection</b>, an unread
- * key costs <em>correctness</em> — a mistyped {@code wehn:} would parse as "no selection", and an
- * absent {@code when} means <b>unconditional</b>, so the trigger would fire on every event of that
- * name instead of the two the repository meant. Silently widening a selection is the one failure
- * mode this file cannot have.
+ * <h2>Strict about unknown top-level keys, and that is deliberate</h2>
  *
- * <p>The step list keeps its own leniency unchanged, because it is the same pipeline schema and a
- * step must not mean different things in the two files. <b>The one key it subtracts is {@code
+ * <p>{@code event}, {@code when}, {@code steps}, {@code checkout} and {@code artifacts} are the whole
+ * vocabulary and anything else is an error — unlike the step list below, and unlike the retired push
+ * pipeline, which ignored unknown top-level keys so a repository could carry config for a newer
+ * qits-ci. The reason is what an unknown key <em>costs</em>. In a pipeline, an unread key costs a
+ * feature that was not there yet. In a <b>selection</b>, it costs <em>correctness</em> — a mistyped
+ * {@code wehn:} would parse as "no selection", and an absent {@code when} means <b>unconditional</b>,
+ * so the trigger would fire on every event of that name instead of the two the repository meant.
+ * Silently widening a selection is the one failure mode this file cannot have.
+ *
+ * <p>The step list keeps its own leniency, because a step schema that refused unknown keys would
+ * turn every forward-compatible pipeline into a parse error. <b>The one key it subtracts is {@code
  * branches:}</b>, and subtracting is still the point now that {@code checkout:} can name a branch:
  * the run's branch is the trigger's single decision — resolved once, from the payload, before any
  * step exists — so a per-step filter over it is either inert decoration or a step that can never
  * run, and a condition over the event's branch is what {@code when:} already spells. See {@link
- * CiConfigSchema#stepsRejectingBranches}.
+ * CiConfigSchema#steps}.
  *
  * <h2>Failures are per file</h2>
  *
@@ -193,10 +195,9 @@ public class CiEventTriggerParser {
         configPath,
         requireEventName(root, configPath),
         parseWhen(root.get(CiConfigSchema.WHEN_KEY), configPath),
-        // The step schema is shared verbatim, with one key subtracted rather than redefined: see
-        // CiConfigSchema#stepsRejectingBranches. A step means one thing in both files, and where it
-        // cannot mean anything it is an error rather than a second meaning.
-        CiConfigSchema.stepsRejectingBranches(root, configPath),
+        // The step schema is CiConfigSchema's, which refuses `branches:` — the one key a step
+        // could declare that can mean nothing on this path. See CiConfigSchema#steps.
+        CiConfigSchema.steps(root, configPath),
         parseArtifacts(root.get(CiConfigSchema.ARTIFACTS_KEY), configPath),
         parseGating(root.get(CiConfigSchema.GATING_KEY), configPath),
         parseCheckout(root.get(CiConfigSchema.CHECKOUT_KEY), configPath));
@@ -311,9 +312,7 @@ public class CiEventTriggerParser {
               + CONFIG_PREFIX
               + "*"
               + CONFIG_SUFFIX
-              + " names the event it listens for, or it is a "
-              + CiConfigParser.CONFIG_PATH
-              + " in the wrong file");
+              + " names the event it listens for");
     }
     if (!(value instanceof String name) || name.isBlank()) {
       throw new CiConfigException(

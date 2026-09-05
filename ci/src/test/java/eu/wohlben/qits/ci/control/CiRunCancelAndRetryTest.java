@@ -350,9 +350,9 @@ public class CiRunCancelAndRetryTest extends CiTestSupport {
             new CiPipeline(
                 List.of(
                     new CiPipeline.CiStepDecl(
-                        "alpine:3", "./mvnw verify", null, false, "", true, List.of()),
+                        "alpine:3", "./mvnw verify", null, false, "", true),
                     new CiPipeline.CiStepDecl(
-                        "alpine:3", "./publish-userflows.sh", null, false, "", false, List.of()))),
+                        "alpine:3", "./publish-userflows.sh", null, false, "", false))),
             List.of(), // declares no artifact: a QA run announces a build and nothing more
             true,
             new CiEventTrigger.Checkout("backingBranch", "mergedSha")),

@@ -33,8 +33,8 @@ import org.junit.jupiter.api.Test;
  * deployment that subscribes to nothing, receives nothing, sweeps nothing and says nothing about it.
  * An {@code Instance} injection point counts as a use, which is why no {@code @Unremovable} is
  * needed; this is the assertion that keeps that true rather than believed. It matters most for
- * {@code ScmPublishCommitListener}: removed, this service still serves every read and simply never
- * builds a push again. {@code ScmReleaseListener} is the same class of silence one step along —
+ * {@link CiEventTriggerListener}: removed, this service still serves every read and simply never
+ * runs anything again. {@code ScmReleaseListener} is the same class of silence one step along —
  * removed, no release fact is ever recorded and every release publishes without announcing.
  *
  * <p><b>And their consumer ids are asserted here because they are storage.</b> Each one keys a
@@ -42,6 +42,12 @@ import org.junit.jupiter.api.Test;
  * brand-new consumer that initializes at the head of the log and skips everything in between, and
  * reusing one hands a listener another's claims. A literal in this test is what makes either show up
  * as a red build rather than as a quiet gap in what was consumed.
+ *
+ * <p><b>There were five, and {@code ci-push-runs} retired with per-push CI on 2026-09-05.</b> Its
+ * {@code consumed_event} rows and its watermark are left where they are rather than migrated away —
+ * a retired consumer id is abandoned, which is what qits-platform-deployments did with {@code
+ * pd-build-succeeded} — and the id must never be handed to a new listener, which would inherit a
+ * watermark saying it had already handled every push ever announced.
  */
 @QuarkusTest
 public class EventstreamDarknessTest {
@@ -60,7 +66,7 @@ public class EventstreamDarknessTest {
   }
 
   @Test
-  public void allFiveDurableListenersAreRegisteredBeans() {
+  public void allFourDurableListenersAreRegisteredBeans() {
     Set<Class<?>> registered =
         StreamSupport.stream(listeners.spliterator(), false)
             .map(listener -> (Class<?>) ClientProxy.unwrap(listener).getClass())
@@ -71,7 +77,6 @@ public class EventstreamDarknessTest {
                 BuildSuccessfulListener.class,
                 CiEventTriggerListener.class,
                 DaemonReleaseListener.class,
-                ScmPublishCommitListener.class,
                 ScmReleaseListener.class)),
         "a listener removed as unused subscribes to nothing and is never swept: " + registered);
   }
@@ -81,14 +86,19 @@ public class EventstreamDarknessTest {
     assertEquals("ci-release-train", BuildSuccessfulListener.CONSUMER_ID);
     assertEquals("ci-event-triggers", CiEventTriggerListener.CONSUMER_ID);
     assertEquals("ci-daemon-adopt", DaemonReleaseListener.CONSUMER_ID);
-    assertEquals("ci-push-runs", ScmPublishCommitListener.CONSUMER_ID);
     assertEquals("ci-release-facts", ScmReleaseListener.CONSUMER_ID);
     assertEquals(
-        5,
+        4,
         StreamSupport.stream(listeners.spliterator(), false)
             .map(QitsDurableEventListener::consumerId)
             .distinct()
             .count(),
         "two listeners sharing an id share a watermark and each other's claims");
+    assertTrue(
+        StreamSupport.stream(listeners.spliterator(), false)
+            .map(QitsDurableEventListener::consumerId)
+            .noneMatch("ci-push-runs"::equals),
+        "ci-push-runs is a RETIRED consumption: its watermark says every push ever announced was"
+            + " handled, so a listener inheriting it would silently skip everything in between");
   }
 }

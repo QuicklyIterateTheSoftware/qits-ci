@@ -14,8 +14,11 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * One CI pipeline execution for one (push, updated branch ref) whose pushed commit carried {@code
- * .config/qits/ci-post-receive.yml}. {@link #repoId} is a plain string — ci lives in its own
+ * One CI pipeline execution: one domain event matched one repository's {@code
+ * .config/qits/ci-event-*.yml}, and this is the row that pipeline ran under. (Rows recorded before
+ * 2026-09-05 may instead be one (push, updated branch ref) whose commit carried {@code
+ * .config/qits/ci-post-receive.yml} — that intake retired, its rows did not.) {@link #repoId} is a
+ * plain string — ci lives in its own
  * physical DB with NO FK into qits' tables (a deleted repository leaves runs behind as dangling
  * history, the artifacts stance). Steps are {@link CiStep} rows keyed by {@link CiStep#runId}, not
  * a JPA relation.
@@ -29,8 +32,8 @@ import java.util.UUID;
  * the set value. A manual trigger evaluates on the request thread, where the REST filter's restored
  * scope still stands — there the stamp itself fills the column, from the {@code
  * X-Qits-Causation-Id} the caller sent. {@link #triggerEventId} stays what it is: domain data with
- * a unique constraint on it. For an event run the two agree; a post-receive run has neither; a
- * manual trigger over REST records a cause where {@code triggerEventId} records none.
+ * a unique constraint on it. For an event run the two agree; a historical post-receive run has
+ * neither; a manual trigger over REST records a cause where {@code triggerEventId} records none.
  */
 @Entity
 @Table(name = "ci_run")
@@ -83,8 +86,9 @@ public class CiRun extends PanacheEntityBase implements CausedRow {
 
   /**
    * Whether a red outcome of this run should stand in the way of releasing its commit. True for
-   * every push run and for every event run whose trigger file does not say {@code gating: false} —
-   * the userflow pipelines are the ones that do. Initialized true so no writer can forget it into
+   * every event run whose trigger file does not say {@code gating: false} — the userflow pipelines
+   * are the ones that do — and on every historical push row, which had no file-level flag to say
+   * otherwise. Initialized true so no writer can forget it into
    * the primitive default, which points the wrong way.
    *
    * <p><b>It is written twice on a run whose failure was non-gating.</b> Accept time records what
@@ -98,7 +102,7 @@ public class CiRun extends PanacheEntityBase implements CausedRow {
 
   /**
    * The release request this run serves, or null for every run that serves none — which is every
-   * push, and every event run not triggered by a {@code ReleaseRequestChanged}.
+   * event run not triggered by a {@code ReleaseRequestChanged}, and every historical push row.
    *
    * <p>A release request is qits-projects' aggregate and this is its id as a plain string, the way
    * this module names every foreign thing. It is recorded because the run is <b>about</b> that
@@ -182,8 +186,8 @@ public class CiRun extends PanacheEntityBase implements CausedRow {
   public CiTriggerType triggerType;
 
   /**
-   * The id of the domain event that caused this run, or null on a {@code POST_RECEIVE} run — a push
-   * is not caused by an event.
+   * The id of the domain event that caused this run. Null only on a historical {@code POST_RECEIVE}
+   * row: a push was not caused by an event, and the intake that recorded one retired on 2026-09-05.
    *
    * <p><b>It is the carrier across a thread hop.</b> The engine consumes a frame on the bus's
    * dispatch thread and <em>enqueues</em> the run, which executes later on {@code ci-run-worker}; a
@@ -196,8 +200,10 @@ public class CiRun extends PanacheEntityBase implements CausedRow {
    * <p>With {@link #repoId} and {@link #configPath} it carries a <b>unique constraint</b>, which is
    * the durable at-most-one-run-per-(event, trigger file) guarantee. A redelivery of the same event —
    * legal, and something a future catch-up feature will do on purpose — hits it and is dropped as
-   * already-triggered rather than re-run. Rows with a null here are all distinct to that constraint,
-   * which is what keeps every post-receive run out of its way.
+   * already-triggered rather than re-run. Rows with a null here are all distinct to that constraint —
+   * plain SQL {@code unique}, where rows collide only when every column is non-null and equal —
+   * which is what kept every post-receive run out of its way and now applies to nothing a live
+   * deployment writes.
    */
   @Column(name = "trigger_event_id", length = 255)
   public String triggerEventId;
@@ -222,8 +228,9 @@ public class CiRun extends PanacheEntityBase implements CausedRow {
   public String triggerConfig;
 
   /**
-   * Which committed file declared this run's pipeline: {@code CiConfigParser.CONFIG_PATH} on a push,
-   * the matching {@code .config/qits/ci-event-*.yml} on an event. Never null — it is the third column
+   * Which committed file declared this run's pipeline: the matching {@code
+   * .config/qits/ci-event-*.yml}, or {@code .config/qits/ci-post-receive.yml} on a historical push
+   * row. Never null — it is the third column
    * of the unique constraint, and identity rather than description: two trigger files in one
    * repository matching one event are two runs by design, because they are two declared pipelines.
    */

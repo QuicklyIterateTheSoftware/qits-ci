@@ -3,60 +3,39 @@ package eu.wohlben.qits.ci.control;
 import java.util.List;
 
 /**
- * Where the pipeline config for a pushed commit comes from. The production implementation is {@code
- * githost/HttpGitConfigSource} in the {@code service} module — it reads the file off the git host's
- * content endpoints — and it is a port here for the reason {@link GitHostRepoListing} is: {@code ci}
- * stays free of {@code java.net.http}. Tests replace it with an
+ * Where a repository's committed pipeline files come from, and whether it still holds a commit. The
+ * production implementation is {@code githost/HttpGitConfigSource} in the {@code service} module —
+ * it reads both off the git host's content endpoints — and it is a port here for the reason {@link
+ * GitHostRepoListing} is: {@code ci} stays free of {@code java.net.http}. Tests replace it with an
  * in-memory fake ({@code @io.quarkus.test.Mock}).
+ *
+ * <p><b>There used to be a third answer here and it retired with per-push CI (2026-09-05).</b>
+ * {@code ConfigLookup read(repo, branch, sha)} fetched {@code .config/qits/ci-post-receive.yml} at a
+ * pushed commit and answered FOUND/ABSENT/GONE/UNREACHABLE/INVALID — five outcomes that existed to
+ * decide what a push run should record. No push becomes a run any more, so four of them have no
+ * reader; what survived is the one question the <em>shared</em> run path still asks, and {@link
+ * #commitHeld} is that question under its own name.
  */
 public interface CiConfigSource {
 
   /**
-   * Outcome of a config lookup. {@code content} is non-null only for {@link Status#FOUND}; {@code
-   * message} carries the reason for {@link Status#INVALID}.
+   * Whether a repository still holds a commit. Three answers, and the third is not a weaker second:
+   * a host that could not be asked has said nothing about the commit, and a caller that read it as
+   * {@link #GONE} would discard a run over a network blip.
    */
-  record ConfigLookup(Status status, String content, String message) {
-
-    public enum Status {
-      /** The pushed commit carries the config file. */
-      FOUND,
-      /** The pushed commit has no config file — the repo has not opted in for this push. */
-      ABSENT,
-      /**
-       * The repository does not hold the commit at all (it was amended or force-pushed away and
-       * garbage-collected). Nothing is recorded — the push it belonged to no longer exists, so a red
-       * run would blame a commit whose build was never broken.
-       *
-       * <p>It is <b>held</b> rather than <b>reachable</b>, and the difference is deliberate: a
-       * commit the branch has moved past still has a pipeline worth running, and the config is read
-       * at that commit rather than at the branch precisely so that it does.
-       */
-      GONE,
-      /** The git host could not be reached at all — nothing is recorded. */
-      UNREACHABLE,
-      /** The file exists but cannot be a valid config (e.g. absurdly large) ⇒ CONFIG_ERROR. */
-      INVALID
-    }
-
-    public static ConfigLookup found(String content) {
-      return new ConfigLookup(Status.FOUND, content, null);
-    }
-
-    public static ConfigLookup absent() {
-      return new ConfigLookup(Status.ABSENT, null, null);
-    }
-
-    public static ConfigLookup gone() {
-      return new ConfigLookup(Status.GONE, null, null);
-    }
-
-    public static ConfigLookup unreachable() {
-      return new ConfigLookup(Status.UNREACHABLE, null, null);
-    }
-
-    public static ConfigLookup invalid(String message) {
-      return new ConfigLookup(Status.INVALID, null, message);
-    }
+  enum CommitHeld {
+    /** The repository resolves the commit. */
+    HELD,
+    /**
+     * The repository does not hold the commit at all — it was amended or force-pushed away and
+     * garbage-collected.
+     *
+     * <p>It is <b>held</b> rather than <b>reachable</b>, and the difference is deliberate: a commit
+     * the branch has moved past is still held, and a run that built it still says something true.
+     */
+    GONE,
+    /** The git host could not be reached, or answered something that is not an answer. */
+    UNKNOWN
   }
 
   /**
@@ -94,24 +73,30 @@ public interface CiConfigSource {
   record EventTriggerFile(String path, String content) {}
 
   /**
-   * Reads {@link CiConfigParser#CONFIG_PATH} at {@code sha} itself. {@code branch} is the run's
-   * coordinate rather than a place to look: the commit is read directly, so a branch that has moved
-   * on since the push changes nothing about what this commit declared.
+   * Does {@code repo} still hold {@code sha}? Asked in exactly one place — {@code
+   * CiRunService.runSteps}, when a step container reports it could not check the commit out — and
+   * the two causes it tells apart mean opposite things to the record. The commit force-pushed away
+   * since the run was accepted describes a push that no longer exists, so the run is discarded; a
+   * commit the repository still holds means the clone failed for some other reason, which is a real
+   * failure that stays red.
+   *
+   * <p>{@link CommitHeld#UNKNOWN} is neither, and a caller must not collapse it into {@code GONE}:
+   * discarding a run because the git host was briefly unreachable would erase a verdict about a
+   * commit nobody has any evidence against.
    *
    * <p>The repository arrives as a {@link CiRepoRef} rather than an id because the git host serves
    * the same content name-addressed, and after the identity cutover the id route is qits-projects'
    * alone. An implementation reads name-addressed when the reference {@link CiRepoRef#named() is
    * named} and id-addressed when it is not.
    */
-  ConfigLookup read(CiRepoRef repo, String branch, String sha);
+  CommitHeld commitHeld(CiRepoRef repo, String sha);
 
   /**
    * Lists and reads the repository's event-trigger files at {@code branch}'s current head.
    *
-   * <p>This is the <b>event</b> half of the same seam {@link #read} is the push half of, and the
-   * difference in shape is the difference between the two triggers: a push names its own commit,
-   * while an event names none, so the platform's one tracked branch supplies it (every submodule
-   * follows {@code main}) and the head is resolved rather than given.
+   * <p>This is the whole of what qits-ci reads a repository's config <em>for</em>: an event names no
+   * commit of its own, so the platform's one tracked branch supplies it (every submodule follows
+   * {@code main}) and the head is resolved rather than given.
    */
   default EventTriggerLookup readEventTriggers(CiRepoRef repo, String branch) {
     return readEventTriggers(repo, branch, CiTriggerScope.REPOSITORY);

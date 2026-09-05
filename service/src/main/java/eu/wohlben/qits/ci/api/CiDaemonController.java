@@ -50,8 +50,8 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * first-party client consume it, is its contract written down anywhere else. Its contract lives
  * here, its consumer is another first-party service reading it fail-closed, and a client draws from
  * it — so a change to the shape belongs in a reviewable diff. Nothing is hidden any more: the one
- * operation that was, {@code POST /ci/api/events/post-receive}, is gone with the HTTP fan-out it
- * served.
+ * operation that was, {@code POST /ci/api/events/post-receive}, is gone — first to the bus, then
+ * with per-push CI itself.
  *
  * <p>An ordinary JAX-RS resource under {@code quarkus.rest.path}, so it adds <b>no literal route</b>
  * and {@code quarkus.quinoa.ignored-path-prefixes} is unchanged — {@code /api} already covers it.

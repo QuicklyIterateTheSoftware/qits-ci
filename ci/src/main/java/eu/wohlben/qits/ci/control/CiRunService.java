@@ -1,8 +1,7 @@
 package eu.wohlben.qits.ci.control;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import eu.wohlben.qits.ci.control.CiConfigParser.CiConfigException;
-import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
+import eu.wohlben.qits.ci.control.CiConfigSource.CommitHeld;
 import eu.wohlben.qits.ci.control.CiStepRunner.DaemonPin;
 import eu.wohlben.qits.ci.control.CiStepRunner.StepOutcome;
 import eu.wohlben.qits.ci.control.CiStepRunner.StepResult;
@@ -46,23 +45,32 @@ import org.hibernate.exception.ConstraintViolationException;
 import org.jboss.logging.Logger;
 
 /**
- * The pipeline orchestrator: a post-receive event → read the config from the pushed commit → run
- * its steps sequentially → record per-step pass/fail. Runs execute on a bounded pool of daemon
- * workers (the intake returns immediately; {@code qits.ci.concurrent-builds} controls how many runs
- * may execute at once), with each DB transition in its own {@link QuarkusTransaction#requiringNew()}
- * bracket so the slow container work never holds a transaction (worker threads have no request
- * context; the {@code BlobService}/{@code GitHostRoutes} stance).
+ * The pipeline orchestrator: a domain event matched a repository's trigger file → run the pipeline
+ * that file declared, sequentially → record per-step pass/fail. Runs execute on a bounded pool of
+ * daemon workers (the intake returns immediately; {@code qits.ci.concurrent-builds} controls how
+ * many runs may execute at once), with each DB transition in its own {@link
+ * QuarkusTransaction#requiringNew()} bracket so the slow container work never holds a transaction
+ * (worker threads have no request context; the {@code BlobService}/{@code GitHostRoutes} stance).
  *
  * <p>That worker now parks on a socket rather than on a process — {@link CiStepRunner} waits for a
  * step container's own daemon — but the shape is unchanged: one blocking call per step, in order.
  *
- * <p><b>There are two ways in and one way through.</b> {@link #onPostReceive} is the push, which
- * names its own commit and has this class read the config out of it; {@link #onEventTrigger} is a
- * domain event that matched a {@code .config/qits/ci-event-*.yml}, which names no commit and arrives
- * with its pipeline already parsed at the head of {@code main} ({@code CiEventTriggerService} had to
- * read the file to know there was anything to run). From {@link #runSteps} down they are the same
- * path — same worker, same recording semantics, same containers — and what tells them apart
- * afterwards is the row's own provenance.
+ * <p><b>There is ONE way in, and that is the whole of the 2026-09-05 change.</b> {@link
+ * #onEventTrigger} takes a domain event that matched a {@code .config/qits/ci-event-*.yml}: it names
+ * no commit of its own and arrives with its pipeline already parsed at the head of {@code main}
+ * ({@code CiEventTriggerService} had to read the file to know there was anything to run).
+ *
+ * <p>There used to be a second, {@code onPostReceive} — one accepted run per pushed branch ref,
+ * reading {@code .config/qits/ci-post-receive.yml} out of the pushed commit on this class's own
+ * worker. <b>The platform runs no CI outside release requests</b>, so every repository's
+ * {@code ci-post-receive.yml} was deleted; the engine arm outlived them and kept enqueueing a run per
+ * push against a file none of them carried — thirteen phantom {@code QUEUED} rows on 2026-09-05,
+ * each holding a runner slot to discover that nothing was declared. An ordinary push now triggers
+ * nothing at all, and it does so because there is no code left that could: no listener, no accept, no
+ * worker half, no parser. {@code SCMPublishCommit} still reaches the generic trigger engine like
+ * every other event, so a repository that <em>declares</em> {@code event: SCMPublishCommit} is served
+ * by the ordinary grammar — which is a capability rather than a special case, and is why the engine
+ * arm stays.
  *
  * <p><b>Steps are persisted at their end.</b> A {@link CiStep} row is inserted once, already
  * terminal; while a step runs it has no row at all and the live output is the runner's in-memory
@@ -95,13 +103,14 @@ import org.jboss.logging.Logger;
  * that is sound because every statement in it is derived from the current database state and from the
  * arriving request, so a rolled-back attempt leaves the next one deciding the same way.
  *
- * <p><b>What is deliberately NOT wrapped.</b> {@link #acceptPostReceive} runs inside the durable
- * listener's claiming transaction, so a retry that outlives that claim's own connection would leave a
- * committed {@code QUEUED} row behind an event the funnel then re-offers — an orphan nothing
- * enqueues, where today the whole hop simply rolls back and the redelivery builds it cleanly. And no
- * worker-thread transition ({@link #startQueued}, {@link #finishRun}, {@code failIncompleteSteps},
- * {@link #discardRun}, the step inserts) is wrapped: those have their own recovery in {@code
- * sweepInterrupted} at boot, which is a stronger answer than a fifteen-second wait on the run worker.
+ * <p><b>What is deliberately NOT wrapped.</b> No worker-thread transition ({@link #startQueued},
+ * {@link #finishRun}, {@code failIncompleteSteps}, {@link #discardRun}, the step inserts) is wrapped:
+ * those have their own recovery in {@code sweepInterrupted} at boot, which is a stronger answer than
+ * a fifteen-second wait on the run worker. The rule they follow was written for a third case that no
+ * longer exists — {@code acceptPostReceive} ran inside the push listener's claiming transaction,
+ * where a retry outliving that claim's connection would have committed a {@code QUEUED} row behind an
+ * event the funnel then re-offered — and it is worth keeping in front of you the next time an accept
+ * is called from inside somebody else's transaction.
  *
  * <p>The validation each listing does — a non-positive {@code limit} — happens <em>before</em> the
  * wrap, so a caller bug is still one immediate 400 rather than something retried for fifteen
@@ -110,11 +119,11 @@ import org.jboss.logging.Logger;
  *
  * <h2>The run row is born at accept, not at start</h2>
  *
- * <p><b>Both entries insert a {@link CiRunStatus#QUEUED} row before they return</b>, and the worker
- * flips it to {@code RUNNING} when it dequeues it. Before that, a queued run was a closure on this
- * class's executor and nothing else — invisible to every read surface, and gone with the process.
- * That was the lossy intake: a redeploy landing between the push and the build lost the build with
- * no row anywhere to say so, and the remedy was to replay the post-receive by hand.
+ * <p><b>{@link #onEventTrigger} inserts a {@link CiRunStatus#QUEUED} row before it returns</b>, and
+ * the worker flips it to {@code RUNNING} when it dequeues it. Before that, a queued run was a closure
+ * on this class's executor and nothing else — invisible to every read surface, and gone with the
+ * process. That was the lossy intake: a redeploy landing between acceptance and the build lost the
+ * build with no row anywhere to say so.
  *
  * <p>So the recording rule is <b>revised, deliberately</b>. It used to read "a run is only ever
  * recorded when it says something true about a commit", which was a statement about when the INSERT
@@ -126,29 +135,31 @@ import org.jboss.logging.Logger;
  * <p>Recording semantics, per outcome, with what became of the accept-time row:
  *
  * <ul>
- *   <li>no config file ⇒ the row is <b>discarded</b> (opt-in: a repository that declares no pipeline
- *       must not accumulate a row per push);
- *   <li>git host unreachable ⇒ the read is retried through {@link #UNREACHABLE_RETRY_DELAYS} first
- *       — long enough to sit out a git-host redeploy, which is when this legitimately happens —
- *       and only then <b>discarded</b>, warn-logged (a read failure must not invent a gate, and
- *       inventing one is exactly what leaving a red row behind would be);
- *   <li>the repository no longer holds the commit ⇒ <b>discarded</b>, including when the discovery
- *       happens later, in a step container's own checkout — the push it belonged to no longer
- *       exists, so a red run would blame a commit whose build was never broken;
- *   <li>config present but broken ⇒ {@link CiRunStatus#CONFIG_ERROR}, so the broken gate is
- *       visible;
- *   <li>config present with no steps ⇒ a trivially green run;
+ *   <li>the repository no longer holds the commit ⇒ <b>discarded</b>, discovered in a step
+ *       container's own checkout and confirmed with {@link CiConfigSource#commitHeld} — the commit
+ *       the run was accepted for no longer exists, so a red run would blame a commit whose build was
+ *       never broken;
+ *   <li>a pipeline with no steps ⇒ a trivially green run;
  *   <li>cancelled while still {@code QUEUED} ⇒ {@code CANCELLED}, with no steps — cancellation is a
  *       user decision rather than a failed pipeline verdict.
  * </ul>
  *
+ * <p>Two outcomes left this list with the push path and are worth knowing were once here, because
+ * both are still reachable states on a historical row: {@code CONFIG_ERROR} (the config was read on
+ * this worker, so a broken one was a run) and the discard for a repository that declared no pipeline
+ * at all. A trigger file is read and parsed by {@code CiEventTriggerService} <em>before</em> a row
+ * exists now, so a broken or absent one is a WARN and no run rather than a row to settle.
+ *
  * <h2>What a restart costs now</h2>
  *
- * <p>{@link #sweepInterrupted} fails a push-triggered {@code RUNNING} row — its in-flight step died
- * with the process and replaying repository-authored work after it began is not safe. A running
- * event pipeline is different: the event bus is at-most-once and the complete input snapshot is on
- * the row, so its partial step records are cleared and the run is restarted. Event pipelines must
- * therefore be idempotent. Every {@code QUEUED} row is re-enqueued oldest first.
+ * <p>{@link #sweepInterrupted} restarts a {@code RUNNING} event pipeline: the complete input
+ * snapshot is on the row, so its partial step records are cleared and the run is restarted. Event
+ * pipelines must therefore be idempotent. Anything else left {@code RUNNING} is failed instead —
+ * which after the push retirement means a leftover {@code POST_RECEIVE} row from a predecessor
+ * deployment, since replaying repository-authored work that already began is not safe and this engine
+ * could not replay it anyway. Every {@code QUEUED} row a successor can run is re-enqueued oldest
+ * first; one it cannot is settled {@code CANCELLED} rather than left to sit in {@code
+ * /ci/api/runs/active} forever.
  *
  * <p>An event-triggered row also stores its event envelope and exact trigger-file content. The
  * worker reparses that immutable snapshot, so a queued event run is recoverable without consulting
@@ -182,7 +193,6 @@ public class CiRunService {
   public static final String MAIN_BRANCH = "main";
 
   @Inject CiConfigSource configSource;
-  @Inject CiConfigParser parser;
   @Inject CiEventTriggerParser triggerParser;
   @Inject CiStepRunner runner;
   @Inject CiRunRepository runs;
@@ -261,6 +271,15 @@ public class CiRunService {
    * looks at the row later — one person stopped one build, versus a whole piece of work went away.
    */
   public static final String RELEASE_REQUEST_CANCELLED = "RELEASE_REQUEST_CANCELLED";
+
+  /**
+   * What a row this engine cannot execute records when a boot sweep hands it back: a {@code
+   * POST_RECEIVE} run left {@code QUEUED} by a deployment that predates the 2026-09-05 retirement of
+   * per-push CI. Its own reason rather than {@link #USER_CANCELLED}, because nobody cancelled it —
+   * the engine that would have run it is gone, and a person reading the row a year from now should
+   * find that out from the row rather than from a changelog.
+   */
+  public static final String TRIGGER_RETIRED = "TRIGGER_RETIRED";
 
   public static final int MAX_CANCELLATION_REASON_LENGTH = 255;
 
@@ -352,37 +371,6 @@ public class CiRunService {
    */
   private volatile boolean draining;
 
-  /**
-   * How long the worker keeps re-asking an unreachable git host for a pushed commit's config before
-   * it decides. The schedule has to outlast a git-host <em>redeploy</em>, not a blip: the deploy
-   * train bounces the git host and the next push's config read lands seconds later on a dead pooled
-   * connection (2026-08-13, qits-containers — the discarded row cost the whole deploy, because the
-   * announcing event was already consumed when the row was accepted). A full stop-first redeploy of
-   * the git host has been observed to take over two minutes, so the schedule sums to almost five.
-   */
-  static final List<Duration> UNREACHABLE_RETRY_DELAYS =
-      List.of(
-          Duration.ofSeconds(2),
-          Duration.ofSeconds(5),
-          Duration.ofSeconds(10),
-          Duration.ofSeconds(20),
-          Duration.ofSeconds(30),
-          Duration.ofSeconds(45),
-          Duration.ofSeconds(60),
-          Duration.ofSeconds(60),
-          Duration.ofSeconds(60));
-
-  /** The schedule above, per instance so the suite can trade patience for speed. */
-  private List<Duration> unreachableRetryDelays = UNREACHABLE_RETRY_DELAYS;
-
-  /**
-   * A method rather than a bare field, and that is load-bearing: this bean is normal-scoped, so
-   * tests hold a client proxy — a field write would land on the proxy and change nothing.
-   */
-  void unreachableRetryDelays(List<Duration> delays) {
-    unreachableRetryDelays = List.copyOf(delays);
-  }
-
   private ExecutorService worker;
 
   @PostConstruct
@@ -413,9 +401,9 @@ public class CiRunService {
   }
 
   /**
-   * A method rather than a bare field, for {@link #unreachableRetryDelays}'s reason: this bean is
-   * normal-scoped, so a test holds a client proxy and a field write would land on the proxy. It is
-   * also how a suite puts the flag back down — a real process never does.
+   * A method rather than a bare field, and that is load-bearing: this bean is normal-scoped, so a
+   * test holds a client proxy and a field write would land on the proxy. It is also how a suite puts
+   * the flag back down — a real process never does.
    */
   void draining(boolean draining) {
     this.draining = draining;
@@ -430,15 +418,18 @@ public class CiRunService {
    * Reconciles what a previous process left behind, and the two halves pull in opposite directions
    * on purpose.
    *
-   * <p>A push run left {@code RUNNING} cannot make progress and is failed once here. An event run
-   * left running is reset and restarted from its durable snapshot because its at-most-once source
-   * cannot redeliver it; trigger scripts are consequently an at-least-once/idempotent boundary.
+   * <p>An event run left {@code RUNNING} is reset and restarted from its durable snapshot, because
+   * everything it needs is on the row; trigger scripts are consequently an at-least-once/idempotent
+   * boundary. Anything else left {@code RUNNING} cannot make progress and is failed once here —
+   * after the push retirement that is a {@code POST_RECEIVE} row a predecessor deployment left, work
+   * this engine has no worker for and could not safely replay if it had one.
    *
    * <p>A run left {@code QUEUED} never started. Its row is the whole of it, so it is <b>put back on
    * the worker</b> in {@code createdAt} order rather than failed: this is the point of the status
    * existing, and it is what closes the cutover loss for builds that were accepted while qits-ci was
    * redeploying itself. Event-triggered rows contain their envelope and trigger snapshot too, so
-   * both trigger types take the same recovery path.
+   * every runnable row takes the same recovery path. One this engine cannot run is settled {@code
+   * CANCELLED} instead — see {@link #enqueue}, which is where that decision lives.
    *
    * <p>The container half of the same reconciliation is {@code CiDaemonLauncher.onStart}, which
    * reaps what the {@code RUNNING} runs left behind; it is a second observer because it needs docker
@@ -508,6 +499,10 @@ public class CiRunService {
     List<FailedOrphan> failed = new ArrayList<>();
     int restartedEvents = 0;
     for (CiRun orphan : orphans) {
+      // The restartable case, and after the push retirement the only one a live deployment
+      // produces. The `else` covers what a predecessor left: a POST_RECEIVE row whose in-flight
+      // step died with its process, which this engine has no worker for and could not safely
+      // replay if it had one.
       if (orphan.triggerType == CiTriggerType.EVENT && orphan.triggerConfig != null) {
         steps.delete("runId = ?1", orphan.id);
         orphan.status = CiRunStatus.QUEUED;
@@ -522,6 +517,11 @@ public class CiRunService {
       }
     }
 
+    // Every QUEUED row goes back to the worker, including one this engine can no longer run — a
+    // POST_RECEIVE leftover from a predecessor deployment. `enqueue` is the single place that
+    // decides what a row is worth (it has to be: a row can also become unrunnable between here and
+    // the worker claiming it), and it settles such a row CANCELLED rather than leaving it QUEUED
+    // for a successor that will make the same discovery.
     List<String> requeue = new ArrayList<>();
     for (CiRun queued : runs.listQueuedOldestFirst()) {
       requeue.add(queued.id);
@@ -530,43 +530,8 @@ public class CiRunService {
   }
 
   /**
-   * The async entry a push takes. <b>The row is written before this returns</b> — the caller is the
-   * bus adapter holding an event's claiming transaction open for it, so a settled event means "this
-   * run is on the record and will be attempted", not "a closure exists somewhere".
-   *
-   * <p>The name outlived its transport on purpose: this is still what a post-receive <em>is</em> —
-   * a branch moved to a commit — and the row it writes is still {@code POST_RECEIVE}. What used to
-   * be an HTTP intake is {@code bus/ScmPublishCommitListener}, and the suppression the git host used
-   * to apply for its consumers ({@code -o qits.no-ci}) is decided there, before this is called.
-   *
-   * <p><b>{@code eventId} is the {@code SCMPublishCommit} that announced the push</b>, and it lands
-   * on the row's {@code triggerEventId} exactly as an event trigger's frame id does. That is what
-   * closes the platform's causation chain across this hop: {@code announceRun} reads it back off the
-   * row minutes later, on another thread, and stamps the run's {@code BuildSuccessful} with it — so
-   * release → push → commit event → CI run → deploy is one chain rather than two halves with a root
-   * event in the middle. It also puts push runs inside the unique constraint that used to see only
-   * event runs, which is a second guarantee and not a cost: see {@link #acceptPostReceive}.
-   *
-   * <p>Null is accepted and means "no event announced this", which is the {@link #execute} test
-   * entry and nothing in production. Such a run publishes a root event, which is the truthful
-   * answer for a push nobody can name a cause for.
-   */
-  public void onPostReceive(
-      CiRepoRef repo, String branch, String oldSha, String newSha, String eventId) {
-    // The name half is checked ONLY when it is there: an id-addressed push announces without it,
-    // and refusing that would refuse every mirror sync and every pre-cutover platform.
-    CiIdentifiers.requireRepo(repo);
-    CiIdentifiers.requireBranch(branch);
-    CiIdentifiers.requireSha(newSha);
-    CiRun accepted = acceptPostReceive(repo, branch, newSha, eventId);
-    if (accepted != null) {
-      enqueue(accepted.id);
-    }
-  }
-
-  /**
    * How a recorded run addresses its own repository: the storage id always, and the public
-   * {@code (projectId, repoName)} pair when the announcing push carried one.
+   * {@code (projectId, repoName)} pair when the catalogue could name one for it.
    *
    * <p>A method here rather than on the entity, because {@code ci/entity} is Panache rows and this
    * is the control layer's vocabulary — and because every reader of a run row wants exactly this
@@ -584,7 +549,18 @@ public class CiRunService {
         runId);
   }
 
-  /** Puts an already-accepted (QUEUED) run on the worker. */
+  /**
+   * Puts an already-accepted (QUEUED) run on the worker.
+   *
+   * <p><b>Every runnable row is an event run</b>, since per-push CI retired on 2026-09-05 and the
+   * only entry left is {@link #onEventTrigger}. A row that is not one is therefore a row this
+   * process cannot execute: a {@code POST_RECEIVE} leftover from a predecessor deployment, or an
+   * {@code EVENT} row whose trigger snapshot is missing. Neither is a defect to throw over and
+   * neither may be silently dropped either — a {@code QUEUED} row nothing will ever run sits in
+   * {@code GET /ci/api/runs/active} forever, which is exactly the phantom the retirement is about.
+   * So it is settled {@code CANCELLED}, which is the truthful terminal state for accepted work that
+   * will not happen, and said out loud once.
+   */
   private void enqueue(String runId) {
     if (draining) {
       logLeftQueuedWhileDraining(runId);
@@ -594,26 +570,52 @@ public class CiRunService {
         () -> {
           try {
             CiRun queued = QuarkusTransaction.requiringNew().call(() -> runs.findById(runId));
-            if (queued != null && queued.triggerType == CiTriggerType.EVENT) {
-              runQueuedEventRun(runId, reconstructEventRun(queued));
-            } else {
-              runQueued(runId);
+            if (queued == null) {
+              return;
             }
+            if (!runnable(queued)) {
+              retireUnrunnable(queued);
+              return;
+            }
+            runQueuedEventRun(runId, reconstructEventRun(queued));
           } catch (RuntimeException e) {
             LOG.errorf(e, "CI run %s failed unexpectedly", runId);
           }
         });
   }
 
+  /** Whether this process can execute a row at all — see {@link #enqueue}. */
+  private static boolean runnable(CiRun run) {
+    return run.triggerType == CiTriggerType.EVENT && run.triggerConfig != null;
+  }
+
+  /** Settles a row no engine here can run, with the one line and the one reason that say why. */
+  private void retireUnrunnable(CiRun run) {
+    LOG.infof(
+        "CI run %s (%s, %s@%s) cannot be executed by this engine — an ordinary push triggers"
+            + " nothing since 2026-09-05, so it is settled CANCELLED/%s",
+        run.id, run.triggerType, run.repoId, run.branch, TRIGGER_RETIRED);
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              CiRun row = runs.findById(run.id);
+              row.status = CiRunStatus.CANCELLED;
+              row.finishedAt = Instant.now();
+              row.cancellationReason = TRIGGER_RETIRED;
+            });
+  }
+
   /**
    * One matched event trigger, resolved: the repository, the head the trigger was read at, the
    * pipeline that file declared, and the event that caused all of it.
    *
-   * <p>The pipeline travels here <b>already parsed</b>, unlike the post-receive path which parses on
-   * this worker. That is the shape the two triggers force: an event has no commit of its own, so
-   * {@code CiEventTriggerService} must resolve the head and read the file to know whether there is
-   * anything to run at all — by the time it knows, it has parsed. Re-reading here would be a second
-   * fetch against a branch that may have moved, and the run would then record a sha it did not build.
+   * <p>The pipeline travels here <b>already parsed</b>, and that is the shape the trigger forces: an
+   * event has no commit of its own, so {@code CiEventTriggerService} must resolve the head and read
+   * the file to know whether there is anything to run at all — by the time it knows, it has parsed.
+   * Re-reading here would be a second fetch against a branch that may have moved, and the run would
+   * then record a sha it did not build. (The retired push path was the other shape: it named its own
+   * commit and parsed the file on the run worker, which is why a broken config was a {@code
+   * CONFIG_ERROR} row there and is a WARN with no row here.)
    */
   public record EventRun(
       CiRepoRef repo,
@@ -676,11 +678,12 @@ public class CiRunService {
   }
 
   /**
-   * The synchronous event-triggered run — package-private so tests drive it without either worker.
+   * Accept and run in one call — package-private so tests drive the whole state machine without the
+   * worker's timing, which is what {@link #onEventTrigger} plus the queue hop otherwise costs them.
    *
-   * <p>It joins the post-receive path at {@link #runSteps}: same worker, same recording semantics,
-   * same daemon pin, same step containers. The two differences are both in the row it writes — the
-   * provenance columns, and the {@code QITS_EVENT_*} environment its containers get.
+   * <p>It is the only synchronous entry left. There was a second, {@code execute(repoId, branch,
+   * sha)}, which accepted and ran a push; it went with the push arm on 2026-09-05 and the suites that
+   * used it as a cheap way into {@link #runSteps} drive an event run through here instead.
    */
   void executeEventRun(EventRun request) {
     CiRun run = acceptEventRun(request);
@@ -694,9 +697,9 @@ public class CiRunService {
    * The worker half of an event-triggered run: claim the queued row, then run the pipeline that
    * reconstructed from the durable row.
    *
-   * <p>No config lookup, unlike the push path — {@code CiEventTriggerService} had to read and parse
-   * the trigger file to know there was anything to run at all, so the pipeline arrives parsed. That
-   * The row stores that file's exact content so a restart parses the same declaration again.
+   * <p>No config lookup: {@code CiEventTriggerService} had to read and parse the trigger file to know
+   * there was anything to run at all, so the pipeline arrives parsed. The row stores that file's
+   * exact content so a restart parses the same declaration again.
    */
   private void runQueuedEventRun(String runId, EventRun request) {
     CiRun run = startQueued(runId);
@@ -704,8 +707,7 @@ public class CiRunService {
       cancelled.remove(runId);
       return;
     }
-    // Resolved once, here, exactly as on the push path: every step container of this run downloads
-    // the same daemon build.
+    // Resolved once, here: every step container of this run downloads the same daemon build.
     DaemonPin pin = runner.pinDaemon();
     pinDaemonVersion(run.id, pin.version());
     run.daemonVersion = pin.version();
@@ -724,33 +726,6 @@ public class CiRunService {
       cancelled.remove(run.id);
       runner.runClosed(run.id);
     }
-  }
-
-  /**
-   * The config read, held through the window a git-host redeploy opens. {@code UNREACHABLE} is the
-   * only answer retried: {@code ABSENT} and {@code GONE} are definite answers from a host that is
-   * up, and the caller must decide on them at once. A cancellation ends the patience early — the
-   * caller's switch then acts on whatever the last read said, exactly as if the schedule had run
-   * out.
-   */
-  private ConfigLookup readConfigPatiently(CiRun run) {
-    ConfigLookup lookup = configSource.read(repoOf(run), run.branch, run.commitSha);
-    for (Duration delay : unreachableRetryDelays) {
-      if (lookup.status() != ConfigLookup.Status.UNREACHABLE || cancelled.contains(run.id)) {
-        return lookup;
-      }
-      LOG.warnf(
-          "Could not read CI config for %s@%s — retrying in %ds",
-          run.repoId, run.commitSha, delay.toSeconds());
-      try {
-        Thread.sleep(delay.toMillis());
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        return lookup;
-      }
-      lookup = configSource.read(repoOf(run), run.branch, run.commitSha);
-    }
-    return lookup;
   }
 
   /**
@@ -774,7 +749,7 @@ public class CiRunService {
   /**
    * What a green run of this trigger file will announce beyond {@code BuildSuccessful}: the
    * artifacts it declared, and the payload the version is read out of. Null when the file declared
-   * none, which is every ordinary event pipeline and every push.
+   * none, which is every ordinary event pipeline.
    *
    * <p>The payload is reconstructed from the run row and travels through to {@link #runSteps}.
    * Reading it here rather than at accept time remains deliberate: a red run must announce nothing
@@ -787,131 +762,6 @@ public class CiRunService {
 
   /** The artifacts a run's trigger file declared, and the event payload they take their version from. */
   private record DeclaredRelease(List<CiArtifact> artifacts, String eventPayload) {}
-
-  /**
-   * Accept and run a push in one call — package-private so tests drive the whole state machine
-   * without the worker's timing. No announcing event, so the run publishes a root.
-   */
-  void execute(String repoId, String branch, String sha) {
-    execute(CiRepoRef.of(repoId), branch, sha);
-  }
-
-  /** The same, for a repository that carries its public coordinate. */
-  void execute(CiRepoRef repo, String branch, String sha) {
-    runQueued(acceptPostReceive(repo, branch, sha, null).id);
-  }
-
-  /**
-   * The worker half of a push-triggered run: claim the queued row, then read the config out of the
-   * commit and run what it declares.
-   *
-   * <p>Everything the run needs comes off the row, which is what makes this callable from the
-   * startup sweep with nothing but an id.
-   */
-  void runQueued(String runId) {
-    CiRun run = startQueued(runId);
-    if (run == null) {
-      // Somebody reached the row first — a cancellation of a still-queued run, which has already
-      // written the terminal row, or this process draining, which left the row QUEUED for the
-      // successor. Nothing to run and nothing to clean up but the flag a cancellation raced us with.
-      cancelled.remove(runId);
-      return;
-    }
-    try {
-      executeQueued(run);
-    } finally {
-      cancelled.remove(run.id);
-    }
-  }
-
-  /** Runs one claimed row. */
-  private void executeQueued(CiRun run) {
-    String repoId = run.repoId;
-    String branch = run.branch;
-    String sha = run.commitSha;
-
-    ConfigLookup lookup = readConfigPatiently(run);
-    if (cancelled.contains(run.id)) {
-      finishRun(run.id, CiRunStatus.CANCELLED);
-      return;
-    }
-    switch (lookup.status()) {
-      case ABSENT -> {
-        // Opt-in: the repository declares no pipeline for this push, so it gets no row. The row
-        // that exists was written before anyone could know that, and discarding it is what keeps
-        // "no config file, no run" true of the record.
-        LOG.debugf("No %s at %s@%s — no CI run", CiConfigParser.CONFIG_PATH, repoId, sha);
-        discardRun(run.id);
-        return;
-      }
-      case GONE -> {
-        LOG.infof("%s no longer holds commit %s — no CI run recorded", repoId, sha);
-        discardRun(run.id);
-        return;
-      }
-      case UNREACHABLE -> {
-        // A read failure must not invent a gate, and leaving a red row behind is precisely that:
-        // the commit is very likely fine and this process simply could not ask. The read above has
-        // already been patient through a whole git-host redeploy, so by here the host is properly
-        // down, not bouncing.
-        LOG.warnf(
-            "Could not fetch %s from the git host after %d retries — no CI run recorded for %s",
-            sha, unreachableRetryDelays.size(), repoId);
-        discardRun(run.id);
-        return;
-      }
-      case INVALID -> {
-        LOG.infof("CI config unusable at %s@%s: %s", repoId, sha, lookup.message());
-        announceFailedRun(run, finishRun(run.id, CiRunStatus.CONFIG_ERROR), CiRunStatus.CONFIG_ERROR);
-        return;
-      }
-      case FOUND -> {
-        /* fall through to parse + run */
-      }
-    }
-
-    CiPipeline pipeline;
-    try {
-      pipeline = parser.parse(lookup.content());
-    } catch (CiConfigException e) {
-      LOG.infof("CI config error at %s@%s: %s", repoId, sha, e.getMessage());
-      announceFailedRun(run, finishRun(run.id, CiRunStatus.CONFIG_ERROR), CiRunStatus.CONFIG_ERROR);
-      return;
-    }
-
-    // Resolved once, here: every step container of this run downloads the same daemon build. It is
-    // written to the row now rather than at accept because a run that never launches a container —
-    // a CONFIG_ERROR, a discarded one — pins no daemon and must keep saying so.
-    DaemonPin pin = runner.pinDaemon();
-    pinDaemonVersion(run.id, pin.version());
-    run.daemonVersion = pin.version();
-    try {
-      runSteps(run, pipeline, pin, Map.of(), null);
-    } catch (RuntimeException e) {
-      LOG.errorf(e, "CI run %s failed unexpectedly", run.id);
-      QuarkusTransaction.requiringNew().run(() -> failIncompleteSteps(run.id));
-      CiRunStatus outcome =
-          cancelled.contains(run.id) ? CiRunStatus.CANCELLED : CiRunStatus.FAILED;
-      Instant finishedAt = finishRun(run.id, outcome);
-      if (outcome == CiRunStatus.FAILED) {
-        announceFailedRun(run, finishedAt, outcome);
-      }
-    } finally {
-      runner.runClosed(run.id);
-    }
-  }
-
-  /**
-   * Prefixed onto the output of a step the run's branch did not bind. Public because it is the
-   * documented form of the row — the explorer shows it, {@code AGENTS.md} and {@code README.md}
-   * quote it, and a test reads it back.
-   */
-  public static final String NOT_BOUND_NOTE_PREFIX = "[step not bound to branch ";
-
-  /** The whole note, for the branch a run is on. */
-  public static String notBoundNote(String branch) {
-    return NOT_BOUND_NOTE_PREFIX + branch + "]";
-  }
 
   /**
    * Where a declared step's image is really pulled from — see {@link CiStepImage}.
@@ -930,19 +780,12 @@ public class CiRunService {
    * The sequential loop. Each iteration blocks on one container's whole lifetime and then writes
    * exactly one terminal row; whatever the loop did not reach is written {@code SKIPPED} at the end.
    *
-   * <p><b>A step the run's branch does not bind is written {@code SKIPPED} before any container
-   * exists, and nothing else moves</b>: {@code failed} is untouched, the loop continues, and later
-   * steps run. It launches nothing and is a non-event to the run's verdict — precisely unlike a
-   * {@code FAILED} or {@code TIMED_OUT} step, whose {@code failed = !ok} stops the loop and ends the
-   * run. So a run whose every step is branch-skipped finishes green, which is the existing "config present
-   * with no steps" precedent rather than a new rule, and it announces the deploy and publishes like any other
-   * green run.
-   *
-   * <p><b>The two kinds of {@code SKIPPED} stay apart by the output field</b>, which is the smallest
-   * honest form: skipped-because-an-earlier-step-failed keeps its {@code null} output (the trailing
-   * remainder loop below is untouched), and skipped-by-branch carries {@link #notBoundNote} — the
-   * same bracketed convention {@link #annotate}/{@link #note} already use for every other "why this
-   * row reads this way" sentence. No new status, no new column, no migration.
+   * <p><b>{@code SKIPPED} means one thing again.</b> A step could also be skipped because the run's
+   * branch did not bind its {@code branches:} filter — written before any container existed, with a
+   * bracketed note in the output to keep the two kinds of skip apart. That key was a pipeline
+   * feature of {@code ci-post-receive.yml}, always a parse error in a trigger file, and it went with
+   * per-push CI on 2026-09-05; the only skip left is the one this loop's remainder writes, so a
+   * {@code SKIPPED} row is "an earlier step failed" and its null output says so.
    *
    * <h2>Which half the run died in decides what the verdict is worth</h2>
    *
@@ -974,21 +817,6 @@ public class CiRunService {
     try {
       while (index < declared.size() && !failed && !cancelled.contains(run.id)) {
         CiPipeline.CiStepDecl decl = declared.get(index);
-        if (!decl.runsOnBranch(run.branch)) {
-          // Recorded rather than passed over: the run shows that the pipeline considered this step
-          // and why it did not run. No timestamps, because nothing started.
-          insertStep(
-              run.id,
-              index,
-              stepImage(decl),
-              CiStepStatus.SKIPPED,
-              null,
-              notBoundNote(run.branch),
-              null,
-              null);
-          index++;
-          continue;
-        }
         Stamps stamps = new Stamps();
         StepResult result =
             runner.run(
@@ -1012,16 +840,19 @@ public class CiRunService {
         // back.
         boolean wasCancelled = cancelled.contains(run.id);
 
-        // The daemon's checkout could not find the pushed sha. Two very different causes, so ask git
-        // which it was rather than guessing: the commit may have been force-pushed away since the
-        // config read (this run describes a push that no longer exists ⇒ discard it), or the repo
-        // may still hold it and something else went wrong with the clone (a real, user-visible
-        // failure that must stay on the record). The daemon's structured outcome is the probe now;
-        // the re-read is the confirmation, exactly as it was behind the prelude sentinel.
+        // The daemon's checkout could not find the run's sha. Two very different causes, so ask the
+        // git host which it was rather than guessing: the commit may have been force-pushed away
+        // since the run was accepted (this run describes work on a commit that no longer exists ⇒
+        // discard it), or the repository may still hold it and something else went wrong with the
+        // clone (a real, user-visible failure that must stay on the record). The daemon's structured
+        // outcome is the probe; commitHeld is the confirmation.
+        //
+        // UNKNOWN is deliberately NOT read as gone: a git host that could not be asked has said
+        // nothing about the commit, and discarding over that would erase a verdict on evidence
+        // nobody has.
         if (result.outcome() == StepOutcome.SHA_GONE && !wasCancelled) {
           boolean commitGone =
-              configSource.read(repoOf(run), run.branch, run.commitSha).status()
-                  == ConfigLookup.Status.GONE;
+              configSource.commitHeld(repoOf(run), run.commitSha) == CommitHeld.GONE;
           if (commitGone) {
             LOG.infof(
                 "CI run %s: %s is no longer reachable — discarding the run", run.id, run.commitSha);
@@ -1147,8 +978,8 @@ public class CiRunService {
    * published event's parent, so the run's own {@code BuildSuccessful} names what caused it and a
    * release train is a chain in the event log. It comes off the row rather than out of an ambient
    * context because there is none to read here: the engine consumed the frame on the bus's dispatch
-   * thread and this is {@code ci-run-worker}, minutes later. Null on every push, which publishes a
-   * root — correctly, since a push is not caused by an event.
+   * thread and this is {@code ci-run-worker}, minutes later. Null only on a historical push row,
+   * which publishes a root — correctly, since a push was not caused by an event.
    */
   private void announceRun(CiRun run, Instant finishedAt) {
     for (RunAnnouncer announcer : runAnnouncers) {
@@ -1226,7 +1057,7 @@ public class CiRunService {
    *
    * <p><b>It is additional and never a replacement.</b> Every green run still announces itself
    * exactly as before; a declaration adds N events, it removes none. A run with no declaration —
-   * every push and every ordinary event pipeline — reaches this method with a null and does nothing.
+   * every ordinary event pipeline — reaches this method with a null and does nothing.
    *
    * <p><b>Whether the platform hears about it is not decided here.</b> A green run says what it
    * published; {@link ReleaseJoin} says whether that was a release or a bootstrap replay restoring a
@@ -1334,61 +1165,6 @@ public class CiRunService {
       case NEVER_STARTED -> "[the step container never started its ci daemon]";
       case CONNECTION_LOST -> "[the connection to the step container was lost]";
     };
-  }
-
-  /**
-   * Records an accepted push as a {@code QUEUED} run: the constant config path, {@code
-   * POST_RECEIVE}, and the id of the {@code SCMPublishCommit} that announced it. Called on the bus
-   * adapter's thread, inside the claiming transaction of that event.
-   *
-   * <p><b>Two things collapse the moment {@code eventId} is non-null, and both are wanted.</b> The
-   * run gains a causation parent for what it publishes; and it joins the unique constraint on
-   * {@code (trigger_event_id, repo_id, config_path)}, which now means "one run per announced push"
-   * as well as "one run per (event, trigger file)". A push's config path is the constant
-   * {@code ci-post-receive.yml}, so the event id is the whole of what distinguishes one push row
-   * from the next — which is exactly right, because two runs for one announcement are two builds of
-   * one commit.
-   *
-   * <p>The durable claim already makes that near-unreachable: the funnel calls the listener at most
-   * once per (consumer, event), so a redelivery does not arrive here at all. The constraint is the
-   * backstop underneath, on ci's own datasource where the claim is not — and a duplicate is
-   * <b>settled, not retried</b>: it comes back null, the caller enqueues nothing, and the event is
-   * handled. Throwing would leave a push owed forever over a run that already exists.
-   *
-   * <p>A null {@code eventId} is the {@link #execute} test entry. Nothing is deduped for it, which
-   * is what plain SQL {@code unique} gives for free — rows collide only when every column is
-   * non-null and equal.
-   *
-   * @return the accepted run, or null when this push had already been recorded
-   */
-  private CiRun acceptPostReceive(CiRepoRef repo, String branch, String sha, String eventId) {
-    String repoId = repo.repoId();
-    CiRun run = newRun(repo, branch, sha);
-    run.triggerType = CiTriggerType.POST_RECEIVE;
-    run.configPath = CiConfigParser.CONFIG_PATH;
-    run.triggerEventId = eventId;
-    // No step rows: they are written one at a time, terminal, as each step ends.
-    try {
-      QuarkusTransaction.requiringNew()
-          .run(
-              () -> {
-                runs.persist(run);
-                runs.flush();
-                for (CiRun older : runs.listQueuedPushes(repoId, branch, run.id)) {
-                  dedupe(older, run);
-                }
-              });
-    } catch (RuntimeException e) {
-      if (eventId == null || !isUniqueViolation(e)) {
-        throw e;
-      }
-      // The flush is what threw, so nothing was superseded either — which is right: a push that was
-      // already recorded cannot cancel the queue a second time.
-      LOG.infof(
-          "Push %s already recorded a run for %s@%s — the first run stands", eventId, repoId, branch);
-      return null;
-    }
-    return run;
   }
 
   /**
@@ -1533,20 +1309,23 @@ public class CiRunService {
   }
 
   /**
-   * <b>A burst of pushes to one branch is one build, of the newest tip.</b> The event path's
-   * <em>third</em> collapse, and the checkout feature's twin of the per-branch push supersede in
-   * {@link #acceptPostReceive}: a trigger following the event's own branch gets one run per push,
-   * so N pushes in a burst would queue N builds behind the single run worker where only the newest
-   * matters.
+   * <b>A burst of events naming one branch is one build, of the newest tip.</b> The checkout
+   * feature's collapse: a trigger following the event's own branch gets one run per event, so N
+   * re-folds of a release request in a burst would queue N builds behind the single run worker where
+   * only the newest matters.
+   *
+   * <p>It is modelled on the per-branch supersede the push intake used to do at accept, which
+   * retired with that intake — the rules below are that one's, kept because the shape of the problem
+   * did not go anywhere: what pushed a burst then is a re-fold now.
    *
    * <p><b>The {@code checkout != null} gate is correctness, not tidiness.</b> Without {@code
    * checkout:} every event run's branch is {@code main} by convention, so a branch-keyed collapse
    * would dedupe runs of <em>distinct events</em> that merely share the convention — which the
    * {@code (trigger_event_id, …)} contract forbids.
    *
-   * <p>Accepted always wins, {@code QUEUED} rows only, convergence not minimality — {@link
-   * #acceptPostReceive}'s exact rules, including the out-of-order-redelivery exposure the push path
-   * already accepts. Called inside {@link #acceptEventRun}'s transaction, after the flush, beside
+   * <p>Accepted always wins, {@code QUEUED} rows only, convergence not minimality, and the
+   * out-of-order-redelivery exposure that comes with all three. Called inside {@link
+   * #acceptEventRun}'s transaction, after the flush, beside
    * {@link #supersedeByVersion} (the two cannot both fire: one is gated on {@code SCMPublishTag},
    * whose payload names no branch and therefore parses into no checkout).
    */
@@ -1562,7 +1341,7 @@ public class CiRunService {
             accepted.branch,
             accepted.id)) {
       LOG.infof(
-          "Push run %s at %s@%s supersedes queued %s — a burst builds the newest tip only",
+          "Run %s at %s@%s supersedes queued %s — a burst builds the newest tip only",
           accepted.id, accepted.repoId, accepted.branch, queued.id);
       dedupe(queued, accepted);
     }
@@ -1573,13 +1352,13 @@ public class CiRunService {
    * run collapses against the other queued runs of the same trigger file: the lower tag by {@link
    * VersionSort} is marked {@code DEDUPED}, which may be the run just accepted.
    *
-   * <p>It is the event path's twin of the branch supersede in {@link #acceptPostReceive}, down to
-   * the columns it writes, and it exists for the same reason. A release push writes N tag refs and
+   * <p>It is {@link #supersedeByCheckoutBranch}'s sibling, down to the columns it writes, and it
+   * exists for a version of the same reason. A release push writes N tag refs and
    * the git host announces <b>every one of them</b> — deliberately, because {@code SCMPublishTag} is
    * a fact about the repository and qits-projects' backup consumer needs them all. So the collapse
    * cannot live in the publisher, and it lives here, in the consumer that turns a fact into work.
    *
-   * <p><b>Best-effort by design, exactly like the branch supersede.</b> Only {@code QUEUED} rows are
+   * <p><b>Best-effort by design, exactly like the checkout-branch supersede.</b> Only {@code QUEUED} rows are
    * touched: a lower tag whose run has already started keeps running, because cancelling a running
    * build to save the time it has already spent is a worse trade than letting it finish. What is
    * guaranteed is convergence, not minimality — N tags in one push leave one run to do.
@@ -1588,7 +1367,7 @@ public class CiRunService {
    * supersedes nothing, since "no tag" is not a lower version — it is a failure to compare, and a
    * failure to compare must not cancel a build. A tag equal to a queued one <em>does</em> supersede
    * it, because that is a tag that moved and the newer announcement is the current one, which is the
-   * same rule the branch supersede applies to a second push. And a non-tag event never enters here
+   * same rule the checkout-branch supersede applies to a re-fold. And a non-tag event never enters here
    * at all: no other event on this bus carries a field this can order by.
    *
    * <p><b>A row names what beat it at the time, so out-of-order tags leave a chain rather than a
@@ -1745,8 +1524,8 @@ public class CiRunService {
     CiRun run = new CiRun();
     run.id = UUID.randomUUID().toString();
     run.repoId = repo.repoId();
-    // Null when the announcing push was id-addressed — the row then reads exactly as every row
-    // recorded before this campaign, and every URL built from it is the id-addressed one.
+    // Null when the candidate carries no public coordinate — the row then reads exactly as every
+    // row recorded before this campaign, and every URL built from it is the id-addressed one.
     run.projectId = repo.projectId();
     run.repoName = repo.name();
     run.branch = branch;
@@ -2047,8 +1826,8 @@ public class CiRunService {
    * finished run is what that run's <em>verdict</em> was worth — the file's flag ANDed with whichever
    * step failed — so copying it would start a green retry of a gating pipeline off as non-gating and
    * publish a verdict no release gate holds a commit for. The declaration is on the row as {@code
-   * triggerConfig}, so the answer is one parse away; a push run carries none and is gating as every
-   * push run is.
+   * triggerConfig}, so the answer is one parse away; a historical push row carries none and is
+   * gating, which is what every push run was.
    */
   private CiRun insertRetry(String sourceRunId) {
     CiRun source = runs.findById(sourceRunId);
@@ -2194,7 +1973,7 @@ public class CiRunService {
    *     id, which is what the runs are grouped by and what stays stable across a rename
    * @param projectId the owning project, or null when no run of this repository carries the public
    *     coordinate. Read off the newest run rather than stored anywhere: qits-ci owns no repository
-   *     row, so what it knows about a name is whatever the last push told it.
+   *     row, so what it knows about a name is whatever the last run's candidate reference carried.
    * @param repoName the repository's public name under the same rule, or null
    * @param lastRun the newest run on any branch — never null, since a repository is only listed
    *     because it has one

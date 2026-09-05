@@ -52,6 +52,7 @@ CLI client. What `docker: true` changes is that the step gets to talk to it too.
 sequenceDiagram
     autonumber
     actor Dev as developer
+    participant Proj as qits-projects
     participant Git as qits-githost
     participant Bus as qits-events
     participant Art as qits-artifacts
@@ -59,12 +60,12 @@ sequenceDiagram
     participant Dockerd as host dockerd
     participant Step as step container
 
-    Dev->>Git: git push
-    Git->>Bus: SCMPublishCommit{repoId, branch, oldSha, sha, …, suppressCi}<br/>through the outbox — durable, so a qits-ci that was down reads it back
+    Dev->>Proj: POST /release-requests — the platform runs no CI outside one
+    Proj->>Bus: ReleaseRequestChanged{repository, backingBranch, mergedSha}<br/>through the outbox — durable, so a qits-ci that was down reads it back
     Bus-->>Ci: the frame, or a catch-up sweep of it later
-    Note over Ci: suppressCi (git push -o qits.no-ci) ⇒ no run at all
-    Ci->>Git: GET /git/{repoId}/blob/{sha}/.config/qits/ci-post-receive.yml<br/>one file at the pushed commit — no clone, no mirror
-    Ci->>Ci: parse the steps, pin the daemon version, write the run row RUNNING
+    Note over Ci: an ordinary push announces SCMPublishCommit and matches nothing:<br/>per-push CI retired 2026-09-05, so a push triggers no run at all
+    Ci->>Git: GET /git/{projectId}/{repoName}/tree/main/.config/qits<br/>then each ci-event-*.yml at the head it answered — no clone, no mirror
+    Ci->>Ci: match the event, parse the steps, write the run row QUEUED<br/>then the worker claims it RUNNING and pins the daemon version
 
     loop one fresh container per step, in sequence
         Ci->>Dockerd: docker run -d --cap-drop=ALL --security-opt=no-new-privileges …<br/>entrypoint = the host-authored BOOTSTRAP, the contract as env
@@ -74,7 +75,7 @@ sequenceDiagram
         Step-->>Ci: ⇠ dials the CONTROL WebSocket, Hello{daemonId, secret}
         Note over Step,Ci: the container dials OUT. qits-ci never dials in and<br/>never learns an address from a container.
         Step->>Git: shallow clone --depth 50, checkout $QITS_CI_SHA
-        Step-->>Ci: Initialized — or InitFailed{SHA_GONE}, the force-push backstop
+        Step-->>Ci: Initialized — or InitFailed{SHA_GONE}; ci then asks the host whether<br/>the repository still HOLDS the sha and discards the run only if it does not
         Ci-->>Step: RunStep{script, timeoutSeconds} — the reply IS the step<br/>← host-stamped started_at
         Step-->>Ci: Output{chunk} … many, streamed as the script prints
         Ci->>Ci: each chunk feeds the bounded relay that GET /ci/api/runs/{runId}<br/>exposes as `live` — poll it; there is no SSE and no push

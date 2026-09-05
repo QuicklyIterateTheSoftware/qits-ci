@@ -39,7 +39,8 @@ public interface RunAnnouncer {
 
   /**
    * A run went green. {@code triggerEventId} is <b>the event that caused this run</b>, or null when
-   * nothing did — which is every push, and a push publishing a chain root is correct.
+   * nothing did — which after the push retirement is only a historical push row, and one publishing
+   * a chain root is correct.
    *
    * <p>{@code gating} is the run row's own flag: whether a red outcome of this pipeline should
    * stand in the way of releasing the commit. Carried on both announcements so the release
@@ -47,8 +48,8 @@ public interface RunAnnouncer {
    * verdict whichever way a reader weighs it.
    *
    * <p>{@code repoId} is the storage id and is always set; {@code projectId} and {@code repoName}
-   * are the public {@code (project, name)} pair off the run's own row, present when the announcing
-   * push arrived name-addressed and null when it did not. They ride the event so a subscriber can
+   * are the public {@code (project, name)} pair off the run's own row, present when the candidate
+   * the run was accepted for carried a public coordinate and null when it did not. They ride the event so a subscriber can
    * address the repository by name instead of falling back to the id.
    *
    * <p><b>A plain {@code String}, and that is the whole reason this parameter is here rather than an
@@ -77,7 +78,7 @@ public interface RunAnnouncer {
    * TIMED_OUT} or {@code CONFIG_ERROR} — carried as a plain {@code String} for the reason every
    * parameter here is one. What never reaches this method is as much of the contract as what does:
    * a {@code CANCELLED} run announces nothing (a person withdrew the question), and a run
-   * superseded by a newer push announces nothing (its row is bookkeeping about the queue, not a
+   * superseded by a newer one announces nothing (its row is bookkeeping about the queue, not a
    * fact about the commit). Everything else — the field meanings, the causation argument, the
    * must-not-block caveat — is {@link #onRunSucceeded}'s, unchanged.
    */

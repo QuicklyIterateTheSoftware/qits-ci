@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerFile;
 import eu.wohlben.qits.ci.entity.CiRun;
 import io.quarkus.test.junit.QuarkusTest;
@@ -210,13 +209,14 @@ public class ReleaseAnnounceSeamTest extends CiTestSupport {
   }
 
   @Test
-  public void aPushAnnouncesNothingOnThisPortEver() {
-    // A push cannot carry a declaration (`artifacts:` is a parse error in ci-post-receive.yml) and
-    // carries no version either, so this port is silent on the whole post-receive path.
+  public void aTriggerThatDeclaredNoArtifactsAnnouncesNothingOnThisPortEver() {
+    // The `artifacts:` key is what makes a file a release pipeline, so a file without one is silent
+    // on this port however green it goes — which is every ordinary event pipeline. (It used to be
+    // stated about pushes, whose file could not carry a declaration at all and which carried no
+    // version to publish one under; that intake retired on 2026-09-05 and this is the same claim
+    // about the trigger type that is left.)
     String sha = UUID.randomUUID().toString().replace("-", "");
-    fakeConfig.put(
-        repoId, sha, ConfigLookup.found("steps:\n  - image: alpine:3\n    script: echo ok\n"));
-    runService.execute(repoId, "main", sha);
+    executePipeline(repoId, "main", sha, "steps:\n  - image: alpine:3\n    script: echo ok\n");
 
     assertEquals(1, runAnnouncer.announced().size());
     assertEquals(List.of(), releaseAnnouncer.published());

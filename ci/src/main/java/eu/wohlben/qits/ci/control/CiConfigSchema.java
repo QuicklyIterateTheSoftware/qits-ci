@@ -1,8 +1,6 @@
 package eu.wohlben.qits.ci.control;
 
-import eu.wohlben.qits.ci.control.CiConfigParser.CiConfigException;
 import eu.wohlben.qits.ci.control.CiEventSelection.Matcher;
-import eu.wohlben.qits.ci.control.CiPipeline.BranchFilter;
 import eu.wohlben.qits.ci.control.CiPipeline.CiStepDecl;
 import java.util.ArrayList;
 import java.util.List;
@@ -12,16 +10,16 @@ import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.SafeConstructor;
 
 /**
- * What {@link CiConfigParser} and {@link CiEventTriggerParser} genuinely share: the YAML load, the
- * {@code steps:} schema, and the two-way rule that keeps the two trigger types from blurring.
+ * The YAML load and the {@code steps:} schema every committed pipeline file shares.
  *
- * <p>Deliberately <b>only</b> those three. The two files are the same pipeline schema under two
- * different trigger declarations, so the step list is one implementation — a repo must not discover
- * that {@code timeout-seconds} means something different in a trigger file. What the two do
- * <em>not</em> share is their treatment of unknown top-level keys, and that asymmetry is intentional
- * rather than an oversight: see {@link CiEventTriggerParser}. {@code artifacts:} is parsed there
- * too, because only a trigger file can carry one — its key name lives here so both sides of the
- * two-way rule spell it once.
+ * <p>It was extracted when there were <b>two</b> such files — {@code ci-post-receive.yml}, read from
+ * a pushed commit, and {@code ci-event-*.yml}, read at a branch head — and it held the third thing
+ * they shared: the two-way rule, which made each file's keys a parse error in the other so a
+ * declaration in the wrong file could not be mistaken for a trigger that never matched. Per-push CI
+ * retired on 2026-09-05 and {@code CiConfigParser} went with it, so there is one file left and the
+ * key constants below are simply {@link CiEventTriggerParser}'s. They stay here because the schema
+ * and the trigger grammar are still two different things, and because the day a second file kind
+ * returns this is where it would be shared from.
  *
  * <p>The load is the {@code QitsConfigParser} pattern throughout — SnakeYAML's {@link
  * SafeConstructor}, plain maps and lists only, never instantiating a class named by repository
@@ -32,9 +30,9 @@ import org.yaml.snakeyaml.constructor.SafeConstructor;
 final class CiConfigSchema {
 
   /**
-   * The two keys that say "this is an event trigger". They are the whole of the two-way rule: their
-   * presence in {@code ci-post-receive.yml} is an error, and {@code event}'s absence from a {@code
-   * ci-event-*.yml} is one too.
+   * The key that says "this is an event trigger": the envelope name the file listens for. Its
+   * absence from a {@code ci-event-*.yml} is a parse error, because a trigger that names no event
+   * can never fire and must not look like one that simply never matched.
    */
   static final String EVENT_KEY = "event";
 
@@ -43,18 +41,15 @@ final class CiConfigSchema {
   static final String STEPS_KEY = "steps";
 
   /**
-   * The artifacts a trigger file's pipeline publishes. A third member of the two-way rule: it is
-   * read only from a {@code ci-event-*.yml} and is an error in {@code ci-post-receive.yml}, because
-   * what it declares is announced with the <em>triggering event's</em> version and a push carries
-   * none.
+   * The artifacts a trigger file's pipeline publishes. What it declares is announced with the
+   * <em>triggering event's</em> version, which is why it could never have meant anything in the
+   * retired push pipeline: a push carries no version at all.
    */
   static final String ARTIFACTS_KEY = "artifacts";
 
   /**
-   * Where a triggered run checks out — two payload dot-paths, {@code branch} and {@code sha}. A
-   * fourth member of the two-way rule (trigger files only): a push run's checkout IS the push, so
-   * the key could only ever be inert in {@code ci-post-receive.yml}. Absent, an event run builds
-   * the head of {@code main}, exactly as every trigger always has.
+   * Where a triggered run checks out — two payload dot-paths, {@code branch} and {@code sha}. Absent,
+   * an event run builds the head of {@code main}, exactly as every trigger always has.
    */
   static final String CHECKOUT_KEY = "checkout";
 
@@ -62,9 +57,7 @@ final class CiConfigSchema {
    * Whether a red run of this pipeline should stand in the way of releasing its commit — trigger
    * files only, default {@code true}. The platform's userflow pipelines are the reason it exists:
    * they are non-gating by design ("a red story costs a fix-forward cycle, not an image"), and the
-   * release-quality-gates build gate needs that stated as data rather than known by file name. A
-   * push run is always gating, so the key would be inert in {@code ci-post-receive.yml} — the same
-   * two-way rule as {@code checkout:}.
+   * release-quality-gates build gate needs that stated as data rather than known by file name.
    */
   static final String GATING_KEY = "gating";
 
@@ -104,12 +97,13 @@ final class CiConfigSchema {
    * a config error — every schema this repo has is a mapping.
    *
    * <p><b>{@code strictDuplicateKeys} is why this takes a flag rather than being one call.</b> A
-   * duplicate key is a defect in either file, but the two failures are not comparable. In a pipeline
-   * SnakeYAML keeps the last one and the repository gets a step it can see; in a <b>selection</b> a
-   * silently dropped condition <em>widens</em> what the trigger fires on, which is the one failure
-   * mode a trigger file may not have. So trigger files are strict and {@code ci-post-receive.yml}
-   * keeps the leniency it has always had — tightening it would turn config that works today into a
-   * {@code CONFIG_ERROR} run in every repository at once, for a defect nobody has reported.
+   * duplicate key is a defect wherever it appears, but the failures are not comparable. In a plain
+   * pipeline SnakeYAML keeps the last one and the repository gets a step it can see; in a
+   * <b>selection</b> a silently dropped condition <em>widens</em> what the trigger fires on, which is
+   * the one failure mode a trigger file may not have. So trigger files pass {@code true}. The flag
+   * survives the retirement of the lenient caller ({@code CiConfigParser}, with per-push CI on
+   * 2026-09-05) because it is the argument, not the caller, that is worth keeping: a second file kind
+   * that is a pipeline and not a selection would pass {@code false} for exactly this reason.
    */
   static Map<?, ?> load(String content, boolean strictDuplicateKeys) {
     if (content == null || content.isBlank()) {
@@ -134,30 +128,20 @@ final class CiConfigSchema {
   }
 
   /**
-   * The {@code steps:} list of a pipeline file, where a step may bind itself to branches. An absent
-   * or empty list yields an empty pipeline — the opt-in file is visible, which is what a trivially
-   * green run records.
-   */
-  static CiPipeline steps(Map<?, ?> root) {
-    return steps(root, null);
-  }
-
-  /**
-   * The same list read from a trigger file, where {@code branches:} on a step is a <b>parse
-   * error</b> naming {@code configPath}.
+   * The {@code steps:} list. An absent or empty list yields an empty pipeline — a trigger file that
+   * matched and declares nothing to verify is a trivially green run rather than an error.
    *
-   * <p>The key is refused rather than ignored because on that path it has only two possible
-   * behaviours and both are silent. An event-triggered run always builds the head of {@code main},
-   * so {@code exact: main} would be inert decoration and anything else a step that is <em>always</em>
-   * skipped — indistinguishable at a glance from one that never got its turn. Allow-but-inert is the
-   * trap; this is the two-way rule's own argument, moved down one level from the top-level keys to
-   * the step.
+   * <p><b>{@code branches:} on a step is a parse error</b> naming {@code configPath}, and that
+   * outlived the key it refuses. A step could declare a filter over the run's branch while there was
+   * a pipeline file whose branch was the push's; on this path it has only two possible behaviours
+   * and both are silent, because an event-triggered run's branch is decided by the trigger before
+   * any step exists — {@code exact: main} would be inert decoration and anything else a step that is
+   * <em>always</em> skipped, indistinguishable at a glance from one that never got its turn.
+   * Allow-but-inert is the trap the whole schema refuses. Per-push CI retired on 2026-09-05 and the
+   * filter went with it entirely, so what is left here is the refusal: a repository that still
+   * carries the key is told, rather than having it quietly ignored.
    */
-  static CiPipeline stepsRejectingBranches(Map<?, ?> root, String configPath) {
-    return steps(root, configPath);
-  }
-
-  private static CiPipeline steps(Map<?, ?> root, String rejectBranchesIn) {
+  static CiPipeline steps(Map<?, ?> root, String configPath) {
     Object rawSteps = root.get(STEPS_KEY);
     if (rawSteps == null) {
       return new CiPipeline(List.of());
@@ -171,6 +155,7 @@ final class CiConfigSchema {
       if (!(entry instanceof Map<?, ?> step)) {
         throw new CiConfigException("Step " + i + ": expected a mapping, got: " + typeOf(entry));
       }
+      rejectBranches(step, i, configPath);
       boolean docker = optionalDocker(step, i);
       steps.add(
           new CiStepDecl(
@@ -179,8 +164,7 @@ final class CiConfigSchema {
               optionalTimeoutSeconds(step, i),
               docker,
               optionalUser(step, i, docker),
-              optionalStepGating(step, i),
-              optionalBranches(step, i, rejectBranchesIn)));
+              optionalStepGating(step, i)));
     }
     return new CiPipeline(List.copyOf(steps));
   }
@@ -241,10 +225,10 @@ final class CiConfigSchema {
    * and its tests as the gating half and the userflow publish as the non-gating half in ONE file,
    * which is what replaced the two-file split (see {@link CiPipeline.CiStepDecl}).
    *
-   * <p>Legal in <b>both</b> file kinds, unlike {@code checkout:} and the file-level {@code gating:}.
-   * The step schema is one implementation on purpose — a step must not mean two things — and the key
-   * is not inert in a push pipeline either: a push run is always gating as a file, and a non-gating
-   * step in it is exactly the "this half must not cost the image" case.
+   * <p>It was legal in <b>both</b> file kinds while there were two, unlike {@code checkout:} and the
+   * file-level {@code gating:} — the step schema is one implementation on purpose, a step must not
+   * mean two things, and a push pipeline whose last step published docs was the identical "this half
+   * must not cost the image" case.
    *
    * <p>Held to the {@code timeout-seconds}/{@code docker} standard, and for the sharper of the two
    * reasons: {@code gating: "false"} silently parsing as truthy would hold a commit for a failure
@@ -319,120 +303,20 @@ final class CiConfigSchema {
     return user;
   }
 
-  /**
-   * The optional per-step {@code branches}: the branches this step is bound to, as a list of matcher
-   * mappings — entries OR'd, a mapping's keys AND'd.
-   *
-   * <p>Absent means <b>the step runs on every branch</b>, which is the whole backward-compatibility
-   * clause: every pipeline written before this key existed keeps its behaviour byte for byte. An
-   * <b>empty list is a config error</b> rather than either reading of it, because both readings
-   * already have an unambiguous spelling — omit the key for "every branch", delete the step for
-   * "none" — and an ambiguity with two better spellings is a parse error.
-   *
-   * <p>Held to the {@code timeout-seconds}/{@code docker} standard, for the sharper of the two
-   * standing reasons: a silently mis-parsed filter would either run a scoped step everywhere or skip
-   * it forever, and both directions are silent. Unknown per-step keys stay ignored, unchanged.
-   */
-  private static List<BranchFilter> optionalBranches(
-      Map<?, ?> step, int index, String rejectBranchesIn) {
-    Object value = step.get(BRANCHES_KEY);
-    if (value == null) {
-      return List.of();
+  /** A step declaring {@code branches:} is refused — see {@link #steps} for why the key is gone. */
+  private static void rejectBranches(Map<?, ?> step, int index, String configPath) {
+    if (!step.containsKey(BRANCHES_KEY)) {
+      return;
     }
-    if (rejectBranchesIn != null) {
-      throw new CiConfigException(
-          rejectBranchesIn
-              + ": step "
-              + index
-              + " declares '"
-              + BRANCHES_KEY
-              + "' — an event-triggered run always builds the head of "
-              + CiRunService.MAIN_BRANCH
-              + ", so a branch filter there is either inert or a step that can never run. A"
-              + " condition over the event's payload is what 'when' already is.");
-    }
-    if (!(value instanceof List<?> list)) {
-      throw new CiConfigException(
-          "Step " + index + ": 'branches' must be a list of matchers, got: " + typeOf(value));
-    }
-    if (list.isEmpty()) {
-      throw new CiConfigException(
-          "Step "
-              + index
-              + ": 'branches' is empty — omit the key to run the step on every branch, or delete"
-              + " the step to run it on none");
-    }
-    List<BranchFilter> filters = new ArrayList<>(list.size());
-    for (Object entry : list) {
-      filters.add(branchFilter(entry, index));
-    }
-    return List.copyOf(filters);
-  }
-
-  /** One entry: a mapping of matchers over the run's branch, AND'd. */
-  private static BranchFilter branchFilter(Object raw, int index) {
-    if (!(raw instanceof Map<?, ?> map) || map.isEmpty()) {
-      throw new CiConfigException(
-          "Step "
-              + index
-              + ": each 'branches' entry must carry a matcher such as { prefix: maintenance/ },"
-              + " got: "
-              + typeOf(raw));
-    }
-    List<Matcher> matchers = new ArrayList<>(map.size());
-    for (Map.Entry<?, ?> entry : map.entrySet()) {
-      matchers.add(branchMatcher(entry.getKey(), entry.getValue(), index));
-    }
-    return new BranchFilter(List.copyOf(matchers));
-  }
-
-  /**
-   * One matcher over the branch. The vocabulary is {@code exact} and {@code prefix} and nothing
-   * else: the branch is always present, so {@code exists} could only ever say yes, and {@code regex}
-   * stays out because {@code prefix: maintenance/} spells the requirement that asked for it with no
-   * anchoring, escaping or ReDoS question.
-   */
-  private static Matcher branchMatcher(Object key, Object value, int index) {
-    if (!(key instanceof String matcher)) {
-      throw new CiConfigException(
-          "Step " + index + ": 'branches' has a non-string matcher key: " + typeOf(key));
-    }
-    return switch (matcher) {
-      case EXACT -> Matcher.exact(requireBranchValue(value, index, EXACT));
-      case PREFIX -> Matcher.prefix(requireBranchValue(value, index, PREFIX));
-      default ->
-          throw new CiConfigException(
-              "Step "
-                  + index
-                  + ": 'branches' declares an unknown matcher '"
-                  + matcher
-                  + "' — a branch filter knows "
-                  + EXACT
-                  + " and "
-                  + PREFIX
-                  + " (a branch is always there, so '"
-                  + EXISTS
-                  + "' could only ever say yes)");
-    };
-  }
-
-  /** The compared value, always a non-blank string — the same rule a selection's matchers carry. */
-  private static String requireBranchValue(Object value, int index, String matcher) {
-    if (!(value instanceof String text) || text.isBlank()) {
-      throw new CiConfigException(
-          "Step "
-              + index
-              + ": 'branches' declares '"
-              + matcher
-              + "' with "
-              + typeOf(value)
-              + " — matcher values are non-empty strings (quote it: "
-              + matcher
-              + ": \""
-              + value
-              + "\")");
-    }
-    return text;
+    throw new CiConfigException(
+        configPath
+            + ": step "
+            + index
+            + " declares '"
+            + BRANCHES_KEY
+            + "' — a run's branch is the trigger's single decision, made before any step exists, so"
+            + " a per-step filter over it is either inert or a step that can never run. A condition"
+            + " over the event's payload is what 'when' already is.");
   }
 
   private static String requireString(Map<?, ?> step, String key, int index) {

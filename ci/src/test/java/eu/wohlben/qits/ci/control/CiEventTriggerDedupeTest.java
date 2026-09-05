@@ -23,15 +23,14 @@ import org.junit.jupiter.api.Test;
  * it has to survive is a redelivery, a race and a restart. This class holds it from both sides: the
  * engine's behaviour on a second arrival, and the constraint itself against the database.
  *
- * <p><b>It covers pushes too now, and that changed which half is the interesting one.</b> A push run
- * carries the id of the {@code SCMPublishCommit} that announced it — that is what gives the run a
- * causation parent — so the constraint means "one run per announced push" as well as "one run per
- * (event, trigger file)". A push's config path is the constant {@code ci-post-receive.yml}, so the
- * event id is the whole of what tells one push row from the next, which is exactly right: two runs
- * for one announcement are two builds of one commit.
+ * <p><b>It covered pushes too, and after 2026-09-05 it covers nothing else.</b> A push run carried
+ * the id of the {@code SCMPublishCommit} that announced it — that is what gave the run a causation
+ * parent — so the constraint meant "one run per announced push" as well as "one run per (event,
+ * trigger file)". Per-push CI retired; every row this engine writes is an event run, and the
+ * constraint means the one thing.
  *
- * <p>{@code NULL trigger_event_id} therefore no longer describes every push. It describes a run
- * nothing announced — {@code CiRunService.execute}, the synchronous test entry — and the null
+ * <p>{@code NULL trigger_event_id} therefore describes nothing a live deployment writes. It
+ * describes a HISTORICAL push row — the rows this database still holds — and the null
  * behaviour is still pinned below, because it is what makes such rows all distinct instead of
  * colliding on the second one. SQL says rows are duplicates only when all corresponding values are
  * non-null and equal; this pins that the database agrees, rather than trusting it. Plain {@code
@@ -41,6 +40,13 @@ import org.junit.jupiter.api.Test;
 public class CiEventTriggerDedupeTest extends CiTestSupport {
 
   private static final String TRIGGER_PATH = ".config/qits/ci-event-upstream.yml";
+
+  /**
+   * The config path every historical push row carries. A literal here rather than a constant
+   * imported from the engine: {@code CiConfigParser.CONFIG_PATH} retired with the intake, and what
+   * this test needs is the string that is <em>in the database</em>, which no live code names.
+   */
+  private static final String LEGACY_PUSH_PATH = ".config/qits/ci-post-receive.yml";
 
   private static final String TRIGGER =
       """
@@ -125,11 +131,13 @@ public class CiEventTriggerDedupeTest extends CiTestSupport {
   @Test
   public void nullTriggerEventIdRowsAreAllDistinctToTheConstraint() {
     // A run nothing announced carries a null here and the same repo_id and config_path as the last
-    // one; read as duplicates, the second such row would fail to insert. Pushes are named by their
-    // announcing event now and no longer rest on this, but the behaviour is the constraint's own
-    // and a migration could still take it away.
+    // one; read as duplicates, the second such row would fail to insert. Nothing this engine writes
+    // rests on that any more — the push intake that recorded uncaused rows retired on 2026-09-05 and
+    // every accept now carries an event id — but the behaviour is the constraint's own, historical
+    // rows depend on it, and a migration to `nulls not distinct` could still take it away silently.
+    // Asserted against rows shaped exactly like the ones that are in the database.
     for (int i = 0; i < 5; i++) {
-      insertPostReceiveRun();
+      insertUncausedRun();
     }
     List<CiRun> recorded = runService.runsFor(repoId);
     assertEquals(5, recorded.size());
@@ -139,7 +147,7 @@ public class CiEventTriggerDedupeTest extends CiTestSupport {
                 run ->
                     run.triggerEventId == null
                         && run.triggerType == CiTriggerType.POST_RECEIVE
-                        && CiConfigParser.CONFIG_PATH.equals(run.configPath)));
+                        && LEGACY_PUSH_PATH.equals(run.configPath)));
   }
 
   private void insertEventRun(String eventId, String configPath) {
@@ -159,13 +167,14 @@ public class CiEventTriggerDedupeTest extends CiTestSupport {
             });
   }
 
-  private void insertPostReceiveRun() {
+  /** A historical push row: no trigger event, the retired intake's constant config path. */
+  private void insertUncausedRun() {
     QuarkusTransaction.requiringNew()
         .run(
             () -> {
               CiRun run = row(repoId);
               run.triggerType = CiTriggerType.POST_RECEIVE;
-              run.configPath = CiConfigParser.CONFIG_PATH;
+              run.configPath = LEGACY_PUSH_PATH;
               runs.persist(run);
             });
   }

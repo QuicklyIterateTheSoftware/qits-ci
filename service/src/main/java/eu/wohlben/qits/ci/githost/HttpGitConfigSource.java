@@ -2,7 +2,6 @@ package eu.wohlben.qits.ci.githost;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import eu.wohlben.qits.ci.control.CiConfigParser;
 import eu.wohlben.qits.ci.control.CiConfigSource;
 import eu.wohlben.qits.ci.control.CiEventTriggerParser;
 import eu.wohlben.qits.ci.control.CiIdentifiers;
@@ -35,12 +34,12 @@ import org.jboss.logging.Logger;
  * made.
  *
  * <p>Both answer the commit they resolved in a {@code Git-Commit-Sha} header, and {@code rev} is a
- * full sha or a ref name — which is what lets the push path read <b>at the pushed sha</b> instead of
- * fetching a branch and hoping the commit is still on it. That is the whole of why this class no
- * longer keeps a bare mirror per repository: the wire protocol has no blob-at-path verb, so reading
- * one file used to mean cloning the repository first, with a local ref two workers could race for.
- * The mirror, the {@code git} shell-outs and the contended-fetch retry are gone with the reason for
- * them.
+ * full sha or a ref name — which is what lets a trigger listing resolve the head once and then read
+ * every file <b>at that sha</b>, and what lets {@link #commitHeld} ask about a commit rather than
+ * about a branch. That is the whole of why this class no longer keeps a bare mirror per repository:
+ * the wire protocol has no blob-at-path verb, so reading one file used to mean cloning the
+ * repository first, with a local ref two workers could race for. The mirror, the {@code git}
+ * shell-outs and the contended-fetch retry are gone with the reason for them.
  *
  * <p>It lives in {@code service} rather than beside the port in {@code ci} for the reason every
  * client here does: {@code ci} stays free of {@code java.net.http} and of another service's wire
@@ -49,28 +48,27 @@ import org.jboss.logging.Logger;
  * <h2>What a status means</h2>
  *
  * <ul>
- *   <li><b>200</b> — the bytes. Past {@link #MAX_CONFIG_BYTES} the file cannot be a config and is
- *       {@link ConfigLookup#invalid} rather than parsed as a head.
- *   <li><b>404 on the blob</b> — <em>this commit carries no config</em>, which is the opt-in case
- *       and by far the common one. Told apart from a commit the repository does not hold at all by
- *       one more read: a tree listing at the same sha, which 404s only when the rev itself does not
- *       resolve ⇒ {@link ConfigLookup#gone()}.
+ *   <li><b>200</b> — the bytes. Past {@link #MAX_CONFIG_BYTES} a trigger file cannot be a config and
+ *       is skipped with a warning rather than parsed as a head.
+ *   <li><b>404 on a tree</b> — the rev itself does not resolve. On {@link #commitHeld} that is the
+ *       whole answer; on the trigger listing it costs one more read (the root tree at the branch) to
+ *       tell "this repository declares nothing" from "this repository could not be asked".
  *   <li><b>anything else</b> — the host could not answer, so nothing is recorded. A read failure
  *       must not invent a gate.
  * </ul>
  *
- * <p>Note what {@code GONE} now means, because it narrowed: the repository does not hold the commit
- * at all. It used to mean "no longer an ancestor of the branch tip", which discarded a run for a
- * commit that had merely been force-pushed past. Reading at the sha is what makes that distinction
- * unnecessary — a commit the host still holds is a commit whose pipeline can still be read and run.
+ * <p>Note what {@code GONE} means, because it narrowed once and never widened back: the repository
+ * does not hold the commit at all. It used to mean "no longer an ancestor of the branch tip", which
+ * discarded a run for a commit that had merely been force-pushed past.
  *
  * <h2>The timeouts</h2>
  *
- * <p>Short and bounded, because both callers are single-threaded workers: {@code ci-run-worker} for
- * a push and {@code ci-trigger-worker} for an arriving event, where every candidate repository costs
- * one of these calls. {@link #CONNECT_TIMEOUT} 2s and {@link #REQUEST_TIMEOUT} 5s, so a git host
- * that has stopped answering costs seconds per repository rather than a step's whole timeout. Same
- * 2s connect bound {@code HttpGitHostRepoListing} and {@code EventsDaemonReleaseLog} carry.
+ * <p>Short and bounded, because the callers are single-threaded workers: {@code ci-trigger-worker}
+ * for an arriving event, where every candidate repository costs one of these calls, and {@code
+ * ci-run-worker} for the commit-held probe. {@link #CONNECT_TIMEOUT} 2s and {@link #REQUEST_TIMEOUT}
+ * 5s, so a git host that has stopped answering costs seconds per repository rather than a step's
+ * whole timeout. Same 2s connect bound {@code HttpGitHostRepoListing} and {@code
+ * EventsDaemonReleaseLog} carry.
  *
  * <p>Every identifier is validated by {@link CiIdentifiers} before it reaches a URL, because the
  * intake that supplies them is reachable without a session. A branch may legitimately contain
@@ -130,48 +128,37 @@ public class HttpGitConfigSource implements CiConfigSource {
   }
 
   /**
-   * The push half: {@link CiConfigParser#CONFIG_PATH} at the pushed commit itself.
+   * One tree listing at the sha, which resolves the rev or 404s trying — the whole of the question.
    *
-   * <p>The sha is read directly, so nothing here depends on where the branch is now — a second push
-   * landing between the intake and this read changes nothing about what this commit declared. The
-   * branch is still validated and still travels, because it is the run's own coordinate.
+   * <p><b>It used to be two reads and the first of them was the point.</b> This method was {@code
+   * read(repo, branch, sha)}: it fetched {@code .config/qits/ci-post-receive.yml} at the pushed
+   * commit and fell back to this same tree listing only to tell "declares no pipeline" from "does
+   * not hold the commit". Per-push CI retired, the blob has no reader left, and what is asked here
+   * now was always answered by the second read alone. So the probe costs one request instead of two,
+   * and — more to the point — it no longer depends on a file no repository commits any more.
    */
   @Override
-  public ConfigLookup read(CiRepoRef repo, String branch, String sha) {
+  public CommitHeld commitHeld(CiRepoRef repo, String sha) {
     CiIdentifiers.requireRepo(repo);
-    CiIdentifiers.requireBranch(branch);
     CiIdentifiers.requireSha(sha);
 
-    String repoId = repo.display();
-    String url = blobUrl(repo, sha, CiConfigParser.CONFIG_PATH);
-    Answer blob = get(url);
-    if (blob.ok()) {
-      if (blob.body().length > MAX_CONFIG_BYTES) {
-        return ConfigLookup.invalid(
-            CiConfigParser.CONFIG_PATH + " is larger than " + MAX_CONFIG_BYTES + " bytes");
-      }
-      return ConfigLookup.found(blob.text());
-    }
-    if (!blob.notFound()) {
-      LOG.warnf("ci could not read %s: HTTP %d", url, blob.status());
-      return ConfigLookup.unreachable();
-    }
-    // 404 on the blob is either "this commit declares no pipeline" or "this repository does not
-    // hold this commit", and the two mean opposite things to the record. One tree listing at the
-    // same sha tells them apart: it 404s only when the rev does not resolve.
-    Answer commit = get(treeUrl(repo, sha, ""));
+    String url = treeUrl(repo, sha, "");
+    Answer commit = get(url);
     if (commit.ok()) {
-      return ConfigLookup.absent();
+      return CommitHeld.HELD;
     }
     if (commit.notFound()) {
-      return ConfigLookup.gone();
+      return CommitHeld.GONE;
     }
-    return ConfigLookup.unreachable();
+    // Not an answer about the commit: say so, rather than letting a caller read a blip as a
+    // force-push and discard a run over it.
+    LOG.warnf("ci could not read %s: HTTP %d", url, commit.status());
+    return CommitHeld.UNKNOWN;
   }
 
   /**
-   * The event half: every {@code .config/qits/ci-event-*.yml} at the branch's current head, with the
-   * head it read them at.
+   * The trigger listing: every {@code .config/qits/ci-event-*.yml} at the branch's current head,
+   * with the head it read them at.
    *
    * <p><b>The listing resolves the head and the reads are pinned to it.</b> The directory is listed
    * at the branch, the host answers which commit that was, and every file is then read at <em>that
@@ -327,9 +314,9 @@ public class HttpGitConfigSource implements CiConfigSource {
    * <p><b>The name-addressed form is the one the git host will keep serving.</b> After the identity
    * cutover the id route is qits-projects' alone — a storage UUID is not an address anything above
    * that seam holds — and the host serves blob and tree name-addressed in exactly the same shapes.
-   * The id arm stays because an id-addressed push announces no name and a pre-cutover platform
-   * (where the id IS the name) is served correctly by it, so the fallback is right rather than
-   * merely tolerated; post-cutover it goes quiet on its own.
+   * The id arm stays because a candidate the catalogue could name no name for, and a pre-cutover
+   * platform (where the id IS the name), are both served correctly by it — so the fallback is right
+   * rather than merely tolerated; post-cutover it goes quiet on its own.
    */
   private String repoUrl(CiRepoRef repo) {
     String base = gitHostUrl.replaceAll("/+$", "") + "/git/";

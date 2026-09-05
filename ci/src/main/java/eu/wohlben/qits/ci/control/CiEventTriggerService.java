@@ -3,7 +3,6 @@ package eu.wohlben.qits.ci.control;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import eu.wohlben.qits.ci.control.CiConfigParser.CiConfigException;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerFile;
 import eu.wohlben.qits.ci.control.CiConfigSource.EventTriggerLookup;
 import eu.wohlben.qits.ci.entity.CiOwedEvent;
@@ -206,9 +205,9 @@ public class CiEventTriggerService {
   }
 
   /**
-   * Arms the platform-pipelines repository for one test. A method rather than a field write for
-   * {@code CiRunService.unreachableRetryDelays}' reason: this bean is normal-scoped, so a test holds
-   * a client proxy and a field write would land on the proxy and change nothing.
+   * Arms the platform-pipelines repository for one test. A method rather than a field write, and
+   * that is load-bearing: this bean is normal-scoped, so a test holds a client proxy and a field
+   * write would land on the proxy and change nothing.
    */
   void platformPipelinesRepository(String repository) {
     platformPipelinesRepository = normalise(repository);
@@ -348,10 +347,11 @@ public class CiEventTriggerService {
   /**
    * Writes the acceptance down, or answers {@code false} so the caller refuses the event.
    *
-   * <p>Its own transaction, because the caller's is the durable funnel's claim on another datasource
-   * — the arrangement {@code CiRunService.acceptPostReceive} already runs in and for the same
-   * measured reason. An existing row is success: a redelivery that reached the accept again is owed
-   * once, not twice.
+   * <p>Its own transaction, because the caller's is the durable funnel's claim on another
+   * datasource, and one JTA transaction does not take both ({@code Enlisted connection used without
+   * active transaction} — measured; {@code ScmReleaseListener} runs the same arrangement for the same
+   * reason). An existing row is success: a redelivery that reached the accept again is owed once, not
+   * twice.
    */
   private boolean recordOwed(Arrival arrival) {
     try {

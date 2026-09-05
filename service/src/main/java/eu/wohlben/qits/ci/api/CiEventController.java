@@ -31,13 +31,13 @@ import org.jboss.logging.Logger;
  * The one place a domain event reaches ci by hand: {@code POST /ci/api/events/trigger}. The write
  * surface of {@code /ci/api} that guards a machine caller.
  *
- * <p><b>The push intake used to live here and is gone.</b> {@code POST
+ * <p><b>The push intake used to live here and there is nothing left of it.</b> {@code POST
  * /ci/api/events/post-receive} was the wire contract between the git host's post-receive hook and
- * ci — {@code {repoId, branch, oldSha, newSha}}, fire and forget, with a delivery failure logged at
- * debug on the sender's side and CI simply not running. qits-githost publishes {@code
- * SCMPublishCommit} through the event log instead, and {@code bus/ScmPublishCommitListener} consumes
- * it durably, so a qits-ci that was down while a push landed reads it back. What was an endpoint,
- * a DTO, a machine guard and a replay-by-hand trick is now one listener bean.
+ * ci — {@code {repoId, branch, oldSha, newSha}}, fire and forget. It became {@code
+ * bus/ScmPublishCommitListener}, a durable consumption of qits-githost's {@code SCMPublishCommit},
+ * and on 2026-09-05 that retired too: <b>the platform runs no CI outside release requests, so an
+ * ordinary push triggers nothing.</b> What was an endpoint, a DTO, a machine guard, a listener bean
+ * and a replay-by-hand trick is now no code at all.
  *
  * <p>This resource is therefore no longer a pair, and the operation that is left is the one that was
  * <b>not</b> hidden from the OpenAPI document: a person invokes it on purpose and its contract is

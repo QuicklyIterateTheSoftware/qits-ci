@@ -211,21 +211,12 @@ public class CiEventTriggerServiceTest extends CiTestSupport {
     assertEquals("SCMRelease", runService.runsFor(repoId).get(0).triggerEventName);
   }
 
-  @Test
-  public void aPushKeepsRecordingAPostReceiveRunWithNoEvent() {
-    // The other trigger type, asserted here so the pair reads in one place — and because every one
-    // of these rows has a NULL trigger_event_id, which the unique constraint must let past.
-    String sha = "b".repeat(40);
-    fakeConfig.put(
-        repoId, sha, CiConfigSource.ConfigLookup.found("steps:\n  - image: alpine:3\n    script: x\n"));
-    runService.execute(repoId, "main", sha);
-
-    CiRun run = runService.runsFor(repoId).get(0);
-    assertEquals(CiTriggerType.POST_RECEIVE, run.triggerType);
-    assertNull(run.triggerEventId);
-    assertNull(run.triggerEventName);
-    assertEquals(CiConfigParser.CONFIG_PATH, run.configPath);
-  }
+  // `aPushKeepsRecordingAPostReceiveRunWithNoEvent` was here and is gone with what it asserted:
+  // there was a second trigger type and it recorded a POST_RECEIVE row with a null
+  // trigger_event_id. Per-push CI retired on 2026-09-05 — an ordinary push triggers nothing — so
+  // EVENT is the only type an accept can write. That a null trigger_event_id is still let past the
+  // unique constraint is CiEventTriggerDedupeTest's, asserted against rows shaped like the ones
+  // history left in the database.
 
   // --- what the steps see ---
 
@@ -245,15 +236,6 @@ public class CiEventTriggerServiceTest extends CiTestSupport {
     assertEquals(4, env.size(), "the four are the whole of it");
   }
 
-  @Test
-  public void aPushedRunGetsNoEventEnvironmentAtAll() {
-    String sha = "c".repeat(40);
-    fakeConfig.put(
-        repoId, sha, CiConfigSource.ConfigLookup.found("steps:\n  - image: alpine:3\n    script: x\n"));
-    runService.execute(repoId, "main", sha);
-    assertEquals(Map.of(), fakeRunner.executed().get(0).env());
-  }
-
   // --- the causation stamp ---
 
   @Test
@@ -266,18 +248,6 @@ public class CiEventTriggerServiceTest extends CiTestSupport {
 
     assertEquals(1, announcer.announced().size());
     assertEquals(eventId, announcer.announced().get(0).triggerEventId());
-  }
-
-  @Test
-  public void aPushedRunAnnouncesANullCauseAndPublishesARoot() {
-    String sha = "d".repeat(40);
-    fakeConfig.put(
-        repoId, sha, CiConfigSource.ConfigLookup.found("steps:\n  - image: alpine:3\n    script: x\n"));
-    runService.execute(repoId, "main", sha);
-
-    assertEquals(1, announcer.announced().size());
-    assertNull(
-        announcer.announced().get(0).triggerEventId(), "a push is not caused by an event");
   }
 
   // --- what does not fire ---

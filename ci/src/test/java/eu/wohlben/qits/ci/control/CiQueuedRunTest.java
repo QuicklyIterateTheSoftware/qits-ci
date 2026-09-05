@@ -8,7 +8,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
-import eu.wohlben.qits.ci.control.CiConfigSource.ConfigLookup;
 import eu.wohlben.qits.ci.entity.CiRun;
 import eu.wohlben.qits.ci.entity.CiRunStatus;
 import eu.wohlben.qits.ci.entity.CiStep;
@@ -63,14 +62,9 @@ public class CiQueuedRunTest extends CiTestSupport {
     service.awaitIdle();
   }
 
-  /**
-   * Seeds a repository with a one-step pipeline and returns its id; the sha is derived from it so a
-   * test can name both without carrying two strings.
-   */
+  /** A fresh repository id; the sha is derived from it so a test can name both with one string. */
   private String seedRepo() {
-    String repoId = "queued-" + UUID.randomUUID();
-    fakeConfig.put(repoId, shaOf(repoId), ConfigLookup.found(CONFIG_ONE_STEP));
-    return repoId;
+    return "queued-" + UUID.randomUUID();
   }
 
   /** A valid 40-character hex sha derived from the repository id, so a test carries one string. */
@@ -95,19 +89,18 @@ public class CiQueuedRunTest extends CiTestSupport {
             Thread.currentThread().interrupt();
           }
         });
-    announcePush(repoId, shaOf(repoId));
+    accept(repoId);
     return inStepZero.get(20, TimeUnit.SECONDS);
   }
 
   /**
-   * One push announced, as {@code bus/ScmPublishCommitListener} announces it: a fresh event id per
-   * call, because every push is its own {@code SCMPublishCommit}. Reusing one would be a second run
-   * for one announcement, which the unique constraint on
-   * {@code (trigger_event_id, repo_id, config_path)} refuses — correctly.
+   * One trigger accepted: the row is written and the worker is handed it. A fresh event id per call
+   * (see {@code CiTestSupport.eventRun}), because reusing one would be a second run for one
+   * announcement, which the unique constraint on {@code (trigger_event_id, repo_id, config_path)}
+   * refuses — correctly.
    */
-  private void announcePush(String repoId, String sha) {
-    service.onPostReceive(
-        CiRepoRef.of(repoId), "main", "0".repeat(40), sha, UUID.randomUUID().toString());
+  private void accept(String repoId) {
+    service.onEventTrigger(eventRun(repoId, "main", shaOf(repoId), CONFIG_ONE_STEP));
   }
 
   private CiRun soleRun(String repoId) {
@@ -120,11 +113,11 @@ public class CiQueuedRunTest extends CiTestSupport {
   // --- the lifecycle ---
 
   @Test
-  public void theIntakeWritesTheRowBeforeItReturnsAndTheWorkerFlipsItToRunning() throws Exception {
+  public void theAcceptWritesTheRowBeforeItReturnsAndTheWorkerFlipsItToRunning() throws Exception {
     String blockingRunId = occupyTheWorker();
     String repoId = seedRepo();
 
-    announcePush(repoId, shaOf(repoId));
+    accept(repoId);
 
     // Accepted, on the record, and not started: the whole point. Before this status existed the
     // only trace of this run was a closure on an executor.
@@ -132,7 +125,7 @@ public class CiQueuedRunTest extends CiTestSupport {
     assertEquals(CiRunStatus.QUEUED, queued.status);
     assertNull(queued.finishedAt, "a queued run has not finished");
     assertNull(queued.daemonVersion, "nothing is pinned until a container is about to launch");
-    assertEquals(CiTriggerType.POST_RECEIVE, queued.triggerType);
+    assertEquals(CiTriggerType.EVENT, queued.triggerType);
     assertEquals(0, service.stepsFor(queued.id).size());
 
     // The run holding the worker is RUNNING at the same instant, which is what makes the two states
@@ -155,7 +148,7 @@ public class CiQueuedRunTest extends CiTestSupport {
   public void theActiveListingIsEveryQueuedAndRunningRunAcrossRepositories() throws Exception {
     String blockingRunId = occupyTheWorker();
     String waiting = seedRepo();
-    announcePush(waiting, shaOf(waiting));
+    accept(waiting);
     forgetLoadedEntities();
 
     List<CiRun> active = service.activeRuns();
@@ -177,7 +170,7 @@ public class CiQueuedRunTest extends CiTestSupport {
   @Test
   public void bothNewReadsAnswerEmptyOnAnInstanceThatHasRecordedNothing() {
     // The empty state is a real answer here rather than an edge case: a fresh deployment serves it
-    // on every page load until the first push, and it must be an empty list rather than a null or a
+    // on every page load until the first run, and it must be an empty list rather than a null or a
     // 404. The suite wipes both tables per test, so this is that instance.
     assertEquals(List.of(), service.activeRuns());
     assertEquals(List.of(), service.repositorySummaries());
@@ -192,11 +185,9 @@ public class CiQueuedRunTest extends CiTestSupport {
     String repoId = "summary-" + UUID.randomUUID();
     String mainSha = "1".repeat(40);
     String featureSha = "2".repeat(40);
-    fakeConfig.put(repoId, mainSha, ConfigLookup.found(CONFIG_ONE_STEP));
-    fakeConfig.put(repoId, featureSha, ConfigLookup.found(CONFIG_ONE_STEP));
 
-    service.execute(repoId, "main", mainSha);
-    service.execute(repoId, "feature", featureSha);
+    executePipeline(repoId, "main", mainSha, CONFIG_ONE_STEP);
+    executePipeline(repoId, "feature", featureSha, CONFIG_ONE_STEP);
     forgetLoadedEntities();
 
     List<CiRunService.RepositorySummary> summaries = service.repositorySummaries();
@@ -210,8 +201,7 @@ public class CiQueuedRunTest extends CiTestSupport {
     // A repository whose only run is on another branch has no main run at all — a null rather than a
     // fallback to its newest run, which would answer "is main green" with something that is not main.
     String featureOnly = "featureonly-" + UUID.randomUUID();
-    fakeConfig.put(featureOnly, featureSha, ConfigLookup.found(CONFIG_ONE_STEP));
-    service.execute(featureOnly, "feature", featureSha);
+    executePipeline(featureOnly, "feature", featureSha, CONFIG_ONE_STEP);
     forgetLoadedEntities();
 
     CiRunService.RepositorySummary noMain =
@@ -229,7 +219,7 @@ public class CiQueuedRunTest extends CiTestSupport {
   public void aRunCancelledWhileQueuedIsCancelledAndNeverPickedUp() throws Exception {
     occupyTheWorker();
     String repoId = seedRepo();
-    announcePush(repoId, shaOf(repoId));
+    accept(repoId);
     String queuedId = soleRun(repoId).id;
     int launchedBefore = fakeRunner.executed().size();
 
@@ -267,7 +257,7 @@ public class CiQueuedRunTest extends CiTestSupport {
     // A draining process must hand its backlog on instead.
     occupyTheWorker();
     String repoId = seedRepo();
-    announcePush(repoId, shaOf(repoId));
+    accept(repoId);
     String queuedId = soleRun(repoId).id;
     int launchedBefore = fakeRunner.executed().size();
 
@@ -292,13 +282,13 @@ public class CiQueuedRunTest extends CiTestSupport {
 
   @Test
   public void aDrainingServiceAcceptsARunAndPutsItOnNoWorker() throws Exception {
-    // The other half of the guard: the row is still written, because losing an accepted push is the
+    // The other half of the guard: the row is still written, because losing accepted work is the
     // failure QUEUED exists to close. It simply never reaches this process's worker.
     occupyTheWorker();
     String repoId = seedRepo();
     service.draining(true);
 
-    announcePush(repoId, shaOf(repoId));
+    accept(repoId);
 
     CiRun accepted = soleRun(repoId);
     assertEquals(CiRunStatus.QUEUED, accepted.status);
@@ -334,19 +324,19 @@ public class CiQueuedRunTest extends CiTestSupport {
   // --- gating, as data on the row ---
 
   @Test
-  public void aTriggersGatingFlagLandsOnTheRowAndAPushRunIsAlwaysGating() throws Exception {
-    // The userflows case: a trigger saying `gating: false` records a run whose red outcome must
-    // not stand in the way of releasing the commit. A push run has no key to say it with — it is
-    // gating by construction.
+  public void aTriggersGatingFlagLandsOnTheRowAndDefaultsToGating() throws Exception {
+    // The userflows case: a trigger saying `gating: false` records a run whose red outcome must not
+    // stand in the way of releasing the commit. A file that says nothing is gating, which is the
+    // safe direction and the one every ordinary pipeline relies on.
     String eventRepo = "consumer-" + UUID.randomUUID();
     service.onEventTrigger(eventRun(eventRepo, UUID.randomUUID().toString(), false));
     service.awaitIdle();
     assertFalse(soleRun(eventRepo).gating, "the trigger said gating: false");
 
-    String pushRepo = seedRepo();
-    announcePush(pushRepo, shaOf(pushRepo));
+    String silentRepo = seedRepo();
+    accept(silentRepo);
     service.awaitIdle();
-    assertTrue(soleRun(pushRepo).gating, "a push run is always gating");
+    assertTrue(soleRun(silentRepo).gating, "a file that declares nothing is gating");
   }
 
   private CiRunService.EventRun eventRun(String repoId, String eventId) {
@@ -365,7 +355,7 @@ public class CiQueuedRunTest extends CiTestSupport {
             new CiPipeline(
                 List.of(
                     new CiPipeline.CiStepDecl(
-                        "alpine:3", "echo bump", null, false, "", true, List.of()))),
+                        "alpine:3", "echo bump", null, false, "", true))),
             List.of(), // declares no artifact: this run announces a build and nothing more
             gating,
             null), // no checkout: builds main's head, as every trigger did before the key
@@ -381,47 +371,19 @@ public class CiQueuedRunTest extends CiTestSupport {
         """);
   }
 
-  // --- the accept-time row on the paths that used to record nothing at all ---
-
-  @Test
-  public void aPushWithNoConfigIsQueuedAndThenDiscarded() throws Exception {
-    // The opt-in rule survives the revision, and this is where it is paid for: the row exists before
-    // anyone can know the repository declares no pipeline, so it has to be taken back.
-    occupyTheWorker();
-    String repoId = "silent-" + UUID.randomUUID();
-    announcePush(repoId, shaOf(repoId));
-
-    assertEquals(CiRunStatus.QUEUED, soleRun(repoId).status);
-
-    release.countDown();
-    service.awaitIdle();
-    forgetLoadedEntities();
-
-    assertEquals(0, service.runsFor(repoId).size(), "a config-less push leaves no row behind");
-  }
-
-  @Test
-  public void aVanishedCommitAndAnUnreachableHostBothDiscardTheAcceptedRow() throws Exception {
-    // The two remaining "no run recorded" outcomes, both now reached with a row already written. A
-    // red row would blame a commit whose build was never broken (GONE) or invent a gate out of a
-    // read failure (UNREACHABLE), so both take the row back rather than finishing it.
-    for (ConfigLookup lookup : List.of(ConfigLookup.gone(), ConfigLookup.unreachable())) {
-      String repoId = "vanished-" + UUID.randomUUID();
-      fakeConfig.put(repoId, shaOf(repoId), lookup);
-      announcePush(repoId, shaOf(repoId));
-      service.awaitIdle();
-      forgetLoadedEntities();
-      assertEquals(0, service.runsFor(repoId).size(), lookup.status().name());
-    }
-  }
-
   // --- the restart ---
 
   @Test
-  public void aRestartFailsRunningPushesButRestartsRunningAndQueuedEventsExactlyOnce()
-      throws Exception {
+  public void aRestartRestartsWhatItCanAndSettlesWhatItCannot() throws Exception {
     // The sweep is what onStart calls; onStart itself is skipped in test mode, so this drives it
-    // directly. Three rows, three different answers.
+    // directly. Five rows, four different answers.
+    //
+    // The two POST_RECEIVE rows are what a PREDECESSOR left: the push intake retired on 2026-09-05,
+    // so no live deployment writes one, and a successor still has to say something honest about the
+    // ones already in its database. A RUNNING one is failed (its step died with its process and this
+    // engine could not replay repository-authored work anyway); a QUEUED one is settled CANCELLED,
+    // because leaving it queued would park it in /ci/api/runs/active forever waiting for a worker
+    // that no longer exists — the phantom this whole retirement is about.
     String interruptedRepo = "swept-run-" + UUID.randomUUID();
     String interrupted =
         insertRow(
@@ -430,8 +392,16 @@ public class CiQueuedRunTest extends CiTestSupport {
             CiRunStatus.RUNNING,
             CiTriggerType.POST_RECEIVE,
             Instant.now());
+    String strandedPushRepo = "swept-stranded-push-" + UUID.randomUUID();
+    String strandedPush =
+        insertRow(
+            strandedPushRepo,
+            "d".repeat(40),
+            CiRunStatus.QUEUED,
+            CiTriggerType.POST_RECEIVE,
+            Instant.now());
     String repoId = seedRepo();
-    String requeued = insertQueuedPush(repoId);
+    String requeued = insertQueuedEventRun(repoId);
     String eventRepo = "swept-evt-" + UUID.randomUUID();
     insertRow(eventRepo, "f".repeat(40), CiRunStatus.QUEUED, CiTriggerType.EVENT, Instant.now());
     String runningEventRepo = "swept-running-evt-" + UUID.randomUUID();
@@ -452,6 +422,21 @@ public class CiQueuedRunTest extends CiTestSupport {
     CiRun failed = service.requireRun(interrupted);
     assertEquals(CiRunStatus.FAILED, failed.status);
     assertNotNull(failed.finishedAt);
+
+    // And the queued push leftover is settled rather than left sitting in the active listing.
+    CiRun stranded = service.requireRun(strandedPush);
+    assertEquals(CiRunStatus.CANCELLED, stranded.status, "no engine here can run a push row");
+    assertEquals(
+        CiRunService.TRIGGER_RETIRED,
+        stranded.cancellationReason,
+        "its own reason: nobody cancelled it, the engine that would have run it is gone");
+    assertNotNull(stranded.finishedAt);
+    assertNull(stranded.startedAt, "it was never claimed");
+    assertEquals(0, service.stepsFor(strandedPush).size());
+    assertTrue(
+        fakeRunner.executed().stream()
+            .noneMatch(spec -> spec.repo().repoId().equals(strandedPushRepo)),
+        "and no container was launched for it");
 
     // It never started, and its row says everything needed to start it: this is the cutover loss,
     // closed.
@@ -499,9 +484,9 @@ public class CiQueuedRunTest extends CiTestSupport {
     String first = seedRepo();
     String second = seedRepo();
     String third = seedRepo();
-    insertQueuedPush(third, Instant.now().minusSeconds(10));
-    insertQueuedPush(first, Instant.now().minusSeconds(30));
-    insertQueuedPush(second, Instant.now().minusSeconds(20));
+    insertQueuedEventRun(third, Instant.now().minusSeconds(10));
+    insertQueuedEventRun(first, Instant.now().minusSeconds(30));
+    insertQueuedEventRun(second, Instant.now().minusSeconds(20));
 
     service.sweepInterrupted();
     service.awaitIdle();
@@ -513,12 +498,12 @@ public class CiQueuedRunTest extends CiTestSupport {
 
   // --- rows a previous process would have left behind ---
 
-  private String insertQueuedPush(String repoId) {
-    return insertQueuedPush(repoId, Instant.now());
+  private String insertQueuedEventRun(String repoId) {
+    return insertQueuedEventRun(repoId, Instant.now());
   }
 
-  private String insertQueuedPush(String repoId, Instant createdAt) {
-    return insertRow(repoId, shaOf(repoId), CiRunStatus.QUEUED, CiTriggerType.POST_RECEIVE, createdAt);
+  private String insertQueuedEventRun(String repoId, Instant createdAt) {
+    return insertRow(repoId, shaOf(repoId), CiRunStatus.QUEUED, CiTriggerType.EVENT, createdAt);
   }
 
   private void insertStaleStep(String runId) {
@@ -560,9 +545,11 @@ public class CiQueuedRunTest extends CiTestSupport {
               if (status == CiRunStatus.RUNNING) {
                 run.daemonVersion = "dead-daemon";
               }
+              // The push arm's constant as a literal: it retired with the intake, and what a
+              // predecessor's row carries is the string rather than anything live code still names.
               run.configPath =
                   triggerType == CiTriggerType.POST_RECEIVE
-                      ? CiConfigParser.CONFIG_PATH
+                      ? ".config/qits/ci-post-receive.yml"
                       : ".config/qits/ci-event-upstream.yml";
               if (triggerType == CiTriggerType.EVENT) {
                 run.triggerEventId = UUID.randomUUID().toString();
