@@ -395,10 +395,12 @@ paths:
                 $ref: "#/components/schemas/CancelReleaseRequestRunsResponse"
         "400":
           description: The repository id or the release request id is missing or invalid
+        "403":
+          description: "The token covers this repository for nobody — no project claim\
+            \ and no platform-tier role, or a project claim this instance cannot place\
+            \ the repository in"
         "401":
           description: Not Authorized
-        "403":
-          description: Not Allowed
       tags:
       - Ci Run Controller
       security:
@@ -528,4 +530,4 @@ paths:
         - qits:admin
 info:
   title: qits-ci API
-  version: 2026.904.174454
+  version: 2026.904.222945

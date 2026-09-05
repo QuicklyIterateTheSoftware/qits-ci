@@ -4,7 +4,9 @@ import static io.restassured.RestAssured.given;
 
 import eu.wohlben.qits.auth.MachineAuth;
 import eu.wohlben.qits.auth.QitsClaims;
+import eu.wohlben.qits.ci.control.CiRepoRef;
 import eu.wohlben.qits.ci.githost.FakeGitHostRepoListing;
+import eu.wohlben.qits.ci.projects.FakeProjectsRepoListing;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -28,12 +30,21 @@ import org.junit.jupiter.api.Test;
  *
  * <p>What joined the trigger is {@code POST /ci/api/runs/cancellations}, qits-projects withdrawing a
  * release request's CI. <b>It has two real callers and both are asserted here</b>: a machine caller
- * is judged on its token exactly as the trigger's is (own audience, {@code project=*}), and an
- * operator arrives on the edge's forwarded {@code X-Qits-User}/{@code X-Qits-Roles} session carrying
- * no token at all and is judged by the class-level roles. That is why the {@code MachineAuth} call
- * sits on the machine arm rather than over the whole method, and why a case here asserts the
- * forwarded session is <em>not</em> answered 401 — a guard tightened to "always a token" would break
- * the person, and one dropped entirely would unguard the peer.
+ * is judged on its token exactly as the trigger's is, and an operator arrives on the edge's
+ * forwarded {@code X-Qits-User}/{@code X-Qits-Roles} session carrying no token at all and is judged
+ * by the class-level roles. That is why the {@code MachineAuth} call sits on the machine arm rather
+ * than over the whole method, and why a case here asserts the forwarded session is <em>not</em>
+ * answered 401 — a guard tightened to "always a token" would break the person, and one dropped
+ * entirely would unguard the peer.
+ *
+ * <p><b>"Exactly as the trigger's is" is new, and it is the 2026-09-05 fix.</b> The cancellation
+ * demanded {@code project=*} and its only real sender could not present one: qits-projects' bearer
+ * for this hop is the {@code <env>-qits-projects} client's, minted with {@code qits:system}, {@code
+ * qits-platform:system} and no structured claims at all, so every superseded release request's
+ * cancellation was answered 403 and swallowed at debug by a hop that is best-effort on purpose.
+ * {@link #theReleaseRequestCancellationAdmitsQitsProjectsOwnBearer} is that caller's exact shape and
+ * is the case that must never go back to 403; the two beside it keep the widening where the ruling
+ * put it.
  *
  * <p>{@code POST /ci/api/runs/{runId}/retry} is beside the cancel, in the other category: a person's
  * write, {@code qits:admin} only, and a machine granted every project is refused.
@@ -80,6 +91,13 @@ class MachineGuardTest {
    * an id carries its environment — {@code <env>-qits-artifacts} — which no constant can know.
    */
   private static final String ARTIFACTS = "prod-qits-artifacts";
+
+  /**
+   * The one caller whose subject <em>is</em> the point: qits-projects, the only sender of the
+   * cancellation route. Named so that the case asserting its exact token shape reads as the caller
+   * it is rather than as one more machine.
+   */
+  private static final String PROJECTS = "dev-qits-projects";
 
   /**
    * The gate on, and the {@code %test} dev user off.
@@ -129,6 +147,13 @@ class MachineGuardTest {
 
   /** The catalogue, so a case can say whether this instance holds a repository at all. */
   @Inject FakeGitHostRepoListing gitHostListing;
+
+  /**
+   * The other catalogue — the only one that answers a repository's <em>project</em>, so it is what a
+   * project-scoped caller can be judged against at all. Unconfigured by default, which is what every
+   * other case here runs on.
+   */
+  @Inject FakeProjectsRepoListing projectsListing;
 
   private static final String CANCELLATIONS_BODY =
       """
@@ -450,17 +475,31 @@ class MachineGuardTest {
   }
 
   @Test
-  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
-  @OidcSecurity(
-      claims = {
-        @Claim(key = "aud", value = OWN_AUDIENCE),
-        @Claim(key = QitsClaims.PROJECT, value = "guarded-repo")
-      })
-  void aTokenScopedToOneRepositoryMayNotCancelAReleaseRequestsRuns() {
-    // This route still asks for project=*, and it is deliberately NOT the trigger's new ruling: the
-    // trigger names no repository and can therefore be narrowed to what a token covers, while this
-    // one names a repoId whose project qits-ci would have to look up to judge. Whoever gives it the
-    // same treatment does it with that lookup in hand.
+  @TestSecurity(user = PROJECTS, roles = {SYSTEM, PLATFORM_SYSTEM})
+  @OidcSecurity(claims = {@Claim(key = "aud", value = OWN_AUDIENCE)})
+  void theReleaseRequestCancellationAdmitsQitsProjectsOwnBearer() {
+    // THE case. This is the shape of the only sender this route has: the <env>-qits-projects client
+    // credential, groups of qits:system + qits-platform:system (+ its own clients/<id>, which
+    // nothing here reads), and NO structured claims — qits-idp's bootstrap grants a project claim to
+    // exactly two clients and this is neither. It was a deterministic 403 against project=*, on
+    // every supersession, logged at debug by a sender that treats this hop as best-effort. 202 is
+    // the guard passing; a regression to 403 puts the cancellation feature back to inert.
+    given()
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(CANCELLATIONS_BODY)
+        .when()
+        .post(CANCELLATIONS)
+        .then()
+        .statusCode(202);
+  }
+
+  @Test
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM})
+  @OidcSecurity(claims = {@Claim(key = "aud", value = OWN_AUDIENCE)})
+  void aCancellationTokenWithNoProjectClaimAndNoPlatformRoleIs403() {
+    // The other side of the case above, and what keeps the widening where CiEventController.scopeOf
+    // put it: an ordinary qits:system client that carries no claim names nothing to cancel in. The
+    // platform-tier role is a grant somebody wrote down; an absent claim is not one.
     given()
         .contentType(MediaType.APPLICATION_JSON)
         .body(CANCELLATIONS_BODY)
@@ -468,6 +507,84 @@ class MachineGuardTest {
         .post(CANCELLATIONS)
         .then()
         .statusCode(403);
+  }
+
+  @Test
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = OWN_AUDIENCE),
+        @Claim(key = QitsClaims.PROJECT, value = "project-alpha")
+      })
+  void aProjectScopedTokenCancelsInItsOwnProject() {
+    // The arm this route did NOT have, and the old comment said why: it names a repoId whose project
+    // qits-ci would have to look up to judge. The lookup is the catalogue that already decides the
+    // trigger's scope, so the two doors read a project claim the same way. Staged here rather than
+    // assumed: the listing has to place the repository in the token's project for this to be a 202.
+    projectsListing.set(new CiRepoRef("guarded-repo", "project-alpha", "guarded"));
+    try {
+      given()
+          .contentType(MediaType.APPLICATION_JSON)
+          .body(CANCELLATIONS_BODY)
+          .when()
+          .post(CANCELLATIONS)
+          .then()
+          .statusCode(202);
+    } finally {
+      projectsListing.unset();
+    }
+  }
+
+  @Test
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = OWN_AUDIENCE),
+        @Claim(key = QitsClaims.PROJECT, value = "project-beta")
+      })
+  void aProjectScopedTokenMayNotCancelInAnotherProject() {
+    // The same catalogue, the same repository, another project on the token — the cross-tenant case,
+    // at the door. 403 rather than an empty 202: "nothing was in flight" is a statement about the
+    // release request, and saying it to a caller that covers this repository for nobody would be a
+    // lie in the caller's favour.
+    projectsListing.set(new CiRepoRef("guarded-repo", "project-alpha", "guarded"));
+    try {
+      given()
+          .contentType(MediaType.APPLICATION_JSON)
+          .body(CANCELLATIONS_BODY)
+          .when()
+          .post(CANCELLATIONS)
+          .then()
+          .statusCode(403);
+    } finally {
+      projectsListing.unset();
+    }
+  }
+
+  @Test
+  @TestSecurity(user = ARTIFACTS, roles = {SYSTEM, PLATFORM_SYSTEM})
+  @OidcSecurity(
+      claims = {
+        @Claim(key = "aud", value = OWN_AUDIENCE),
+        @Claim(key = QitsClaims.PROJECT, value = "project-alpha")
+      })
+  void aProjectScopedTokenIsRefusedWhenTheCatalogueCannotPlaceTheRepository() {
+    // The fail-closed half, and it is deliberate rather than incidental: with no qits-projects
+    // configured the git host's listing answers storage ids and no projects at all, so this instance
+    // cannot prove the repository is the token's. Unprovable is not "yours". The callers that must
+    // survive a listing outage are the unscoped ones, and they never reach the lookup.
+    gitHostListing.set("guarded-repo");
+    try {
+      given()
+          .contentType(MediaType.APPLICATION_JSON)
+          .body(CANCELLATIONS_BODY)
+          .when()
+          .post(CANCELLATIONS)
+          .then()
+          .statusCode(403);
+    } finally {
+      gitHostListing.set();
+    }
   }
 
   @Test

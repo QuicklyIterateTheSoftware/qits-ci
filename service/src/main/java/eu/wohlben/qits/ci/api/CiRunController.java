@@ -5,7 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.auth.MachineAuth;
 import eu.wohlben.qits.auth.MachineIdentity;
 import eu.wohlben.qits.auth.QitsClaims;
+import eu.wohlben.qits.ci.control.CiCandidateRepos;
 import eu.wohlben.qits.ci.control.CiIdentifiers;
+import eu.wohlben.qits.ci.control.CiRepoRef;
 import eu.wohlben.qits.ci.control.CiRunService;
 import eu.wohlben.qits.ci.daemonhost.CiStepRelay;
 import eu.wohlben.qits.ci.dto.CiLiveStepDto;
@@ -23,6 +25,7 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
+import io.quarkus.security.ForbiddenException;
 import io.quarkus.security.identity.SecurityIdentity;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -61,6 +64,17 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * matters is the one {@code MachineGuardTest} enforces: a new write that omits the guard ships
  * unguarded and nothing says so, so every write on this surface has a case in that file.
  *
+ * <p><b>That check demanded {@code project=*} until 2026-09-05, and no real caller could satisfy
+ * it.</b> The only sender of this route is qits-projects' {@code HttpQaRunCancellations}, fired
+ * when a release request is superseded, and the bearer it presents is the {@code
+ * <env>-qits-projects} client's — which qits-idp mints with {@code groups} of {@code qits:system},
+ * {@code qits-platform:system} and {@code clients/<id>}, and <b>no structured claims at all</b>.
+ * So every supersession was answered 403, swallowed at debug on the sender's side (that hop is
+ * best-effort by design — the gate is correlated by merged sha and stayed correct), and superseded
+ * QA runs simply kept running. The door now asks {@link #cancellationScope()}, which is {@code
+ * CiEventController.scopeOf}'s ruling applied to a request that names its target. Read that method
+ * before changing either.
+ *
  * <p><b>Nothing here is hidden from the OpenAPI document any more.</b> The two reads used to carry
  * {@code @Operation(hidden = true)} on the criterion "does a client consume it, does a person invoke
  * it" — machine surfaces stay out, the cancel button goes in. The criterion was right and its answer
@@ -89,6 +103,26 @@ public class CiRunController {
 
   /** Read only to tell a machine caller from a forwarded session — never as a security state. */
   @Inject SecurityIdentity identity;
+
+  /**
+   * Where "which project is this repository in" is answered, and the <b>same</b> catalogue {@code
+   * CiEventController}'s scoped evaluation is judged against — deliberately, so that "the token's
+   * project covers it" means one thing on both machine doors rather than two.
+   *
+   * <p>It is read on one arm only: a machine caller that presents a {@code project} claim naming a
+   * single project. {@code project=*}, an unscoped platform-tier caller and an operator's forwarded
+   * session never reach it, so the route's real traffic costs no listing read.
+   */
+  @Inject CiCandidateRepos candidates;
+
+  /**
+   * The platform-tier roles, in the two spellings qits-platform-idp grants them — {@code
+   * CiEventController}'s constants, spelled again here for the reason that class spells them: a role
+   * is a string qits-idp issues and this repository holds no vocabulary for it.
+   */
+  private static final String PLATFORM_SYSTEM_ROLE = "qits-platform:system";
+
+  private static final String PLATFORM_ADMIN_ROLE = "qits-platform:admin";
 
   public record ListRunsResponse(List<CiRunDto> runs) {}
 
@@ -325,11 +359,11 @@ public class CiRunController {
    * standing contract, and it is the property this endpoint depends on.
    *
    * <p><b>The guard is the machine one, and a person still reaches it.</b> A machine caller is judged
-   * on its token exactly as {@code CiEventController}'s is: right audience, and {@code project=*},
-   * because qits-ci owns no project entity and can resolve a repository to no project. A caller that
-   * presents no token is not a machine and never reaches the check — it has already been judged by
-   * the class-level roles, which is the forwarded {@code X-Qits-User}/{@code X-Qits-Roles} session an
-   * operator arrives on. Both callers are real for this route, which is why the check is on the
+   * on its token exactly as {@code CiEventController}'s is — see {@link #cancellationScope()} for the
+   * four arms and {@link #requireRepositoryInProject} for what a project-scoped one buys. A caller
+   * that presents no token is not a machine and never reaches the check: it has already been judged
+   * by the class-level roles, which is the forwarded {@code X-Qits-User}/{@code X-Qits-Roles} session
+   * an operator arrives on. Both callers are real for this route, which is why the check is on the
    * machine arm rather than over the whole method.
    */
   @POST
@@ -341,14 +375,20 @@ public class CiRunController {
       description = "The request's runs have been stopped or asked to stop",
       content = @Content(schema = @Schema(implementation = CancelReleaseRequestRunsResponse.class)))
   @APIResponse(responseCode = "400", description = "The repository id or the release request id is missing or invalid")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "The token covers this repository for nobody — no project claim and no platform-tier role,"
+              + " or a project claim this instance cannot place the repository in")
   public Response cancelReleaseRequestRuns(CancelReleaseRequestRunsRequest request) {
     if (request == null) {
       throw new BadRequestException("A repository id and a release request id are required");
     }
     CiIdentifiers.requireRepoId(request.repoId());
     String releaseRequestId = requireReleaseRequestId(request.releaseRequestId());
-    if (MachineIdentity.isMachine(identity)) {
-      machineAuth.requireProject(QitsClaims.ANY);
+    String projectScope = cancellationScope();
+    if (projectScope != null) {
+      requireRepositoryInProject(request.repoId(), projectScope);
     }
     return Response.accepted()
         .entity(
@@ -377,6 +417,96 @@ public class CiRunController {
 
   /** What {@code ci_run.release_request_id} holds, so a longer one names no run here. */
   private static final int MAX_RELEASE_REQUEST_ID_LENGTH = 255;
+
+  /**
+   * Which repositories this caller may withdraw a release request's CI in. {@code null} is every
+   * one of them; a non-null value is a project, and {@link #requireRepositoryInProject} then decides
+   * whether the named repository is in it.
+   *
+   * <p><b>This is {@code CiEventController.scopeOf}'s ruling, arm for arm</b>, and the sameness is
+   * the point: two machine doors on one service that read a {@code project} claim differently is a
+   * platform where "what does my token cover" has no answer. The order is the contract:
+   *
+   * <ol>
+   *   <li><b>Not a machine</b> — the operator's forwarded session, already judged by the class's
+   *       roles. Every repository, exactly as before.
+   *   <li><b>{@link MachineAuth#require()}</b> — 401 with no token once the gate is on, 403 for one
+   *       addressed to another service. Presence and audience only.
+   *   <li><b>{@code project=<p>}</b> — that project, and the narrowing is what admits the caller.
+   *       This is the arm that is <em>new</em> here, and it is new because the old comment's premise
+   *       expired: "qits-ci owns no project entity and can resolve a repository to no project" was
+   *       true when it was written and has not been since {@code CiRepoRef} started carrying {@code
+   *       projectId} off qits-projects' catalogue. The lookup that was missing is in hand.
+   *   <li><b>{@code project=*}</b> — every repository. Read on the token side only, so a caller
+   *       cannot widen its own check by naming {@code "*"}: nothing here compares it to a target.
+   *   <li><b>No {@code project} claim at all</b> — admitted on a <b>platform-tier role</b>, refused
+   *       without one.
+   * </ol>
+   *
+   * <p><b>The last arm is the fix, and it is the arm the live 403 landed on.</b> Measured
+   * 2026-09-05: qits-projects' bearer for this hop is the {@code <env>-qits-projects} client's, and
+   * qits-idp mints that client {@code groups} of {@code qits:system}, {@code qits-platform:system}
+   * and {@code clients/<id>} — no {@code project} claim, because the bootstrap grants one to exactly
+   * two clients and this is neither. Demanding {@code project=*} therefore refused the route's only
+   * sender on every call, and the loss was quiet twice over: the sender logs a non-2xx at debug
+   * because the hop is best-effort (the release gate is correlated by merged sha and stays correct
+   * without it), so what a supersession actually cost was a build agent, indefinitely.
+   *
+   * <p><b>The ordinary machine role is deliberately not enough.</b> A claim-less {@code qits:system}
+   * client is refused here as it is on the trigger, and the reason is the same one: {@code
+   * MachineAuth.requireClaim}'s rule that an absent claim is never a wildcard survives, and what
+   * replaces it for a door asking "what may I do <em>for</em> you" is the other half of what qits-idp
+   * issues. Widening to {@code qits:system} alone would have admitted the real caller too — the
+   * cancellation is bounded, it stops the runs of one named release request in one named repository
+   * and publishes no verdict — but it would also have made this the one door on the service where a
+   * project-scoped client escapes its scope by simply not carrying it, which is the shape that
+   * produced the bug being fixed. The platform-tier role is a grant somebody wrote down; the absence
+   * of a claim is not.
+   */
+  private String cancellationScope() {
+    if (!MachineIdentity.isMachine(identity)) {
+      return null;
+    }
+    machineAuth.require();
+    String project = MachineIdentity.claim(identity, QitsClaims.PROJECT).orElse(null);
+    if (project == null) {
+      if (!identity.hasRole(PLATFORM_SYSTEM_ROLE) && !identity.hasRole(PLATFORM_ADMIN_ROLE)) {
+        throw new ForbiddenException(
+            "Token carries no "
+                + QitsClaims.PROJECT
+                + " claim and no platform-tier role, so it names no repository to cancel in");
+      }
+      return null;
+    }
+    return QitsClaims.ANY.equals(project) ? null : project;
+  }
+
+  /**
+   * A project-scoped caller may cancel in the repositories the catalogue places in its project, and
+   * in no others.
+   *
+   * <p><b>A check rather than a narrowing, because this request names its target.</b> The trigger
+   * can refuse a foreign project by construction — it evaluates a set and the set is filtered — but
+   * a cancellation is addressed at one {@code repoId}, so the question has to be asked out loud.
+   * Same catalogue, same answer, one status code: 403.
+   *
+   * <p><b>A repository the catalogue cannot place is in no project at all</b>, which is the
+   * fail-closed half and matches {@code CiEventTriggerService.inProject} exactly. Two kinds have no
+   * {@code projectId} — one qits-ci knows only from its own run rows, and every one of them when the
+   * qits-projects listing is unreachable — and in both cases the honest answer is "this instance
+   * cannot prove that repository is yours". An unreadable catalogue therefore refuses a scoped
+   * caller rather than quietly granting it the platform; the callers that must not be blocked by a
+   * listing outage are the unscoped ones, and they never reach here.
+   */
+  private void requireRepositoryInProject(String repoId, String project) {
+    for (CiRepoRef candidate : candidates.candidates()) {
+      if (repoId.equals(candidate.repoId()) && project.equals(candidate.projectId())) {
+        return;
+      }
+    }
+    throw new ForbiddenException(
+        "Token " + QitsClaims.PROJECT + " claim does not cover repository " + repoId);
+  }
 
   /**
    * Run this run's pipeline again, unchanged — the same repository, the same trigger file, the same
