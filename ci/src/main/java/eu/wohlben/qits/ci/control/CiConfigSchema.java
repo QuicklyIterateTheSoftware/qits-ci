@@ -72,6 +72,24 @@ final class CiConfigSchema {
 
   static final String CHECKOUT_SHA = "sha";
 
+  /**
+   * Whether an event that does not carry the checkout may still run — {@code optional: true},
+   * default {@code false}.
+   *
+   * <p>Without it, a declared {@code checkout:} whose paths resolve to nothing costs that file its
+   * run, which is right for a push pipeline: the whole subject of the run is the commit that was
+   * pushed, and there is nothing truthful to record without it. It is <b>wrong for a pipeline whose
+   * event grew the coordinate</b>. A release pipeline anchored at the tag reads {@code commitSha},
+   * a field {@code SCMRelease} did not always carry, and every event published before it — a replay,
+   * an older publisher, a rolled-back one — carries no such key at all. Refusing those would turn a
+   * strictly additive event change into releases that silently never build.
+   *
+   * <p>So {@code optional: true} says: build the event's commit when the event names one, and
+   * otherwise build the head of {@code main}, which is exactly what a file with no {@code checkout:}
+   * does. It is per file and opt-in, so the push pipelines' guarantee is unchanged.
+   */
+  static final String CHECKOUT_OPTIONAL = "optional";
+
   /** The per-step branch filter — legal in a pipeline file, an error in a trigger file. */
   static final String BRANCHES_KEY = "branches";
 

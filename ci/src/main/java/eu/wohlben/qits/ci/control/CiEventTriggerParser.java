@@ -129,7 +129,10 @@ public class CiEventTriggerParser {
 
   /** The whole of a checkout declaration. Anything else in that mapping is an error. */
   private static final Set<String> CHECKOUT_KEYS =
-      Set.of(CiConfigSchema.CHECKOUT_BRANCH, CiConfigSchema.CHECKOUT_SHA);
+      Set.of(
+          CiConfigSchema.CHECKOUT_BRANCH,
+          CiConfigSchema.CHECKOUT_SHA,
+          CiConfigSchema.CHECKOUT_OPTIONAL);
 
   /**
    * What a payload dot-path may spell — one rule for {@code when:}'s keys and {@code checkout:}'s
@@ -234,19 +237,33 @@ public class CiEventTriggerParser {
 
   /**
    * Where a run of this trigger checks out — {@code checkout: { branch: <path>, sha: <path> }},
-   * both dot-paths into the payload, both mandatory. Null (the key absent) is today's behavior
-   * byte-for-byte: the run builds the head of {@code main}.
+   * both dot-paths into the payload, both mandatory, plus an optional {@code optional: true}. Null
+   * (the key absent) is today's behavior byte-for-byte: the run builds the head of {@code main}.
    *
-   * <p><b>Both keys, not one.</b> The run row's branch is load-bearing everywhere (the daemon's
-   * clone is {@code --branch $QITS_CI_BRANCH} + checkout {@code $QITS_CI_SHA}, the announcement
-   * carries it, the queue collapse keys on it), and a sha with no branch whose history holds it is
-   * not something the daemon can fetch. So an event with no branch in its payload —
-   * {@code SCMPublishTag} — cannot use {@code checkout:} yet; its pipelines keep the script-level
-   * tag-fetch dance. Loosening later is additive; a fallback shipped now would be behavior we must
-   * keep.
+   * <p><b>Both paths, not one.</b> The run row's ref is load-bearing everywhere (the daemon's clone
+   * is {@code --branch $QITS_CI_BRANCH} + checkout {@code $QITS_CI_SHA}, the announcement carries
+   * it, the queue collapse keys on it), and a sha with no ref whose history holds it is not
+   * something the daemon can fetch. So an event with no ref in its payload — {@code SCMPublishTag}
+   * — cannot use {@code checkout:}; its pipelines keep the script-level tag-fetch dance.
    *
-   * <p>Strict in every direction, on this file's standing reason: a checkout that silently parsed
-   * to nothing would build main's head while claiming the event's commit.
+   * <p><b>{@code branch} is a path to a REF NAME, and a tag is one.</b> The word is the run row's
+   * ("branch" is what a run has always called its ref), not a claim about what the value may be:
+   * {@code git clone --branch} resolves a tag name as readily as a head, so {@code checkout: {
+   * branch: version, sha: commitSha }} over an {@code SCMRelease} anchors the run at the released
+   * tag and its commit. That took no engine knowledge of tags and must not grow any — the whole
+   * mechanism is that a ref name is a ref name.
+   *
+   * <p><b>{@code optional: true} is the one loosening, and it is opt-in per file.</b> Without it, a
+   * payload the paths do not resolve in costs this file its run, which is the right answer for a
+   * push pipeline whose entire subject is the pushed commit. A pipeline whose event GREW its
+   * coordinate needs the other answer: an {@code SCMRelease} from before {@code commitSha} existed —
+   * a replay, an older publisher — resolves {@code version} and not {@code commitSha}, and refusing
+   * it would turn a strictly additive field into releases that silently never build. With the flag,
+   * such an event is built at {@code main}'s head, which is precisely what this file did before it
+   * declared a checkout at all. Default {@code false}, so nothing that does not ask for it moves.
+   *
+   * <p>Strict in every direction otherwise, on this file's standing reason: a checkout that silently
+   * parsed to nothing would build main's head while claiming the event's commit.
    */
   private static CiEventTrigger.Checkout parseCheckout(Object raw, String configPath) {
     if (raw == null) {
@@ -265,12 +282,31 @@ public class CiEventTriggerParser {
             configPath
                 + ": 'checkout' declares an unknown key '"
                 + key
-                + "' — it is exactly { branch, sha }");
+                + "' — it is exactly { branch, sha, optional }");
       }
     }
     return new CiEventTrigger.Checkout(
         requireCheckoutPath(map.get(CiConfigSchema.CHECKOUT_BRANCH), configPath, "branch"),
-        requireCheckoutPath(map.get(CiConfigSchema.CHECKOUT_SHA), configPath, "sha"));
+        requireCheckoutPath(map.get(CiConfigSchema.CHECKOUT_SHA), configPath, "sha"),
+        parseCheckoutOptional(map.get(CiConfigSchema.CHECKOUT_OPTIONAL), configPath));
+  }
+
+  /**
+   * {@code optional: true} is the whole of what the key may say — absent is {@code false}, and
+   * anything that is not a YAML boolean is an error rather than a guess, exactly as {@code gating:}
+   * is. The two failures either way are silent ones: a value that parsed to true by accident would
+   * let a release pipeline build main's head believing it built a tag, and one that parsed to false
+   * by accident would lose the runs this flag exists to keep.
+   */
+  private static boolean parseCheckoutOptional(Object raw, String configPath) {
+    if (raw == null) {
+      return false;
+    }
+    if (raw instanceof Boolean optional) {
+      return optional;
+    }
+    throw new CiConfigException(
+        configPath + ": checkout.optional must be true or false, got: " + raw);
   }
 
   private static String requireCheckoutPath(Object value, String configPath, String member) {

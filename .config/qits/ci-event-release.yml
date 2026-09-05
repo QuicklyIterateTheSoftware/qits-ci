@@ -43,13 +43,39 @@
 # What a redeploy does interrupt is any other build still RUNNING, which is the ordinary reason this
 # repository is deployed with the queue quiet.
 #
-# THERE IS DELIBERATELY NO `checkout:` HERE, AND THAT IS LOAD-BEARING NOW RATHER THAN INCIDENTAL.
-# The event's `branch` is the release request's BACKING BRANCH (`release/<id>`), and qits-projects
-# deletes it — along with the request's source branches — in the same operation that creates the tag.
-# So by the time this pipeline runs, the branch the event names does not exist. A trigger with no
-# `checkout:` is recorded at `main` and the step container clones `main`; the tag fetch below is what
-# supplies the released tree. Adding `checkout: { branch: branch, ... }` here would clone a deleted
-# ref and fail every release — the version, never the branch, is what this file builds from.
+# THE CHECKOUT IS THE TAG, AND FOR A LONG TIME THERE COULD NOT BE ONE. This file used to carry a
+# warning that it must declare no `checkout:`, and the warning was right about its reason and wrong
+# about its conclusion. The reason: the event's `branch` is the release request's BACKING BRANCH
+# (`release/<id>`), and qits-projects deletes it — along with the request's source branches — in the
+# same operation that creates the tag, so `checkout: { branch: branch, ... }` would clone a ref that
+# no longer exists and fail every release. The version, never the branch, is what this file builds
+# from. What followed from that was a trigger with no checkout at all: the run was recorded at `main`,
+# the step container cloned `main`, and the tag fetch below supplied the released tree — so every
+# release run of every repository on the platform displayed as `main@<head>`, a run recorded against
+# a commit it did not build, while the thing it actually built was named only inside a step script.
+#
+# WHAT CHANGED IS THE EVENT, NOT THE ENGINE. `SCMRelease` now carries `commitSha` — the commit the tag
+# points at, which qits-projects knew all along and did not say. With it the event finally names a
+# checkoutable pair, and it is spelled below as the ordinary two dot-paths every other `checkout:` is:
+#
+#   branch: version    -> the tag's own name. `branch` is what the run row calls its REF, and a tag is
+#                         a ref: the daemon's clone is `git clone --branch "$QITS_CI_BRANCH"`, which
+#                         resolves a tag exactly as it resolves a head (measured against this
+#                         platform's git host, which advertises tags over smart-HTTP). qits-ci learned
+#                         nothing about tags to make this work, and must not — a ref name is a ref
+#                         name, and any event carrying one plus a sha can do the same.
+#   sha: commitSha     -> what `git checkout --detach` then lands on, which for an annotated tag is
+#                         the peeled commit either way.
+#
+# `optional: true` IS THE TRANSITION, AND IT IS NOT DECORATION. `commitSha` is additive, so an
+# `SCMRelease` published before it existed — a replay out of the durable log, an older publisher, a
+# rolled-back qits-projects — carries no such key. Without this flag, a declared `checkout:` whose
+# paths resolve to nothing costs the file its run, which is the right answer for a push pipeline and
+# a catastrophic one here: a release would be tagged and its image would silently never be published.
+# With it, such an event is built the old way — recorded at `main`'s head, with the tag fetch below
+# supplying the tree — which is byte-for-byte what this file did before this paragraph existed. That
+# is also why the fetch below STAYS: it is the whole of the fallback path, and a harmless no-op on the
+# anchored one.
 #
 # THIS FILE PREDATES ITS PUBLISHER, and it landed first on purpose: a trigger file must be in place
 # before the event it selects exists, or the first release is lost and looks like a train that
@@ -59,6 +85,10 @@
 event: SCMRelease
 when:
   - repository: { exact: qits-ci-service }
+checkout:
+  branch: version       # the tag's name — a ref the daemon's `clone --branch` resolves
+  sha: commitSha        # what it points at; absent on any release published before the field existed
+  optional: true        # ...and then this run is main's head, exactly as it was before the checkout
 artifacts:
   - { type: docker, name: qits/qits-ci }
   - { type: docs, name: "@apidocs/qits-ci" }
@@ -88,19 +118,24 @@ steps:
       esac
       echo "releasing qits/qits-ci:$version"
 
-      # THE TAG IS THE CHECKOUT TARGET, AND IT IS THE ONLY REF THIS PIPELINE MAY TRUST. An
-      # event-triggered run is cloned at the head of main; the released commit is NOT on main at this
-      # moment — the release flow tags the request's backing branch, deletes that branch, deploys, and
-      # finalizes main afterwards — and the branch the event names is already gone. So the clone is a
-      # way to have a working git repository and nothing more, and everything about WHAT is built
-      # comes from this fetch. The clone is shallow and carries no tags, hence the explicit refspec;
-      # the URL rather than `origin` because every address a step needs arrives as environment.
-      # `checkout --detach` peels the annotated tag to its commit — and it is what makes the submodule
-      # fetches below land on the gitlinks the release recorded rather than on main's.
+      # THE TAG IS THE CHECKOUT TARGET, AND THESE TWO LINES ARE NOW THE FALLBACK RATHER THAN THE
+      # MECHANISM. With `checkout:` declared above, the daemon already cloned `--branch <version>` and
+      # detached at `commitSha`, so this fetch finds the tag present and answers "up to date" and the
+      # checkout is where HEAD already is: a measured no-op, two subsecond git invocations.
       #
-      # It was already written this way for a smaller reason (a busy main must not make this pipeline
-      # ship a different tree than the one that was released), which is why the new flow needed no
-      # change here. Do not "simplify" it to build the checkout the run was recorded at.
+      # THEY STAY BECAUSE THE ANCHOR IS NOT GUARANTEED. An `SCMRelease` carrying no `commitSha` — a
+      # replay, an older publisher — takes the recipe's `optional: true` arm, and then the run really
+      # is cloned at the head of main and everything about WHAT is built comes from right here. The
+      # released commit is NOT on main at this moment (the flow tags the backing branch, deletes it,
+      # deploys, and finalizes main afterwards) and the branch the event names is already gone, so
+      # without this the fallback would build the wrong tree — the failure this file spent its whole
+      # life avoiding. Removing them is a change to make when no untagged release event can arrive
+      # any more, not before.
+      #
+      # The clone may carry no tags, hence the explicit refspec; the URL rather than `origin` because
+      # every address a step needs arrives as environment. `checkout --detach` peels the annotated tag
+      # to its commit — and it is what makes the submodule fetches below land on the gitlinks the
+      # release recorded rather than on main's.
       git fetch "$QITS_CI_REPOSITORY_URL" "refs/tags/$version:refs/tags/$version"
       git checkout --detach "$version"
 

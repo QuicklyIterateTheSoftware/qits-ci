@@ -568,30 +568,46 @@ when:
   - repoId: { exact: qits-githost }
     suppressCi: { exact: "false" }   # -o qits.no-ci pushes stay dark; the engine adds no flag
 checkout:
-  branch: branch                     # payload dot-path — the run's branch
+  branch: branch                     # payload dot-path — the run's ref
   sha: sha                           # payload dot-path — the commit the run checks out
 steps:
   - image: qits/build-images/maven-base:latest
     script: ./mvnw -B -ntp verify
 ```
 
-- **Both keys are mandatory.** The run row's branch is load-bearing everywhere (the step daemon
+- **Both paths are mandatory.** The run row's ref is load-bearing everywhere (the step daemon
   clones `--branch $QITS_CI_BRANCH` and checks out `$QITS_CI_SHA`, `BuildSuccessful` carries the
-  pair, the queue collapse keys on it), so an event with no branch in its payload —
+  pair, the queue collapse keys on it), so an event with no ref in its payload —
   `SCMPublishTag` — cannot use `checkout:`; tag pipelines keep their script-level
   `git fetch refs/tags/…` dance.
+- **`branch:` resolves to a ref name, and a tag is one.** The key is named for the run row's column,
+  not for what the value may be. `checkout: { branch: version, sha: commitSha }` over an
+  `SCMRelease` anchors a run at the released tag — see "The release pipeline" — because
+  `clone --branch` takes a tag and `checkout --detach` takes the sha beside it. The engine holds no
+  concept of a tag and should not grow one.
+- **`optional: true` (default `false`) makes a missing coordinate a fallback rather than a refusal.**
+  Without it the bullet below applies and the file loses its run, which is right for a push pipeline
+  whose entire subject is the pushed commit. With it, an event that carries neither value is built
+  at `main`'s head — exactly what the file did before it declared a checkout — logged at INFO. It
+  exists for the case where an event *grew* its coordinate: `SCMRelease` did not always carry
+  `commitSha`, and a replay of an older one must not turn a strictly additive field into releases
+  that silently never build. Garbage is still refused; this arm is about **absence**.
 - **Decide at main, build at the event's commit.** Discovery, parsing and `when:` still read
   `main`'s head — a branch cannot change its own event pipeline until merged. Per-commit pipeline
   self-description is the one thing only `ci-post-receive.yml` gives, since it reads config at the
   pushed sha; no repository takes that trade any more.
 - **A payload the paths do not resolve in is one WARN and no run** — there is no truthful
-  (branch, sha) pair to record — and only that file's: the repository's other triggers still
-  evaluate. Resolved values are validated as identifiers before they reach a row, a clone URL or an
-  argv; garbage is refused the same way.
-- **A burst collapses per branch.** Queued runs of the same file, event name and branch are
+  (ref, sha) pair to record — and only that file's: the repository's other triggers still
+  evaluate. Unless the file says `optional: true`, above. Resolved values are validated as
+  identifiers before they reach a row, a clone URL or an argv; garbage is refused the same way, and
+  `optional:` does not soften that — a value that is *there* and hostile is a refusal, never a
+  fallback.
+- **A burst collapses per ref.** Queued runs of the same file, event name and ref are
   superseded by the newest accepted one (`DEDUPED`, exactly the push path's per-branch collapse);
   a run already `RUNNING` keeps running. Runs of triggers *without* `checkout:` are never
-  branch-collapsed — their "main" is a convention shared by distinct events.
+  collapsed this way — their "main" is a convention shared by distinct events — **and a run that
+  took the `optional:` fallback counts as one of those**, because it is one: it is accepted with the
+  checkout stripped, so nothing downstream has to remember the difference.
 - **Not available in platform pipelines** (`ci-platform-event-*.yml`): a platform run's head comes
   from the candidate pass, and a checkout there would build an arbitrary sha of a repository a
   third repository's file named. Declared anyway, it is one WARN per event and no run.
@@ -771,16 +787,22 @@ and it declares the artifacts it publishes.
 
 > **Build the tag, never the event's branch.** The event's `branch` is the release request's backing
 > branch, and that branch is deleted in the same operation that creates the tag, so it does not exist
-> by the time this pipeline runs. A release pipeline therefore declares **no `checkout:`** — its run
-> is recorded at `main` and clones it, which is what a trigger with no `checkout:` does by
-> construction — and its first step fetches `refs/tags/$version` and checks it out detached. The
-> version, not the branch, is what every coordinate is derived from.
+> by the time this pipeline runs. The version, not the branch, is what every coordinate is derived
+> from — and since `SCMRelease` grew **`commitSha`**, the version is something `checkout:` can point
+> at: `{ branch: version, sha: commitSha }` anchors the run at the tag's own ref and the commit it
+> points to. Before that field existed a release pipeline could declare no `checkout:` at all; its
+> run was recorded at `main`, and every release run on the platform displayed as `main@<head>` while
+> a step script went and found the released tree.
 
 ```yaml
 # .config/qits/ci-event-release.yml
 event: SCMRelease
 when:
   - repository: { exact: qits-spa-ui-components }   # its OWN id, exact — see the loop warning
+checkout:
+  branch: version        # the tag's name — a ref, which `clone --branch` resolves like any other
+  sha: commitSha         # what it points at
+  optional: true         # a release published before commitSha existed still builds, at main's head
 artifacts:
   - { type: npm, name: "@qits/ui-components" }
   - { type: maven, name: "eu.wohlben.qits:qits-eventstream" }
@@ -788,16 +810,27 @@ artifacts:
 steps:
   - image: qits/build-images/node-base:latest
     script: |
+      # Belt for the optional arm: a no-op when the run is already anchored at the tag, and the
+      # whole of what supplies the released tree when it is not.
       v="$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -r .version)"
       git fetch origin "refs/tags/$v:refs/tags/$v"
       git checkout --detach "$v"
       npm ci && npm publish --tag latest
 ```
 
-**Checking out the released tag needs no platform change.** The two `git` lines above are measured
-working inside a step container: the daemon's clone has the remote, a fetch of one tag refspec is
-cheap, and `checkout --detach` lands on the peeled commit even for an annotated tag. qits-ci's
-triggering surface is unchanged — a tag push is not a CI trigger and deliberately never became one.
+**A tag is a ref, and that is the whole of the mechanism.** `checkout.branch` is a path to a *ref
+name* — "branch" is what the run row has always called its ref — so pointing it at `version` needs no
+tag knowledge anywhere in qits-ci: the daemon clones `--depth 50 --branch "$QITS_CI_BRANCH"`, which
+git resolves against tags as readily as against heads (measured against the platform git host, which
+advertises tags over smart-HTTP), and `git checkout --detach "$QITS_CI_SHA"` lands on the commit the
+event named. Any event carrying a ref name plus a sha can do the same. qits-ci's triggering surface
+is unchanged — a tag push is still not a CI trigger and deliberately never became one.
+
+**Keep the two `git` lines.** They are measured working inside a step container and they cost two
+subsecond invocations when the run is already at the tag (the fetch answers "up to date", the
+checkout is where HEAD is). What they buy is the `optional: true` arm actually working: a release
+event without `commitSha` builds `main`, and `main` does not hold the released commit at this moment
+— the flow tags the backing branch, deletes it, deploys, and finalizes `main` afterwards.
 
 `artifacts:` is a **non-empty list of mappings**, each exactly `{type, name}`:
 

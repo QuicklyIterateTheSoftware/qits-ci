@@ -31,7 +31,17 @@ import org.junit.jupiter.api.Test;
  * flow's rearchitecture puts the release request — its sources, its backing branch, its tag — in
  * qits-projects, and the announcement belongs to whoever creates the tag. The event's shape did not
  * move with it. Same signature, same seven components, same five payload fields, so the transcription
- * below is unchanged and every consuming line in this service is unchanged with it.
+ * below was unchanged and every consuming line in this service was unchanged with it.
+ *
+ * <h2>The one field that HAS been added since, and why this file is where you find out</h2>
+ *
+ * <p><b>{@code commitSha}</b> — what the tag points at. It is the standing instruction below being
+ * carried out for the first time: qits-projects grew the component, so this transcription grew it
+ * in the same campaign, and this repository's own {@code .config/qits/ci-event-release.yml} spends
+ * it on a {@code checkout:} so a release run is anchored at the released tag instead of at {@code
+ * main}. Strictly additive — the five original fields keep their names, their types and their order,
+ * and the new one is omitted from the payload when it is absent — so nothing that reads the old
+ * shape had to change, and the pipeline that reads the new one has a fallback for the old.
  *
  * <p><b>That nothing had to change is the finding, and it is a property of how this consumer is
  * written rather than luck.</b> Nothing here keys on the producer: the durable seam subscribes by
@@ -108,6 +118,7 @@ public class ScmReleaseContractTest {
       String repositoryName,
       String branch,
       String version,
+      String commitSha,
       Instant occurredAt)
       implements QitsEvent {}
 
@@ -123,6 +134,12 @@ public class ScmReleaseContractTest {
   /** The same, with the branch stated — for the two cases that are about the branch. */
   static SCMRelease release(
       String repository, String repositoryName, String version, String branch) {
+    return release(repository, repositoryName, version, branch, RELEASED_SHA);
+  }
+
+  /** The same, with the commit stated — for the cases that are about the tag's own commit. */
+  static SCMRelease release(
+      String repository, String repositoryName, String version, String branch, String commitSha) {
     return new SCMRelease(
         UUID.randomUUID(),
         "p-1",
@@ -130,8 +147,15 @@ public class ScmReleaseContractTest {
         repositoryName,
         branch,
         version,
+        commitSha,
         Instant.parse("2026-08-12T15:34:38Z"));
   }
+
+  /**
+   * What the tag points at: the version-bump commit qits-projects made on the backing branch, which
+   * is the coordinate the release pipeline's {@code checkout:} anchors on.
+   */
+  static final String RELEASED_SHA = "71663ccdceb65ce46f4cf44c8cb3a016de5ff6af";
 
   /**
    * A release request's backing branch: {@code release/<requestId>}. Written by the git host's merge
@@ -205,6 +229,69 @@ public class ScmReleaseContractTest {
           fromMain.get(field),
           fromBacking.get(field),
           field + " differs with the branch, so this service is not indifferent to it after all");
+    }
+  }
+
+  /**
+   * <b>The sixth field, and the one this repository's release pipeline is now anchored on.</b>
+   *
+   * <p>{@code commitSha} is what the tag points at — the version-bump commit qits-projects made on
+   * the backing branch. Until it existed, an {@code SCMRelease} was the one release statement on the
+   * platform that could not be checked out: {@code branch} names a ref the tagging operation
+   * deletes, and {@code version} names a tag and not a commit. So {@code ci-event-release.yml} had
+   * to declare no {@code checkout:}, be recorded at {@code main}, and go fetch {@code
+   * refs/tags/$version} inside its own step — every release run displaying as {@code main@<head>},
+   * a run recorded against a commit it did not build.
+   *
+   * <p>With this field the recipe declares {@code checkout: { branch: version, sha: commitSha }} and
+   * the trigger engine resolves both out of the payload. The two names below are therefore <b>dot
+   * paths in a committed file</b>, exactly as {@code ReleaseJoin}'s three field names are: a rename
+   * over there is a release pipeline that stops anchoring, so it is asserted here beside them.
+   */
+  @Test
+  public void theTagAnchorsTheReleaseRecipeResolvesAreInTheCanonicalPayload() throws Exception {
+    JsonNode payload =
+        MAPPER.readTree(canonicalPayload("qits-ci", "qits-ci", "2026.812.153438"));
+
+    assertTrue(payload.has("version"), "the recipe's checkout.branch path resolves nothing");
+    assertEquals("2026.812.153438", payload.get("version").asText(), "the tag's own name");
+    assertTrue(payload.has("commitSha"), "the recipe's checkout.sha path resolves nothing");
+    assertEquals(RELEASED_SHA, payload.get("commitSha").asText(), "what the tag points at");
+  }
+
+  /**
+   * <b>The compatibility arm, at the wire.</b> The field is additive, so a release published before
+   * it existed — a replay out of the durable log, an older publisher, a rolled-back one — carries no
+   * {@code commitSha} KEY at all rather than a null: {@code CanonicalJson} serializes with {@code
+   * NON_NULL} inclusion. That absence is precisely what {@code ci-event-release.yml}'s {@code
+   * checkout.optional: true} is written against, and the engine's fallback is pinned in {@code
+   * CiEventCheckoutTest}; this is the same claim at the other end, that such a payload is otherwise
+   * byte-identical to today's and every field the join reads is untouched.
+   */
+  @Test
+  public void aReleaseFromBeforeTheCommitShaCarriesNoSuchKeyAndIsOtherwiseIdentical()
+      throws Exception {
+    JsonNode withSha =
+        MAPPER.readTree(canonicalPayload("qits-ci", "qits-ci", "2026.812.153438"));
+    JsonNode without =
+        MAPPER.readTree(
+            CanonicalJson.payload(
+                release("qits-ci", "qits-ci", "2026.812.153438", BACKING_BRANCH, null)));
+
+    assertFalse(
+        without.has("commitSha"),
+        "NON_NULL: an absent commit is an absent key, which is what the optional checkout resolves"
+            + " to nothing against — a null would resolve and then fail validation");
+    for (String field :
+        List.of(
+            ScmReleaseListener.REPOSITORY_FIELD,
+            ScmReleaseListener.REPOSITORY_NAME_FIELD,
+            ScmReleaseListener.VERSION_FIELD,
+            "branch")) {
+      assertEquals(
+          withSha.get(field),
+          without.get(field),
+          field + " moved with commitSha, so the addition was not additive after all");
     }
   }
 

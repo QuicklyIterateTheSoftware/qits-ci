@@ -33,7 +33,16 @@ public final class CiIdentifiers {
   /** A hex object id (abbreviated ids are accepted; git resolves them). */
   private static final String SHA = "[0-9a-f]{7,64}";
 
-  /** Conservative subset of valid ref names — enough for real branches, hostile to nothing else. */
+  /**
+   * Conservative subset of valid ref names — enough for real refs, hostile to nothing else.
+   *
+   * <p><b>Refs, not only branches.</b> The name is the run row's column and the historical use, but
+   * the value is whatever a run's {@code --branch} argument may be, and a release pipeline anchored
+   * with {@code checkout: { branch: version, … }} passes a <b>tag</b> through here — a calver like
+   * {@code 2026.905.60215}, which this pattern admits the same way it admits {@code v1.2.3}. That is
+   * not a widening: the charset already covered it, because a tag name and a branch name are the
+   * same grammar to git. Nothing here needs to tell them apart, and nothing here should try.
+   */
   private static final String BRANCH = "[A-Za-z0-9._][A-Za-z0-9._/-]{0,254}";
 
   /**

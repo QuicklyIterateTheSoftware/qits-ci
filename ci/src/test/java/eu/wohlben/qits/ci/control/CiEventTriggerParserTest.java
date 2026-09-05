@@ -615,10 +615,96 @@ public class CiEventTriggerParserTest {
             """);
     assertEquals("branch", withCheckout.checkout().branchPath());
     assertEquals("sha", withCheckout.checkout().shaPath());
+    assertFalse(withCheckout.checkout().optional(), "a checkout is mandatory unless it says so");
 
     CiEventTrigger without =
         parser.parse(PATH, "event: X\nsteps:\n  - image: alpine:3\n    script: \"true\"\n");
     assertEquals(null, without.checkout(), "absent checkout is today's main-head behavior");
+  }
+
+  /**
+   * <b>The release recipe's shape, parsed.</b> {@code branch: version} points at a TAG name — the
+   * key is named for the run row's ref column, not for what the value may be — and {@code optional:
+   * true} is what keeps a release event from before {@code commitSha} existed from costing the
+   * pipeline its run. Both are ordinary members of the grammar; nothing here knows what a tag is.
+   */
+  @Test
+  public void aCheckoutMayNameATagAndMayDeclareItselfOptional() {
+    CiEventTrigger trigger =
+        parser.parse(
+            PATH,
+            """
+            event: SCMRelease
+            when:
+              - repository: { exact: qits-ci-service }
+            checkout:
+              branch: version
+              sha: commitSha
+              optional: true
+            steps:
+              - image: alpine:3
+                script: "true"
+            """);
+    assertEquals("version", trigger.checkout().branchPath());
+    assertEquals("commitSha", trigger.checkout().shaPath());
+    assertTrue(trigger.checkout().optional());
+  }
+
+  /**
+   * {@code optional} is a YAML boolean or an error, {@code gating:}'s rule and for the same reason:
+   * both ways of guessing are silent. A stray {@code "true"} that parsed as false would lose exactly
+   * the runs the key exists to keep.
+   */
+  @Test
+  public void aNonBooleanCheckoutOptionalIsAParseErrorNamingTheFile() {
+    CiConfigException refused =
+        assertThrows(
+            CiConfigException.class,
+            () ->
+                parser.parse(
+                    PATH,
+                    "event: X\ncheckout:\n  branch: b\n  sha: s\n  optional: yes please\n"
+                        + "steps:\n  - image: alpine:3\n    script: \"true\"\n"));
+    assertTrue(refused.getMessage().contains(PATH), refused.getMessage());
+    assertTrue(refused.getMessage().contains("checkout.optional"), refused.getMessage());
+  }
+
+  /**
+   * A trigger accepted on the compatibility arm is handed on as a checkout-LESS trigger, which is
+   * what {@link CiEventTrigger#withoutCheckout()} is for: every reader keyed on {@code checkout} —
+   * the per-ref burst collapse above all — then gets the answer that describes the run rather than
+   * the one that describes the file.
+   */
+  @Test
+  public void aTriggerStrippedOfItsCheckoutKeepsEverythingElse() {
+    CiEventTrigger declared =
+        parser.parse(
+            PATH,
+            """
+            event: SCMRelease
+            checkout:
+              branch: version
+              sha: commitSha
+              optional: true
+            artifacts:
+              - { type: docker, name: qits/qits-ci }
+            steps:
+              - image: alpine:3
+                script: "true"
+            """);
+    CiEventTrigger stripped = declared.withoutCheckout();
+
+    assertEquals(null, stripped.checkout());
+    assertEquals(declared.eventName(), stripped.eventName());
+    assertEquals(declared.configPath(), stripped.configPath());
+    assertEquals(declared.artifacts(), stripped.artifacts());
+    assertEquals(declared.gating(), stripped.gating());
+    assertEquals(
+        declared.pipeline().steps().size(),
+        stripped.pipeline().steps().size(),
+        "the pipeline is the same pipeline; only where it runs changed");
+    assertEquals(
+        stripped, stripped.withoutCheckout(), "idempotent — a checkout-less trigger is itself");
   }
 
   @Test
@@ -631,6 +717,7 @@ public class CiEventTriggerParserTest {
           "checkout:\n  branch: branch\n",
           "checkout:\n  sha: sha\n",
           "checkout:\n  branch: branch\n  sha: sha\n  ref: also\n",
+          "checkout:\n  branch: branch\n  sha: sha\n  optionl: true\n",
           "checkout: branch\n",
           "checkout:\n  branch: branch\n  sha: [sha]\n",
           "checkout:\n  branch: branch\n  sha: \"payload[0]\"\n",

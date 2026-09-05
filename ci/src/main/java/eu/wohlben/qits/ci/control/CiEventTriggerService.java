@@ -607,16 +607,65 @@ public class CiEventTriggerService {
         continue;
       }
       // Absent checkout: today's behavior byte-for-byte — the run builds main's head. Declared,
-      // the branch and sha come out of the payload instead; the trigger DECIDED at main above.
+      // the ref and sha come out of the payload instead; the trigger DECIDED at main above.
       String branch = TRIGGER_BRANCH;
       String sha = lookup.headSha();
+      // The trigger AS THIS RUN IS ACCEPTED UNDER, which is the declared one except on the
+      // compatibility arm below — see there for why the difference has to be carried rather than
+      // merely logged.
+      CiEventTrigger accepted = trigger;
       if (trigger.checkout() != null) {
-        branch = checkoutField(payload, trigger.checkout().branchPath());
-        sha = checkoutField(payload, trigger.checkout().shaPath());
-        if (branch == null || sha == null) {
-          // One WARN and no run: there is no truthful (branch, sha) pair to record a row against,
-          // and a read failure is not a run. Per file — the repository's other triggers still
-          // evaluate.
+        String declaredBranch = checkoutField(payload, trigger.checkout().branchPath());
+        String declaredSha = checkoutField(payload, trigger.checkout().shaPath());
+        if (declaredBranch != null && declaredSha != null) {
+          // The payload is attacker-shaped (the untrusted-input doctrine): both values reach a
+          // clone URL and an argv, so they are validated HERE, inside the per-file containment —
+          // letting the refusal escape would trip the per-repo catch and mark the whole repository
+          // skipped. A ref name is what requireBranch checks, and a TAG name is a ref name: a
+          // release recipe pointing `branch` at the event's `version` passes this gate for the same
+          // reason `git clone --branch` takes a tag, and the engine needs to know nothing about tags
+          // for that to be true.
+          try {
+            CiIdentifiers.requireBranch(declaredBranch);
+            CiIdentifiers.requireSha(declaredSha);
+          } catch (RuntimeException refused) {
+            LOG.warnf(
+                "%s: %s checkout refused for event %s: %s",
+                repoId, file.path(), arrival.eventId(), refused.getMessage());
+            continue;
+          }
+          branch = declaredBranch;
+          sha = declaredSha;
+        } else if (trigger.checkout().optional()) {
+          // THE COMPATIBILITY ARM, and the whole reason `optional:` exists. The event does not carry
+          // the coordinate this file would rather build — an SCMRelease published before `commitSha`
+          // existed, a replay of one, an older publisher — so the run falls back to exactly what
+          // this file did before it declared a checkout at all: main's head, with the step script
+          // left to find the released tree itself. INFO rather than WARN: this is a supported shape
+          // of the event, not a fault, and it stops happening on its own.
+          //
+          // The trigger is handed on WITHOUT its checkout, which is the point and not bookkeeping.
+          // Everything downstream that asks "does this run follow the event's own ref?" must get the
+          // pre-checkout answer here, because that is the run this is — above all the per-ref burst
+          // collapse in CiRunService, which is correct for payload-resolved refs and WRONG for the
+          // "main" convention: two distinct release events falling back would share the ref and the
+          // older one would be deduped away, publishing no image for a version that really released.
+          // Rewriting the value is how that stays true of every such question, including ones added
+          // later, rather than of the one we remembered.
+          accepted = trigger.withoutCheckout();
+          LOG.infof(
+              "%s: %s declares an optional checkout { %s, %s } and event %s (%s) does not carry it"
+                  + " — the run is recorded at %s's head, as it was before the checkout",
+              repoId,
+              file.path(),
+              trigger.checkout().branchPath(),
+              trigger.checkout().shaPath(),
+              arrival.eventId(),
+              arrival.eventName(),
+              TRIGGER_BRANCH);
+        } else {
+          // One WARN and no run: there is no truthful (ref, sha) pair to record a row against, and
+          // a read failure is not a run. Per file — the repository's other triggers still evaluate.
           LOG.warnf(
               "%s: %s declares checkout { %s, %s } but event %s (%s) does not carry both — no run",
               repoId,
@@ -625,18 +674,6 @@ public class CiEventTriggerService {
               trigger.checkout().shaPath(),
               arrival.eventId(),
               arrival.eventName());
-          continue;
-        }
-        // The payload is attacker-shaped (the untrusted-input doctrine): both values reach a clone
-        // URL and an argv, so they are validated HERE, inside the per-file containment — letting
-        // the refusal escape would trip the per-repo catch and mark the whole repository skipped.
-        try {
-          CiIdentifiers.requireBranch(branch);
-          CiIdentifiers.requireSha(sha);
-        } catch (RuntimeException refused) {
-          LOG.warnf(
-              "%s: %s checkout refused for event %s: %s",
-              repoId, file.path(), arrival.eventId(), refused.getMessage());
           continue;
         }
       }
@@ -649,7 +686,7 @@ public class CiEventTriggerService {
                   repo,
                   branch,
                   sha,
-                  trigger,
+                  accepted,
                   arrival.eventId(),
                   arrival.eventName(),
                   arrival.occurredAt(),

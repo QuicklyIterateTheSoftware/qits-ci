@@ -19,7 +19,7 @@ import java.util.List;
  *
  * <p>{@code checkout} is null for every file that declares none — the run then builds the head of
  * {@code main}, as every event trigger always has. Declared, the run builds <b>the commit the
- * event names</b>: the two components are dot-paths into the payload, resolved per event.
+ * event names</b>: the two paths are dot-paths into the payload, resolved per event.
  *
  * <p>{@code gating} is {@code true} unless the file says {@code gating: false} — whether a red run
  * of this pipeline should stand in the way of releasing its commit. It rides the run row onto the
@@ -35,6 +35,45 @@ public record CiEventTrigger(
     boolean gating,
     Checkout checkout) {
 
-  /** Where a run of this trigger checks out: two payload dot-paths. Null = main's head. */
-  public record Checkout(String branchPath, String shaPath) {}
+  /**
+   * Where a run of this trigger checks out: two payload dot-paths. Null (the key absent) = main's
+   * head.
+   *
+   * <p><b>{@code branchPath} resolves to a REF NAME, not necessarily to a branch.</b> The value
+   * reaches the daemon as {@code git clone --branch}, which takes a tag exactly as happily as a
+   * head, and the sha beside it is what the subsequent {@code git checkout --detach} lands on. That
+   * is what lets a release pipeline anchor at {@code checkout: { branch: version, sha: commitSha }}
+   * — the tag's own name and the commit it points at — instead of being recorded at {@code main} and
+   * going to find the released tree inside its own step script. The engine learns nothing about tags
+   * to make this work and should not: a ref name is a ref name, and the column is called {@code
+   * branch} because that is what the run row has always called its ref.
+   *
+   * <p>{@code optional} is {@code false} unless the file says {@code optional: true}: whether an
+   * event that does not carry both values may still run, at main's head, rather than costing this
+   * file its run. See {@link CiConfigSchema#CHECKOUT_OPTIONAL} — it is the arm that keeps an
+   * additive event field additive.
+   */
+  public record Checkout(String branchPath, String shaPath, boolean optional) {}
+
+  /**
+   * This trigger as a run that did <b>not</b> follow the event's ref is accepted under — the
+   * declaration minus its {@code checkout}.
+   *
+   * <p>It exists for one caller: {@code CiEventTriggerService}'s optional-checkout fallback, where
+   * the event carries no coordinate and the run is recorded at {@code main}'s head. Such a run IS a
+   * checkout-less run, and handing on a trigger that still says otherwise would leave every reader
+   * downstream deciding from the declaration instead of from what happened — the per-ref burst
+   * collapse in {@code CiRunService} being the one that would then dedupe two distinct events
+   * sharing the {@code main} convention.
+   *
+   * <p>The row's {@code triggerConfig} still holds the file verbatim, so a restart reparses the
+   * declaration and this narrowing is not durable. That is correct rather than a gap: it is a fact
+   * about one acceptance, and acceptance is the only moment anything asks.
+   */
+  public CiEventTrigger withoutCheckout() {
+    return checkout == null
+        ? this
+        : new CiEventTrigger(
+            configPath, eventName, selection, pipeline, artifacts, gating, null);
+  }
 }

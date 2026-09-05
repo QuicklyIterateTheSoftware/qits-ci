@@ -50,8 +50,26 @@ public class CiEventCheckoutTest extends CiTestSupport {
           script: "true"
       """;
 
+  /**
+   * A release recipe's checkout, verbatim in shape: the anchor is the tag's own NAME and the commit
+   * it points at, and the pair is declared {@code optional} because the event has not always carried
+   * the second one. This is what {@code .config/qits/ci-event-release.yml} spells.
+   */
+  private static final String RELEASE_TRIGGER =
+      """
+      event: SCMRelease
+      checkout:
+        branch: version
+        sha: commitSha
+        optional: true
+      steps:
+        - image: alpine:3
+          script: "true"
+      """;
+
   private static final String HEAD = "a".repeat(40);
   private static final String PUSHED = "b".repeat(40);
+  private static final String RELEASED = "c0ffee1".repeat(5) + "abcde";
 
   @Inject CiEventTriggerService engine;
   @Inject CiRunService runService;
@@ -264,7 +282,123 @@ public class CiEventCheckoutTest extends CiTestSupport {
         "two distinct events are two runs, whatever branch convention they share: " + recorded);
   }
 
+  // --- the release anchor: a checkout whose ref is a TAG ---------------------------------------
+
+  /**
+   * <b>A release run is anchored at the tag, and the engine learns nothing about tags to do it.</b>
+   *
+   * <p>{@code checkout.branch} is a path to a REF NAME — the column is called branch because that is
+   * what a run row has always called its ref — so pointing it at the release event's {@code version}
+   * records the run at the tag and hands the daemon {@code clone --branch <tag>}, which git resolves
+   * exactly as it resolves a head. Everything the row, the clone env and the announcement carry
+   * follows from these two columns, which is why this is the assertion that matters: before it, a
+   * release run said {@code main@<head>} and the released tree was named only inside a step script.
+   */
+  @Test
+  public void aReleaseTriggerRecordsTheRunAtTheTagAndTheCommitItPointsAt() throws Exception {
+    fakeConfig.putTriggers(
+        repoId, "main", HEAD, new EventTriggerFile(CHECKOUT_PATH, RELEASE_TRIGGER));
+    String eventId = UUID.randomUUID().toString();
+    deliver(releaseEvent(eventId, "2026.905.60215", RELEASED));
+
+    List<CiRun> recorded = runService.runsFor(repoId);
+    assertEquals(1, recorded.size());
+    CiRun run = recorded.get(0);
+    assertEquals("2026.905.60215", run.branch, "a calver is a ref name and passes the ref gate");
+    assertEquals(RELEASED, run.commitSha);
+    assertEquals(CiRunStatus.SUCCESS, run.status);
+
+    assertEquals(1, announcer.announced().size());
+    assertEquals("2026.905.60215", announcer.announced().get(0).branch());
+    assertEquals(RELEASED, announcer.announced().get(0).commitSha());
+  }
+
+  /**
+   * <b>The compatibility arm, which is the whole reason {@code optional:} exists.</b>
+   *
+   * <p>{@code commitSha} is an additive field on {@code SCMRelease}: a release published before it
+   * existed — a replay out of the durable log, an older publisher, a rolled-back one — carries no
+   * such key. The default answer to an unresolvable checkout is to cost the file its run, which for
+   * a release pipeline means a tag that exists and an image that silently never gets published. With
+   * {@code optional: true} the run is recorded at {@code main}'s head instead, which is byte-for-byte
+   * what the recipe did before it declared a checkout at all — and its step script's own
+   * {@code git fetch refs/tags/$version} is what then supplies the released tree.
+   */
+  @Test
+  public void aReleaseCarryingNoCommitShaStillRunsAtMainsHead() throws Exception {
+    fakeConfig.putTriggers(
+        repoId, "main", HEAD, new EventTriggerFile(CHECKOUT_PATH, RELEASE_TRIGGER));
+    deliver(releaseEvent(UUID.randomUUID().toString(), "2026.905.60215", null));
+
+    List<CiRun> recorded = runService.runsFor(repoId);
+    assertEquals(1, recorded.size(), "an older release event must not cost the pipeline its run");
+    assertEquals("main", recorded.get(0).branch);
+    assertEquals(HEAD, recorded.get(0).commitSha);
+    assertEquals(CiRunStatus.SUCCESS, recorded.get(0).status);
+  }
+
+  /**
+   * <b>A fallback run IS a checkout-less run, and the per-ref collapse is where that has teeth.</b>
+   *
+   * <p>Two distinct releases that both fall back are both recorded at {@code main}, so a collapse
+   * keyed on the ref would dedupe one of them away — and a deduped release run is a version that was
+   * tagged and never built. The engine hands such a run on with its checkout stripped rather than
+   * merely logging the fallback, so this holds for every reader keyed on {@code checkout}, not only
+   * for the one we remembered. It is {@link #nonCheckoutEventRunsAreNeverBranchCollapsed}'s claim,
+   * asserted for the trigger that DECLARES a checkout and did not get to use it.
+   */
+  @Test
+  public void twoFallbackReleasesAreTwoRunsRatherThanACollapsedOne() throws Exception {
+    fakeConfig.putTriggers(
+        repoId, "main", HEAD, new EventTriggerFile(CHECKOUT_PATH, RELEASE_TRIGGER));
+    occupyTheWorker();
+
+    engine.evaluate(releaseEvent(UUID.randomUUID().toString(), "2026.905.60215", null));
+    engine.evaluate(releaseEvent(UUID.randomUUID().toString(), "2026.905.70000", null));
+    release.countDown();
+    runService.awaitIdle();
+    forgetLoadedEntities();
+
+    List<CiRun> recorded = runService.runsFor(repoId);
+    assertEquals(2, recorded.size());
+    assertTrue(
+        recorded.stream().noneMatch(run -> run.status == CiRunStatus.FAILED),
+        "a collapsed fallback is a released version whose image is never published: " + recorded);
+  }
+
+  /**
+   * {@code optional:} is about ABSENCE and softens no guard. A payload that carries a hostile value
+   * where the sha belongs is refused exactly as it is without the flag — the fallback would
+   * otherwise be a way to make a garbage payload build something rather than nothing.
+   */
+  @Test
+  public void anOptionalCheckoutStillRefusesAValueThatIsThereAndHostile() throws Exception {
+    fakeConfig.putTriggers(
+        repoId, "main", HEAD, new EventTriggerFile(CHECKOUT_PATH, RELEASE_TRIGGER));
+    CiEventTriggerService.Evaluation evaluation =
+        engine.evaluate(releaseEvent(UUID.randomUUID().toString(), "2026.905.60215", "$(x)"));
+    runService.awaitIdle();
+    forgetLoadedEntities();
+
+    assertEquals(List.of(), evaluation.runIds());
+    assertEquals(List.of(), runService.runsFor(repoId));
+  }
+
   // --- fixture ---------------------------------------------------------------------------------
+
+  /** One release event, with or without the commit its tag points at. */
+  private CiEventTriggerService.Arrival releaseEvent(String eventId, String version, String commitSha) {
+    String payload =
+        commitSha == null
+            ? "{\"repository\":\"r\",\"version\":\"" + version + "\"}"
+            : "{\"repository\":\"r\",\"version\":\""
+                + version
+                + "\",\"commitSha\":\""
+                + commitSha
+                + "\"}";
+    return new CiEventTriggerService.Arrival(
+        eventId, "SCMRelease", Instant.parse("2026-09-05T06:02:15Z"), payload);
+  }
 
   private static String push(String branch, String sha) {
     return "{\"branch\":\"" + branch + "\",\"sha\":\"" + sha + "\",\"suppressCi\":false}";

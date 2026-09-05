@@ -355,7 +355,9 @@ public class CiRunCancelAndRetryTest extends CiTestSupport {
                         "alpine:3", "./publish-userflows.sh", null, false, "", false, List.of()))),
             List.of(), // declares no artifact: a QA run announces a build and nothing more
             true,
-            new CiEventTrigger.Checkout("backingBranch", "mergedSha")),
+            // Not optional: a release REQUEST event that names no fold is a refusal, never a run at
+            // main's head — the fold is the entire subject of the gate.
+            new CiEventTrigger.Checkout("backingBranch", "mergedSha", false)),
         eventId,
         CiRunService.RELEASE_REQUEST_EVENT_NAME,
         Instant.parse("2026-09-03T09:07:06Z"),
