@@ -34,7 +34,7 @@
          and the mandatory -Dqits.variant=oauth|forwardauth|local auth profiles. -->
     <groupId>eu.wohlben.qits</groupId>
     <artifactId>qits-ci</artifactId>
-    <version>2026.905.10605</version>
+    <version>2026.905.64147</version>
     <packaging>pom</packaging>
     <name>qits-ci</name>
 
@@ -47,7 +47,7 @@
     </modules>
 
     <properties>
-        <qits.eventstream.version>2026.903.85121</qits.eventstream.version>
+        <qits.eventstream.version>2026.904.82646</qits.eventstream.version>
         <!-- qits-githost's event vocabulary: the SCM records a push announces. qits-ci consumes
              SCMPublishCommit and nothing else, but the jar is the whole vocabulary — it is a data
              module with one dependency (qits-eventstream) and no container.
@@ -74,8 +74,8 @@
              release run died on both jars at once with "Could not find artifact … 1.0.0-SNAPSHOT".
              A pin that only a warm cache and a developer's ~/.m2 can satisfy is a red release
              waiting for whoever next edits a file. Pin released calver, or the pin is a guess. -->
-        <qits.containers-client.version>2026.903.205602</qits.containers-client.version>
-        <qits.auth-core.version>2026.902.53026</qits.auth-core.version>
+        <qits.containers-client.version>2026.904.210416</qits.containers-client.version>
+        <qits.auth-core.version>2026.904.82648</qits.auth-core.version>
         <!-- The platform's datasource resilience, released out of libs/qits-integrations-quarkus
              together with the two above, which is why the strings match: qits-db-core carries
              PatientPgDriver — the pool opens its connections through it, and a request is HELD
@@ -83,21 +83,21 @@
              assertion that this service configured it. They move together, because the rule names
              the driver as a STRING: a driver that moved without the rule would pass a build it
              should fail. -->
-        <qits.db-core.version>2026.902.53026</qits.db-core.version>
-        <qits.arch-rules.version>2026.902.53026</qits.arch-rules.version>
+        <qits.db-core.version>2026.904.82648</qits.db-core.version>
+        <qits.arch-rules.version>2026.904.82648</qits.arch-rules.version>
         <!-- The user-story framework (test scope): TokenValidationBootstrapIT is written as a
              @UserStory, so a run of that IT also regenerates service/target/userstories/ — the
              story's documentation, network diagram included — OBSERVED rather than narrated, since
              this version is the one that dropped Interactions.happened. It carries its OWN version
              rather than riding the three above, because it is released out of libs/qits-userflows
              and not out of the qits-integrations-quarkus reactor. -->
-        <qits.userflows.version>2026.902.53027</qits.userflows.version>
+        <qits.userflows.version>2026.904.223009</qits.userflows.version>
         <!-- The recording service mocks the same IT boots against (the generic MockService plus
              idp.MockIdp), released out of libs/qits-integrations-quarkus like qits-auth-core,
              qits-db-core and qits-arch-rules above — so the same-string policy applies the day this
              repo consumes a newer reactor, and until then it names the release the mock idp
              actually shipped in. -->
-        <qits.service-mock.version>2026.902.53026</qits.service-mock.version>
+        <qits.service-mock.version>2026.904.82648</qits.service-mock.version>
         <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
