@@ -357,6 +357,31 @@ public class CiDaemonLauncher {
   List<String> dockerAuthHosts;
 
   /**
+   * The platform-wide kill switch for building through the platform-owned buildkitd, and the fleet
+   * half of a two-owner arrangement: qits-containers owns the builder container and injects {@code
+   * BUILDKIT_HOST} into socket-holding step containers; this switch is what an operator flips when
+   * the build plane must go back to the host docker NOW ({@code QITS_CI_BUILDKIT_ENABLED=false}).
+   *
+   * <p><b>Off is loud, not silent.</b> This service then sends {@code BUILDKIT_HOST} <em>empty</em>
+   * — the mirror pair's off value — and qits-containers defers to a present key, so a converted
+   * recipe's first {@code buildctl} fails naming its missing builder instead of quietly building
+   * through the socket it still holds. An unconverted recipe reads neither variable and is
+   * untouched, which is what makes the switch safe to flip mid-fleet.
+   */
+  @ConfigProperty(name = "qits.ci.buildkit.enabled")
+  boolean buildkitEnabled;
+
+  /**
+   * The registry as the PLATFORM BUILDER resolves it — what a converted recipe composes its {@code
+   * --output name=…,push=true} reference from, as {@code $QITS_BUILD_REGISTRY}. It is not {@code
+   * qits.artifacts.registry-host}: that one is the host daemon's view (a deployment fact of the
+   * socket path's kind), while this is an alias on the platform network, where buildkitd lives and
+   * pushes from.
+   */
+  @ConfigProperty(name = "qits.ci.buildkit.registry-host")
+  String buildkitRegistryHost;
+
+  /**
    * The credential a step pushes an image with: <b>this run's own</b>, commissioned at qits-idp when
    * the run reaches its first docker step and deleted when the run closes.
    *
@@ -1036,6 +1061,19 @@ public class CiDaemonLauncher {
       // the push an index the platform registry does not expect.
       env.put("DOCKER_BUILDKIT", "1");
       env.put("BUILDX_NO_DEFAULT_ATTESTATIONS", "1");
+      // The platform-builder pair, and the kill switch's whole reach. ON, the step composes a
+      // buildctl push ref from $QITS_BUILD_REGISTRY and $BUILDKIT_HOST arrives from
+      // qits-containers, which owns the builder and its address — this service deliberately does
+      // not spell an address it does not own (the docker-socket-path lesson). OFF, both keys are
+      // sent EMPTY, the mirror pair's off value, and the empty BUILDKIT_HOST is load-bearing:
+      // qits-containers fills the key in only when the caller left it absent, so empty is how this
+      // service says "do not". A converted recipe then fails loudly at its first buildctl call
+      // rather than silently building through the socket it still holds; an unconverted one reads
+      // neither variable and is untouched.
+      env.put("QITS_BUILD_REGISTRY", buildkitEnabled ? value(buildkitRegistryHost) : "");
+      if (!buildkitEnabled) {
+        env.put("BUILDKIT_HOST", "");
+      }
       // And this run's own push credential — the document, the directory the bootstrap writes it
       // into, and the pair itself for a BuildKit secret mount. Commissioned on the first docker step
       // and reused by every later one; absent whole on a deployment with no oidc client, where a
@@ -1179,6 +1217,15 @@ public class CiDaemonLauncher {
     }
     if (hosts.isEmpty()) {
       hosts.add(value(artifactsRegistryHost));
+    }
+    // buildctl reads the same document over its session, and it picks a login by hostname exactly
+    // as the docker CLI does — so the registry the platform builder pushes to is named too, or a
+    // converted recipe's push meets a Bearer challenge with no login to exchange.
+    if (buildkitEnabled) {
+      String buildRegistry = value(buildkitRegistryHost).trim();
+      if (!buildRegistry.isEmpty() && !hosts.contains(buildRegistry)) {
+        hosts.add(buildRegistry);
+      }
     }
     return hosts;
   }

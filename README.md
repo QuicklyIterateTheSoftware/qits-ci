@@ -376,6 +376,29 @@ The build and the push both happen in the *host's* daemon — the step's CLI is 
 registry address must resolve and be trusted **from the docker host**, not from this process. The
 step image supplies the docker CLI; the platform supplies the socket and the two coordinates.
 
+> **The platform builder is the migration off that whole arrangement**, and `docker: true` is its
+> declaration too (the wrapper's `qits-buildkit-plan.md` carries the plan; qits-workspace-daemon's
+> two pipeline files are the converted reference). A socket-holding step is additionally handed:
+>
+> - `$BUILDKIT_HOST` — the platform-owned buildkitd's address, injected by **qits-containers**
+>   (whose deployment fact it is), reachable because the step is on the platform network;
+> - `$QITS_BUILD_REGISTRY` — the registry **as the builder resolves it**, injected by this service
+>   (`qits.ci.buildkit.registry-host`), what a converted recipe composes its
+>   `buildctl … --output type=image,name=…,push=true` reference from. `$QITS_REGISTRY` stays the
+>   host daemon's view for the unconverted fleet.
+>
+> A converted recipe calls `buildctl` (ci-base and node-docker-base ship it), passes no
+> `--network host` (a `RUN` dials qits-net from the builder's own namespace, so in-network routes
+> like `$QITS_MAVEN_PROXY_URL` replace the edge vhosts), and hands its secrets in **file form** on
+> both sides. The committed `FROM` vhosts keep working: the builder's registry config rewrites them.
+>
+> **The kill switch is `qits.ci.buildkit.enabled`** (`QITS_CI_BUILDKIT_ENABLED=false`), shipped ON.
+> Off, both variables arrive **empty** — empty-never-absent, the mirror pair's shape — and the empty
+> `BUILDKIT_HOST` also suppresses qits-containers' injection, so a converted recipe fails loudly at
+> its first `buildctl` instead of silently building through the socket it still holds; an
+> unconverted recipe reads neither variable and is untouched. The socket mount itself stays until
+> the last recipe converts — removing it is the migration's end state, not its first move.
+
 **A registry that wants a login gets one, the credential is this run's own, and the step's script
 says nothing about either.** An in-network registry answers an anonymous push; one behind the edge
 answers it with a docker Bearer challenge, and the CLI then exchanges a *stored* username/password
