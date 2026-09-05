@@ -173,12 +173,15 @@ ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
 # nowhere else — not a layer, not the image history. That is why they are not build args: this image
 # is pullable, and a build arg is recorded where anyone who pulls it can read it.
 # `.qits-maven-settings.xml` reads the two variables as the `qits-maven-network` server.
+# The `RUN` reads the two mounted files itself: docker 26's BuildKit has no `env=` mount option.
 #
-# Absent secrets leave both variables unset, which is the state every build is in today and the
+# Absent secrets leave both variables empty, which is the state every build is in today and the
 # state a host-side `docker build` is in permanently: Maven sends credentials only when a repository
 # answers 401, and the registry does not yet.
-RUN --mount=type=secret,id=qits-client-id,env=QITS_MAVEN_AUTH_USR \
-    --mount=type=secret,id=qits-client-secret,env=QITS_MAVEN_AUTH_PSW \
+RUN --mount=type=secret,id=qits-client-id \
+    --mount=type=secret,id=qits-client-secret \
+    export QITS_MAVEN_AUTH_USR="$(cat /run/secrets/qits-client-id 2>/dev/null || true)"; \
+    export QITS_MAVEN_AUTH_PSW="$(cat /run/secrets/qits-client-secret 2>/dev/null || true)"; \
     d=service/src/main/webui/dist/qits-spa-ci/browser; \
     test -f "$d/index.html" || { \
       echo "No built client at $d." >&2; \
